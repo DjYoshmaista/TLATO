@@ -1,0 +1,463 @@
+# src/training/trainer.py
+"""
+Model Training Module
+
+Contains the core logic for training neural network models, including
+optimization, learning rate scheduling, optional pruning, checkpointing,
+and metrics tracking.
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.nn.utils import prune
+from tqdm import tqdm
+import pandas as pd
+from datetime import datetime
+import os
+import logging
+import numpy as np
+from pathlib import Path
+
+# Import project configuration and utilities
+from src.utils.config import TrainingConfig, DEFAULT_DEVICE, CHECKPOINT_DIR, LOG_DIR
+from src.utils.logger import setup_logger
+from src.utils.helpers import save_state, load_state # Use helper functions
+
+# Import required model and data loader classes (adjust as needed)
+from src.core.models import ZoneClassifier # Example model
+from src.data.loaders import EnhancedDataLoader # Example loader
+
+logger = logging.getLogger(__name__)
+
+class TrainingMetrics:
+    """
+    Handles recording and saving of training performance metrics.
+    """
+    def __init__(self, save_dir: Path = None):
+        """
+        Initializes the TrainingMetrics handler.
+
+        Args:
+            save_dir (Path, optional): Directory to save metrics files. Defaults to LOG_DIR.
+        """
+        self.metrics_data = [] # Store metrics as a list of dicts for efficiency
+        self.columns = [
+            'timestamp', 'epoch', 'batch', 'loss', 'lr',
+            'pruned_weights_count', 'batch_duration_sec', 'batch_size'
+        ]
+        self.save_dir = Path(save_dir or LOG_DIR)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"TrainingMetrics initialized. Metrics will be saved to: {self.save_dir}")
+
+    def record(self, epoch, batch, loss, lr, pruned_count, duration, batch_size):
+        """
+        Records metrics for a single training batch.
+
+        Args:
+            epoch (int): Current epoch number.
+            batch (int): Current batch index within the epoch.
+            loss (float): Loss value for the batch.
+            lr (float): Current learning rate.
+            pruned_count (int): Total number of pruned weights in the model.
+            duration (float): Duration of the batch processing in seconds.
+            batch_size (int): Number of samples in the batch.
+        """
+        # Ensure loss and lr are floats
+        loss_item = loss.item() if isinstance(loss, torch.Tensor) else float(loss)
+        lr_item = lr[0] if isinstance(lr, list) else float(lr) # Handle potential list from optimizer
+
+        new_row = {
+            'timestamp': datetime.now(),
+            'epoch': int(epoch),
+            'batch': int(batch),
+            'loss': loss_item,
+            'lr': lr_item,
+            'pruned_weights_count': int(pruned_count),
+            'batch_duration_sec': float(duration),
+            'batch_size': int(batch_size)
+        }
+        self.metrics_data.append(new_row)
+
+    def get_dataframe(self) -> pd.DataFrame:
+        """Converts recorded metrics to a pandas DataFrame."""
+        if not self.metrics_data:
+            return pd.DataFrame(columns=self.columns)
+        return pd.DataFrame(self.metrics_data, columns=self.columns)
+
+    def save(self, filename: str = None):
+        """
+        Saves the recorded metrics to a CSV file in the configured directory.
+
+        Args:
+            filename (str, optional): The base name for the metrics file.
+                                      Defaults to 'training_metrics_{timestamp}.csv'.
+        """
+        if not self.metrics_data:
+            logger.warning("No metrics data recorded, skipping save.")
+            return
+
+        df = self.get_dataframe()
+        # Ensure correct dtypes before saving
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['epoch'] = df['epoch'].astype(int)
+        df['batch'] = df['batch'].astype(int)
+        df['loss'] = df['loss'].astype(float)
+        df['lr'] = df['lr'].astype(float)
+        df['pruned_weights_count'] = df['pruned_weights_count'].astype(int)
+        df['batch_duration_sec'] = df['batch_duration_sec'].astype(float)
+        df['batch_size'] = df['batch_size'].astype(int)
+
+
+        filename = filename or f"{TrainingConfig.METRICS_FILENAME_PREFIX}_{datetime.now():%Y%m%d%H%M%S}.csv"
+        filepath = self.save_dir / filename
+        try:
+            df.to_csv(filepath, index=False, encoding='utf-8')
+            logger.info(f"Saved training metrics ({len(df)} rows) to {filepath}")
+        except Exception as e:
+            logger.error(f"Failed to save training metrics to {filepath}: {e}", exc_info=True)
+
+    def clear(self):
+        """Clears the recorded metrics."""
+        self.metrics_data = []
+        logger.info("Cleared recorded training metrics.")
+
+
+class EnhancedTrainer:
+    """
+    Provides a comprehensive training loop with optimization, scheduling,
+    pruning, checkpointing, and metrics tracking.
+    """
+    def __init__(self, model: nn.Module, data_loader, criterion, device: str | torch.device = None):
+        """
+        Initializes the EnhancedTrainer.
+
+        Args:
+            model (nn.Module): The neural network model to train.
+            data_loader: An iterable data loader providing batches of (inputs, targets).
+            criterion: The loss function (e.g., nn.MSELoss(), nn.CrossEntropyLoss()).
+            device (str | torch.device, optional): The device to run training on.
+                                                   Defaults to config.DEFAULT_DEVICE.
+        """
+        self.config = TrainingConfig() # Load training config
+        self.device = device or DEFAULT_DEVICE
+        self.model = model.to(self.device)
+        self.data_loader = data_loader # Assume loader yields (inputs, targets)
+        self.criterion = criterion.to(self.device) # Move loss function to device
+        self.metrics = TrainingMetrics() # Initialize metrics tracker
+
+        self.current_epoch = 0
+        self.total_pruned_count = 0 # Track total pruned weights
+
+        # Ensure checkpoint directory exists (handled by helpers.save_state now)
+        # CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+        self.optimizer, self.scheduler = self._init_optimizer_scheduler()
+        logger.info(f"EnhancedTrainer initialized for model {type(model).__name__} on device {self.device}")
+
+    def _init_optimizer_scheduler(self):
+        """Configures the optimizer and learning rate scheduler."""
+        # Example: AdamW optimizer
+        optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.config.INITIAL_LR,
+            weight_decay=self.config.WEIGHT_DECAY
+        )
+        logger.info(f"Using AdamW optimizer with LR={self.config.INITIAL_LR}, WeightDecay={self.config.WEIGHT_DECAY}")
+
+        # Example: Cosine Annealing scheduler
+        # Calculate T_max based on estimated batches per epoch if loader has __len__
+        try:
+            batches_per_epoch = len(self.data_loader)
+            t_max = self.config.MAX_EPOCHS * batches_per_epoch
+            logger.info(f"Using CosineAnnealingLR scheduler with T_max={t_max} (MaxEpochs={self.config.MAX_EPOCHS}, BatchesPerEpoch={batches_per_epoch})")
+        except TypeError:
+            # If loader has no __len__, use a fixed large number or alternative scheduler
+            t_max = self.config.MAX_EPOCHS * 1000 # Placeholder if len() fails
+            logger.warning(f"DataLoader has no __len__. Using estimated T_max={t_max} for CosineAnnealingLR.")
+
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=t_max,
+            eta_min=0 # Minimum learning rate
+        )
+
+        return optimizer, scheduler
+
+    def _apply_pruning(self):
+        """Applies global unstructured magnitude pruning to the model."""
+        if self.config.PRUNE_AMOUNT <= 0:
+             logger.info("Pruning amount is zero or negative. Skipping pruning step.")
+             return
+
+        parameters_to_prune = []
+        for module in self.model.modules():
+            # Prune Linear and Conv2d layers by default, add others if needed
+            if isinstance(module, (nn.Linear, nn.Conv2d)):
+                # Ensure the parameter 'weight' exists before adding
+                if hasattr(module, 'weight') and module.weight is not None:
+                     parameters_to_prune.append((module, 'weight'))
+                # Optionally prune bias as well:
+                # if hasattr(module, 'bias') and module.bias is not None:
+                #     parameters_to_prune.append((module, 'bias'))
+
+        if not parameters_to_prune:
+            logger.warning("No prunable parameters (Linear/Conv2d weights) found in the model.")
+            return
+
+        try:
+            prune.global_unstructured(
+                parameters_to_prune,
+                pruning_method=prune.L1Unstructured, # Magnitude pruning (L1 norm)
+                amount=self.config.PRUNE_AMOUNT
+            )
+            logger.info(f"Applied global unstructured pruning with amount {self.config.PRUNE_AMOUNT:.2f}")
+
+            # Make pruning permanent by removing re-parameterization hooks (optional, but good practice after pruning)
+            # And calculate total pruned count
+            current_total_pruned = 0
+            total_params = 0
+            for module, param_name in parameters_to_prune:
+                 if prune.is_pruned(module):
+                      # Remove the hook to make pruning permanent
+                      prune.remove(module, param_name)
+                      logger.debug(f"Made pruning permanent for {param_name} in {module}")
+                      # Count remaining zeros after removal
+                      param = getattr(module, param_name)
+                      current_total_pruned += torch.sum(param == 0).item()
+                      total_params += param.nelement()
+                 else: # Should not happen if global_unstructured worked, but check
+                      param = getattr(module, param_name)
+                      current_total_pruned += torch.sum(param == 0).item() # Count existing zeros
+                      total_params += param.nelement()
+
+
+            self.total_pruned_count = current_total_pruned # Update total count
+            pruned_percentage = (self.total_pruned_count / total_params) * 100 if total_params > 0 else 0
+            logger.info(f"Total pruned weights after making permanent: {self.total_pruned_count} ({pruned_percentage:.2f}%)")
+
+        except Exception as e:
+            logger.error(f"Pruning failed: {e}", exc_info=True)
+
+
+    def train_epoch(self):
+        """Runs training for a single epoch."""
+        self.model.train() # Set model to training mode
+        total_loss = 0.0
+        batch_count = 0
+        epoch_start_time = datetime.now()
+
+        # Estimate total batches if possible
+        try:
+             total_batches = len(self.data_loader)
+             has_len = True
+        except TypeError:
+             total_batches = None
+             has_len = False
+
+        # Use tqdm for progress bar
+        pbar_desc = f"Epoch {self.current_epoch}/{self.config.MAX_EPOCHS}"
+        pbar = tqdm(self.data_loader, desc=pbar_desc, total=total_batches, unit="batch", leave=False)
+
+        last_checkpoint_batch = -1
+        batches_between_checkpoints = int(total_batches * self.config.CHECKPOINT_INTERVAL_BATCH_PERCENT) if has_len and self.config.CHECKPOINT_INTERVAL_BATCH_PERCENT > 0 else -1
+
+        for batch_idx, batch_data in enumerate(pbar):
+            batch_start_time = datetime.now()
+
+            try:
+                # Assuming data_loader yields (inputs, targets)
+                inputs, targets = batch_data
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
+
+                # Zero gradients
+                self.optimizer.zero_grad()
+
+                # Forward pass
+                outputs = self.model(inputs)
+
+                # Calculate loss
+                loss = self.criterion(outputs, targets)
+
+                # Backward pass and optimization
+                loss.backward()
+                # Optional: Gradient clipping
+                # nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+
+                # Step the scheduler (typically per batch for CosineAnnealingLR)
+                if self.scheduler:
+                    self.scheduler.step()
+
+                batch_duration = (datetime.now() - batch_start_time).total_seconds()
+                current_lr = self.optimizer.param_groups[0]['lr']
+                batch_loss = loss.item()
+                total_loss += batch_loss
+                batch_count += 1
+
+                # Record metrics
+                self.metrics.record(
+                    epoch=self.current_epoch,
+                    batch=batch_idx,
+                    loss=batch_loss,
+                    lr=current_lr,
+                    pruned_count=self.total_pruned_count,
+                    duration=batch_duration,
+                    batch_size=inputs.size(0) # Get batch size from input tensor
+                )
+
+                # Update progress bar postfix
+                pbar.set_postfix({'Loss': f"{batch_loss:.4f}", 'LR': f"{current_lr:.6f}"})
+
+                # --- Checkpointing within epoch ---
+                if has_len and batches_between_checkpoints > 0 and (batch_idx + 1) % batches_between_checkpoints == 0:
+                     if batch_idx != last_checkpoint_batch: # Avoid saving twice if interval is 1 batch
+                          reason = f"epoch_{self.current_epoch}_batch_{batch_idx+1}"
+                          self._save_checkpoint(reason=reason)
+                          last_checkpoint_batch = batch_idx
+
+            except Exception as e:
+                 logger.error(f"Error during training batch {batch_idx} in epoch {self.current_epoch}: {e}", exc_info=True)
+                 # Decide whether to continue to next batch or stop epoch/training
+                 # continue # Example: Skip problematic batch
+
+        pbar.close()
+        avg_loss = total_loss / batch_count if batch_count > 0 else 0.0
+        epoch_duration = (datetime.now() - epoch_start_time).total_seconds()
+        logger.info(f"Epoch {self.current_epoch} finished. Avg Loss: {avg_loss:.4f}, Duration: {epoch_duration:.2f}s")
+
+        return avg_loss
+
+
+    def train(self):
+        """Runs the full training loop over multiple epochs."""
+        logger.info(f"Starting training for {self.config.MAX_EPOCHS} epochs.")
+        start_time = datetime.now()
+
+        for epoch in range(self.current_epoch, self.config.MAX_EPOCHS):
+            self.current_epoch = epoch
+            avg_loss = self.train_epoch()
+
+            # --- Optional Pruning Step (End of Epoch) ---
+            if self.config.PRUNE_INTERVAL_EPOCHS > 0 and (epoch + 1) % self.config.PRUNE_INTERVAL_EPOCHS == 0:
+                logger.info(f"Applying pruning after epoch {epoch}...")
+                self._apply_pruning()
+
+            # --- End of Epoch Checkpoint ---
+            self._save_checkpoint(reason=f"epoch_{epoch}_end")
+
+            # --- Save Metrics Periodically (e.g., every epoch) ---
+            self.metrics.save() # Saves with timestamp
+
+            # --- Optional: Add validation loop here ---
+            # self.validate()
+
+        end_time = datetime.now()
+        total_duration = (end_time - start_time).total_seconds()
+        logger.info(f"Training finished after {self.config.MAX_EPOCHS} epochs. Total duration: {total_duration:.2f}s")
+        # Save final metrics
+        self.metrics.save(filename=f"{TrainingConfig.METRICS_FILENAME_PREFIX}_final.csv")
+
+
+    def _save_checkpoint(self, reason: str = "checkpoint"):
+        """Saves the current model, optimizer, and scheduler state."""
+        filename = f"{type(self.model).__name__}_{reason}.pt"
+        logger.info(f"Saving checkpoint: {filename}")
+        try:
+             # Use the helper function
+             save_state(
+                  model=self.model,
+                  filename=filename,
+                  optimizer=self.optimizer,
+                  scheduler=self.scheduler,
+                  epoch=self.current_epoch,
+                  # Add any other relevant info
+                  total_pruned_count=self.total_pruned_count,
+                  # Note: Saving the entire metrics object might be large/inefficient.
+                  # Consider saving the path to the metrics file or just recent metrics.
+                  # metrics_data=self.metrics.metrics_data[-100:] # Example: last 100 rows
+             )
+        except Exception as e:
+             # Error is logged within save_state
+             logger.error(f"Checkpoint saving failed for reason '{reason}'.")
+
+
+    def load_checkpoint(self, filename: str, load_optimizer: bool = True, load_scheduler: bool = True, strict: bool = True):
+         """Loads state from a checkpoint file."""
+         logger.info(f"Attempting to load checkpoint: {filename}")
+         try:
+              # Use the helper function
+              checkpoint_data = load_state(
+                   model=self.model,
+                   filename=filename,
+                   optimizer=self.optimizer if load_optimizer else None,
+                   scheduler=self.scheduler if load_scheduler else None,
+                   device=self.device,
+                   strict=strict
+              )
+
+              if checkpoint_data:
+                   # Restore epoch and other metadata if available
+                   if 'epoch' in checkpoint_data and checkpoint_data['epoch'] is not None:
+                        self.current_epoch = checkpoint_data['epoch'] + 1 # Start next epoch
+                        logger.info(f"Resuming training from epoch {self.current_epoch}")
+                   if 'total_pruned_count' in checkpoint_data:
+                        self.total_pruned_count = checkpoint_data['total_pruned_count']
+                        logger.info(f"Restored pruned weight count: {self.total_pruned_count}")
+                   # Restore metrics if saved/needed (might need custom logic)
+
+                   logger.info(f"Checkpoint '{filename}' loaded successfully.")
+                   return True
+              else:
+                   logger.error(f"Failed to load checkpoint '{filename}'. File not found or load_state returned None.")
+                   return False
+
+         except Exception as e:
+              logger.error(f"Error loading checkpoint {filename}: {e}", exc_info=True)
+              return False
+
+
+    # --- Optional: Validation Loop ---
+    # def validate(self):
+    #     """Runs a validation loop on a separate dataset."""
+    #     self.model.eval() # Set model to evaluation mode
+    #     total_val_loss = 0.0
+    #     # ... loop through validation data_loader ...
+    #     with torch.no_grad():
+    #         # ... forward pass, calculate loss ...
+    #     avg_val_loss = total_val_loss / len(self.validation_loader)
+    #     logger.info(f"Epoch {self.current_epoch} Validation Loss: {avg_val_loss:.4f}")
+    #     self.model.train() # Set back to training mode
+    #     return avg_val_loss
+
+
+# Removed the original __main__ block and show_menu function.
+# Instantiate and run the trainer from a separate script or notebook.
+# Example:
+# if __name__ == "__main__":
+#     logging.basicConfig(level=logging.INFO) # Setup basic logging
+#
+#     # --- Configuration ---
+#     DEVICE = DEFAULT_DEVICE
+#     INPUT_DIM = 128 # Example
+#     NUM_CLASSES = 6   # Example
+#
+#     # --- Instantiate Components ---
+#     # Adjust model and loader instantiation as needed
+#     model = ZoneClassifier(input_features=INPUT_DIM, num_classes=NUM_CLASSES, device=DEVICE)
+#     # Ensure data loader provides data in the format expected by the model and criterion
+#     data_loader = EnhancedDataLoader(device=DEVICE) # Use tokenized data loader
+#     # Choose appropriate loss function
+#     criterion = nn.MSELoss() # Example: if output is regression-like
+#     # criterion = nn.CrossEntropyLoss() # Example: if output is classification logits
+#
+#     # --- Initialize Trainer ---
+#     trainer = EnhancedTrainer(model=model, data_loader=data_loader, criterion=criterion, device=DEVICE)
+#
+#     # --- Optional: Load Checkpoint ---
+#     # trainer.load_checkpoint("ZoneClassifier_epoch_X_end.pt")
+#
+#     # --- Start Training ---
+#     trainer.train()
+

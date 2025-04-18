@@ -1,0 +1,446 @@
+2025-04-16 13:41:31 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-16 13:41:31 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-16 13:41:31 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-16 13:41:31 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-16 13:41:31 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 13:41:31 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-16 13:41:31 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-16 13:41:31 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-16 13:41:31 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-16 13:41:31 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-16 13:41:31 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-16 13:47:50 - src.data.processing - INFO - [processing.py:936] - No repo found. Initializing empty.
+2025-04-16 13:47:50 - __main__ - ERROR - [main.py:311] - Error during data pipeline: Already tz-aware, use tz_convert to convert.
+Traceback (most recent call last):
+  File "/home/yosh/repos/TLATOv4.1/main.py", line 295, in run_data_pipeline
+    processor = DataProcessor()
+                ^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/processing.py", line 190, in __init__
+    self.repo = DataRepository()
+                ^^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/processing.py", line 903, in __init__
+    self.df = self._load_repo()
+              ^^^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/processing.py", line 941, in _load_repo
+    if 'datetime' in dtype: pdf[col] = pdf[col].dt.tz_localize(timezone.utc)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/accessor.py", line 112, in f
+    return self._delegate_method(name, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/indexes/accessors.py", line 132, in _delegate_method
+    result = method(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/indexes/datetimes.py", line 293, in tz_localize
+    arr = self._data.tz_localize(tz, ambiguous, nonexistent)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/arrays/_mixins.py", line 81, in method
+    return meth(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/arrays/datetimes.py", line 1083, in tz_localize
+    raise TypeError("Already tz-aware, use tz_convert to convert.")
+TypeError: Already tz-aware, use tz_convert to convert.
+2025-04-16 13:47:52 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-16 13:47:55 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-16 13:47:55 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-16 13:47:55 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-16 13:47:55 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-16 13:47:55 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 13:47:55 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-16 13:47:55 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-16 13:47:55 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-16 13:47:55 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-16 13:47:55 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-16 13:47:55 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-16 13:47:57 - src.data.processing - INFO - [processing.py:936] - No repo found. Initializing empty.
+2025-04-16 13:47:57 - __main__ - ERROR - [main.py:311] - Error during data pipeline: Already tz-aware, use tz_convert to convert.
+Traceback (most recent call last):
+  File "/home/yosh/repos/TLATOv4.1/main.py", line 295, in run_data_pipeline
+    processor = DataProcessor()
+                ^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/processing.py", line 190, in __init__
+    self.repo = DataRepository()
+                ^^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/processing.py", line 903, in __init__
+    self.df = self._load_repo()
+              ^^^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/processing.py", line 941, in _load_repo
+    if 'datetime' in dtype: pdf[col] = pdf[col].dt.tz_localize(timezone.utc)
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/accessor.py", line 112, in f
+    return self._delegate_method(name, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/indexes/accessors.py", line 132, in _delegate_method
+    result = method(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/indexes/datetimes.py", line 293, in tz_localize
+    arr = self._data.tz_localize(tz, ambiguous, nonexistent)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/arrays/_mixins.py", line 81, in method
+    return meth(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/miniconda3/envs/rapids-25.02/lib/python3.12/site-packages/pandas/core/arrays/datetimes.py", line 1083, in tz_localize
+    raise TypeError("Already tz-aware, use tz_convert to convert.")
+TypeError: Already tz-aware, use tz_convert to convert.
+2025-04-16 13:49:32 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-16 13:49:35 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-16 13:49:35 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-16 13:49:35 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-16 13:49:35 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-16 13:49:35 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 13:49:35 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-16 13:49:35 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:936] - No repo found. Initializing empty.
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:905] - DataRepository initialized. Repo: /home/yosh/repos/TLATOv4.1/data/data_repository.csv.zst
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:193] - Initializing DataProcessor with max_workers=16
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:225] - Using Sklearn StandardScaler fallback for numerical processing.
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:198] - DataProcessor initialized. Base directories: /home/yosh/repos/TLATOv4.1/data/processed, /home/yosh/repos/TLATOv4.1/data/tokenized
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:201] - Scaler initialized successfully.
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:297] - Starting DataProcessor.process_all()
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:303] - No files matching status ('discovered', 'error') [in base_dir: None] found to process.
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:299] - DataProcessor.process_all() finished.
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:936] - No repo found. Initializing empty.
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:905] - DataRepository initialized. Repo: /home/yosh/repos/TLATOv4.1/data/data_repository.csv.zst
+2025-04-16 13:49:35 - src.data.processing - INFO - [processing.py:1503] - Initializing Tokenizer with max_workers=16
+2025-04-16 13:49:35 - __main__ - INFO - [main.py:304] - Starting Tokenizer.tokenize_all()
+2025-04-16 13:51:37 - __main__ - WARNING - [main.py:268] - User interrupted execution (Ctrl+C). Exiting.
+2025-04-16 13:51:37 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-16 13:51:37 - src.data.processing - INFO - [processing.py:292] - Shutting down DataProcessor executor...
+2025-04-16 13:51:37 - src.data.processing - INFO - [processing.py:295] - DataProcessor executor shut down.
+2025-04-16 15:12:41 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-16 15:12:41 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-16 15:12:41 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-16 15:12:41 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-16 15:12:41 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 15:12:41 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-16 15:12:41 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-16 15:12:41 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-16 15:12:41 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-16 15:12:41 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-16 15:12:41 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-16 15:12:42 - __main__ - WARNING - [main.py:290] - Attempted to run data pipeline, but modules are missing.
+2025-04-16 15:12:47 - __main__ - ERROR - [main.py:340] - Error during synthetic data generation: 'SyntheticDataConfig' object has no attribute 'DEVICE'
+Traceback (most recent call last):
+  File "/home/yosh/repos/TLATOv4.1/main.py", line 332, in run_synthetic_data_generation
+    generator = SyntheticDataGenerator()
+                ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yosh/repos/TLATOv4.1/src/data/synthetic.py", line 94, in __init__
+    if self.config.DEVICE:
+       ^^^^^^^^^^^^^^^^^^
+AttributeError: 'SyntheticDataConfig' object has no attribute 'DEVICE'
+2025-04-16 15:14:11 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-16 15:15:04 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-16 15:15:04 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-16 15:15:04 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-16 15:15:04 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-16 15:15:04 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 15:15:04 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-16 15:15:04 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-16 15:15:04 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-16 15:15:04 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-16 15:15:04 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-16 15:15:04 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:116] - SyntheticDataGenerator initialized: OutputDir='/home/yosh/repos/TLATOv4.1/data/synthetic', AdjustedOutputDir='/home/yosh/repos/TLATOv4.1/data/synthetic/adjusted_samples', TargetSamples=100, BatchSize=10
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:117] - Using Ollama Endpoint: http://0.0.0.0:11434/api/generate
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:118] - Generation Model: qwen2.5-coder, Correction Model: gemma3:4b
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:119] - API Correction Enabled: True
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:120] - Save retries: 6, API Timeout: 4200s
+2025-04-16 15:15:14 - __main__ - INFO - [main.py:334] - Starting SyntheticDataGenerator.generate_dataset()
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:693] - Starting synthetic data generation for 100 target samples in 10 batches.
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 1/100 (Batch 0, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 2/100 (Batch 1, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 3/100 (Batch 2, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 4/100 (Batch 3, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 5/100 (Batch 4, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 6/100 (Batch 5, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 7/100 (Batch 6, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 8/100 (Batch 7, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 9/100 (Batch 8, Item 0)...
+2025-04-16 15:15:14 - src.data.synthetic - INFO - [synthetic.py:653] - Attempting generation/correction for sample 10/100 (Batch 9, Item 0)...
+2025-04-16 15:15:44 - __main__ - WARNING - [main.py:268] - User interrupted execution (Ctrl+C). Exiting.
+2025-04-16 15:15:44 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-16 15:15:49 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-16 15:15:49 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-16 15:15:49 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-16 15:15:49 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-16 15:15:49 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 15:15:49 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-16 15:15:49 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-16 15:15:49 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-16 15:15:49 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-16 15:15:49 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-16 15:15:49 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-16 15:15:53 - __main__ - INFO - [main.py:354] - Proceeding with training on device: cpu
+2025-04-16 15:15:53 - src.core.models - INFO - [models.py:109] - Initializing ZoneClassifier: In=128, Classes=10, Device=cuda
+2025-04-16 15:15:53 - src.core.models - WARNING - [models.py:136] - ZoneClassifier falling back to MLP architecture due to missing PyTorch Geometric.
+2025-04-16 15:15:53 - src.core.models - INFO - [models.py:150] - ZoneClassifier moved to device: cuda
+2025-04-16 15:15:53 - src.data.loaders - WARNING - [loaders.py:93] - No files found matching pattern '*.pt.zst' in 'data/tokenized'.
+2025-04-16 15:15:53 - src.data.loaders - INFO - [loaders.py:80] - EnhancedDataLoader initialized: Dir='data/tokenized', BatchSize=1024, Device='cpu', Pattern='*.pt.zst', Filter='None', Files=0
+2025-04-16 15:15:53 - src.training.trainer - INFO - [trainer.py:316] - TrainingMetrics initialized. Metrics will be saved to: /home/yosh/repos/TLATOv4.1/logs
+2025-04-16 15:15:54 - src.training.trainer - INFO - [trainer.py:430] - Using AdamW optimizer with LR=0.0003, WeightDecay=0.01
+2025-04-16 15:15:54 - src.data.loaders - INFO - [loaders.py:178] - Calculating total batches for EnhancedDataLoader (might take time)...
+2025-04-16 15:15:54 - src.data.loaders - WARNING - [loaders.py:208] - Total sample count is zero. __len__ returns 0.
+2025-04-16 15:15:54 - src.data.loaders - INFO - [loaders.py:211] - Length calculation complete. Total samples: 0, Batches: 0
+2025-04-16 15:15:54 - src.training.trainer - INFO - [trainer.py:437] - Using CosineAnnealingLR scheduler with T_max=0 (MaxEpochs=50, BatchesPerEpoch=0)
+2025-04-16 15:15:54 - src.training.trainer - INFO - [trainer.py:420] - EnhancedTrainer initialized for model ZoneClassifier on device cpu
+2025-04-16 15:15:56 - __main__ - INFO - [main.py:390] - Starting EnhancedTrainer.train() on device cpu
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:597] - Starting training for 50 epochs.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 0 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_0_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_0_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 1 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_1_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_1_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 2 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_2_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_2_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 3 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_3_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_3_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 4 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 4...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_4_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_4_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 5 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_5_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_5_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 6 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_6_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_6_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 7 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_7_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_7_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 8 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_8_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_8_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 9 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 9...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_9_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_9_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 10 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_10_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_10_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 11 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_11_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_11_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 12 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_12_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_12_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 13 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_13_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_13_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 14 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 14...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_14_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_14_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 15 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_15_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_15_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 16 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_16_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_16_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 17 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_17_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_17_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 18 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_18_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_18_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 19 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 19...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_19_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_19_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 20 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_20_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_20_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 21 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_21_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_21_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 22 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_22_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_22_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 23 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_23_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_23_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 24 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 24...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_24_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_24_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 25 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_25_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_25_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 26 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_26_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_26_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 27 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_27_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_27_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 28 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_28_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_28_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 29 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 29...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_29_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_29_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 30 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_30_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_30_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 31 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_31_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_31_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 32 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_32_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_32_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 33 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_33_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_33_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 34 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 34...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_34_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_34_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 35 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_35_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_35_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 36 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_36_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_36_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 37 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_37_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_37_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 38 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_38_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_38_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 39 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 39...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_39_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_39_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 40 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_40_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_40_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 41 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_41_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_41_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 42 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_42_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_42_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 43 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_43_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_43_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 44 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 44...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_44_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_44_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 45 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_45_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_45_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 46 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_46_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_46_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 47 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_47_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_47_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 48 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_48_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_48_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:591] - Epoch 49 finished. Avg Loss: 0.0000, Duration: 0.00s
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:606] - Applying pruning after epoch 49...
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:478] - Applied global unstructured pruning with amount 0.20
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:501] - Total pruned weights after making permanent: 7066 (20.00%)
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:627] - Saving checkpoint: ZoneClassifier_epoch_49_end.pt
+2025-04-16 15:15:56 - src.training.trainer - ERROR - [trainer.py:644] - Checkpoint saving failed for reason 'epoch_49_end'.
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - src.training.trainer - INFO - [trainer.py:620] - Training finished after 50 epochs. Total duration: 0.06s
+2025-04-16 15:15:56 - src.training.trainer - WARNING - [trainer.py:362] - No metrics data recorded, skipping save.
+2025-04-16 15:15:56 - __main__ - INFO - [main.py:392] - EnhancedTrainer.train() finished.
+2025-04-16 15:15:59 - __main__ - WARNING - [main.py:404] - Attempted to run labeling example, but module is missing.
+2025-04-18 08:04:31 - __main__ - CRITICAL - [main.py:573] - Critical error in main orchestrator execution: 
+Traceback (most recent call last):
+  File "/home/yosh/repos/TLATOv4.1/main.py", line 570, in main
+    orchestrator.show_main_menu()
+  File "/home/yosh/repos/TLATOv4.1/main.py", line 244, in show_main_menu
+    choice = input("Enter selection: ")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+EOFError
+2025-04-18 08:04:31 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-18 08:46:35 - src.utils.logger - INFO - [logger.py:117] - Logging configured. Main log: /home/yosh/repos/TLATOv4.1/logs/training.log, Error log: /home/yosh/repos/TLATOv4.1/logs/errors.log
+2025-04-18 08:46:35 - src.training.trainer - INFO - [trainer.py:34] - Training module initialized with logging.
+2025-04-18 08:46:35 - src.training.trainer - INFO - [trainer.py:35] - Using device: cuda
+2025-04-18 08:46:35 - src.training.trainer - INFO - [trainer.py:36] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-18 08:46:35 - src.training.trainer - INFO - [trainer.py:37] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-18 08:46:35 - src.training.trainer - INFO - [trainer.py:38] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-18 08:46:35 - __main__ - WARNING - [main.py:167] - Analysis (labeler) module not available: cannot import name 'setup_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-18 08:46:35 - __main__ - INFO - [main.py:567] - --- System Orchestrator Main Function ---
+2025-04-18 08:46:35 - __main__ - INFO - [main.py:179] - Initializing System Orchestrator...
+2025-04-18 08:46:35 - __main__ - INFO - [main.py:228] - Config prefers non-GPU device. Using 'cpu'.
+2025-04-18 08:46:35 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
+2025-04-18 08:46:47 - __main__ - WARNING - [main.py:290] - Attempted to run data pipeline, but modules are missing.
+2025-04-18 08:46:49 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---

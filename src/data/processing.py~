@@ -1,0 +1,860 @@
+# src/data/processing.py
+"""
+Data Processing Module
+
+Handles data preprocessing pipelines including:
+- Managing a repository of dataset files and their processing status.
+- Processing raw data (text cleaning, numerical scaling).
+- Tokenizing/vectorizing processed data into tensors.
+Utilizes GPU acceleration (cuDF, CuPy, cuML) if available and configured.
+"""
+
+import torch
+import pandas as pd
+import zstandard as zstd
+from pathlib import Path
+import hashlib
+import logging
+import numpy as np
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from tqdm import tqdm
+import json
+from datetime import datetime
+import os
+import time # For temporary file naming
+
+# Import project configuration and utilities
+from src.utils.config import (
+    DataProcessingConfig,
+    PROCESSED_DATA_DIR,
+    TOKENIZED_DATA_DIR,
+    DEFAULT_DEVICE,
+    PROJECT_ROOT # For NLTK data path if needed
+)
+from src.utils.logger import setup_logger
+
+logger = logging.getLogger(__name__)
+
+# --- Optional GPU Library Imports ---
+try:
+    import cudf
+    import cupy as cp
+    from cuml.preprocessing import StandardScaler as CumlScaler
+    GPU_AVAILABLE = torch.cuda.is_available() # Double check torch sees GPU
+    if not GPU_AVAILABLE:
+        logger.warning("GPU libraries (cuDF, CuPy, cuML) seem available, but torch.cuda.is_available() is False. Using CPU fallback.")
+    else:
+         logger.info("GPU libraries (cuDF, CuPy, cuML) loaded successfully.")
+except ImportError as e:
+    logger.warning(f"GPU libraries (cuDF/CuPy/cuML) not found ({e}). Using CPU fallback (pandas/numpy). Scaling will be skipped for numerical data.")
+    GPU_AVAILABLE = False
+    # Define dummy classes to avoid NameErrors if needed, though conditional logic is preferred
+    class cudf: pass
+    class cp: pass
+    class CumlScaler: pass
+
+# --- NLTK Setup ---
+try:
+    import nltk
+    from nltk.stem import WordNetLemmatizer
+    from nltk.corpus import stopwords
+
+    # Define potential NLTK data path (adjust if needed)
+    # NLTK_DATA_DIR = PROJECT_ROOT / 'nltk_data'
+    # nltk.data.path.append(str(NLTK_DATA_DIR))
+
+    # Download necessary NLTK data if not present (run this once manually or ensure deployment includes it)
+    def download_nltk_data():
+        try:
+            nltk.data.find('corpora/wordnet')
+        except nltk.downloader.DownloadError:
+            logger.info("Downloading NLTK 'wordnet' data...")
+            nltk.download('wordnet', quiet=True)
+        try:
+            nltk.data.find('corpora/stopwords')
+        except nltk.downloader.DownloadError:
+            logger.info("Downloading NLTK 'stopwords' data...")
+            nltk.download('stopwords', quiet=True)
+
+    # Consider calling download_nltk_data() here or ensuring it's run during setup
+    # download_nltk_data() # Uncomment cautiously - might be slow or require internet
+
+    NLTK_AVAILABLE = True
+    # Initialize lemmatizer and stopwords globally for efficiency if NLTK is available
+    lemmatizer = WordNetLemmatizer()
+    stop_words = set(stopwords.words('english'))
+    logger.info("NLTK components loaded successfully.")
+
+except ImportError:
+    logger.warning("NLTK library not found. Text processing features (lemmatization, stopword removal) will be disabled.")
+    NLTK_AVAILABLE = False
+    # Define dummy classes/variables
+    class WordNetLemmatizer: pass
+    lemmatizer = None
+    stop_words = set()
+
+
+# --- Data Repository ---
+class DataRepository:
+    """
+    Manages a state repository tracking dataset files and their processing status.
+    Uses cuDF for GPU acceleration if available, otherwise pandas.
+    """
+
+    def __init__(self, repo_path: str | Path = None):
+        """
+        Initializes the DataRepository.
+
+        Args:
+            repo_path (str | Path, optional): Path to the repository file.
+                                              Defaults to DataProcessingConfig.REPO_FILE.
+        """
+        self.repo_path = Path(repo_path or DataProcessingConfig.REPO_FILE)
+        self.repo_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+
+        # Define columns expected in the repository DataFrame
+        self.columns = {
+            'source_filepath': 'str', # Path to the original raw file
+            'status': 'str',          # e.g., 'discovered', 'processing', 'processed', 'tokenizing', 'tokenized', 'error'
+            'processed_path': 'str',  # Path to the intermediate processed file
+            'tokenized_path': 'str',  # Path to the final tokenized tensor file
+            'file_size': 'int64',     # Size of the original source file
+            'file_hash': 'str',       # Hash of the original source file content
+            'last_modified': 'datetime64[ns]', # Timestamp of the last update to this entry
+            'error_message': 'str'    # Store error details if status is 'error'
+        }
+        self.df = self._load_repo()
+        self.lock = ThreadPoolExecutor(max_workers=1) # Simple lock for DataFrame modifications
+
+    def _load_repo(self):
+        """Loads the repository DataFrame from the compressed CSV file."""
+        if self.repo_path.exists():
+            logger.info(f"Loading data repository from: {self.repo_path}")
+            try:
+                # Decompress and read with pandas first (more robust)
+                dctx = zstd.ZstdDecompressor()
+                with open(self.repo_path, 'rb') as ifh:
+                    with dctx.stream_reader(ifh) as reader:
+                        pdf = pd.read_csv(reader, keep_default_na=False) # Keep empty strings as ''
+
+                # Convert timestamp column
+                pdf['last_modified'] = pd.to_datetime(pdf['last_modified'])
+
+                # Ensure all columns exist, adding missing ones with default values
+                for col, dtype in self.columns.items():
+                     if col not in pdf.columns:
+                          default_val = '' if dtype == 'str' else (0 if dtype == 'int64' else pd.NaT if dtype.startswith('datetime') else None)
+                          pdf[col] = default_val
+                          logger.warning(f"Added missing column '{col}' to repository.")
+
+                # Ensure correct dtypes (handle potential read issues)
+                for col, dtype in self.columns.items():
+                    try:
+                        if dtype == 'str':
+                             pdf[col] = pdf[col].astype(str).fillna('')
+                        elif dtype == 'int64':
+                             pdf[col] = pd.to_numeric(pdf[col], errors='coerce').fillna(0).astype('int64')
+                        elif dtype.startswith('datetime'):
+                             pdf[col] = pd.to_datetime(pdf[col], errors='coerce')
+                    except Exception as e:
+                         logger.error(f"Error converting column '{col}' to dtype '{dtype}': {e}. Check repository file integrity.")
+                         # Fallback: keep as object or attempt safe conversion
+                         pdf[col] = pdf[col].astype(str).fillna('')
+
+
+                # Convert to cuDF if available
+                if GPU_AVAILABLE:
+                    try:
+                        cdf = cudf.from_pandas(pdf)
+                        logger.info("Repository loaded into cuDF DataFrame.")
+                        return cdf
+                    except Exception as e:
+                        logger.error(f"Failed to convert repository to cuDF: {e}. Using pandas.", exc_info=True)
+                        return pdf
+                else:
+                    logger.info("Repository loaded into pandas DataFrame.")
+                    return pdf
+
+            except Exception as e:
+                logger.error(f"Repository load failed: {e}. Initializing empty repository.", exc_info=True)
+                # Fall through to return empty DataFrame
+        else:
+            logger.info("No existing repository found. Initializing empty repository.")
+
+        # Return empty DataFrame matching the schema
+        if GPU_AVAILABLE:
+            try:
+                return cudf.DataFrame({col: cudf.Series(dtype=dtype) for col, dtype in self.columns.items()})
+            except Exception: # Fallback if cuDF fails even for empty
+                return pd.DataFrame({col: pd.Series(dtype=dtype) for col, dtype in self.columns.items()})
+        else:
+            return pd.DataFrame({col: pd.Series(dtype=dtype) for col, dtype in self.columns.items()})
+
+    def save(self):
+        """Saves the repository DataFrame to a compressed CSV file atomically."""
+        temp_path = self.repo_path.with_suffix(f'.tmp_{int(time.time())}')
+        logger.info(f"Saving repository to temporary file: {temp_path}")
+        try:
+            # Convert to pandas for robust CSV writing
+            if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                pdf = self.df.to_pandas()
+            else:
+                pdf = self.df.copy() # Avoid modifying original if it's already pandas
+
+            # Ensure string columns don't contain NaN before saving
+            for col, dtype in self.columns.items():
+                 if dtype == 'str':
+                      pdf[col] = pdf[col].fillna('')
+
+            # Compress and write
+            cctx = zstd.ZstdCompressor(level=3) # Compression level 3 is a good balance
+            with open(temp_path, 'wb') as ofh:
+                with cctx.stream_writer(ofh) as compressor:
+                    pdf.to_csv(compressor, index=False, encoding='utf-8')
+
+            # Atomic replace
+            os.replace(temp_path, self.repo_path)
+            logger.info(f"Repository saved successfully to: {self.repo_path}")
+
+        except Exception as e:
+            logger.error(f"Repository save failed: {e}", exc_info=True)
+            # Clean up temporary file if it exists
+            if temp_path.exists():
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    logger.error(f"Failed to remove temporary save file: {temp_path}")
+
+    def update_entry(self, source_filepath: Path, **kwargs):
+         """
+         Adds or updates an entry in the repository DataFrame. Thread-safe.
+
+         Args:
+             source_filepath (Path): The absolute path to the original source file.
+             **kwargs: Key-value pairs corresponding to columns to update
+                       (e.g., status='processed', processed_path='...', error_message='...').
+                       'last_modified' is updated automatically.
+         """
+         source_filepath_str = str(source_filepath.resolve())
+         update_data = kwargs.copy()
+         update_data['last_modified'] = pd.Timestamp.now()
+
+         # Ensure paths are stored as strings
+         for key, value in update_data.items():
+              if isinstance(value, Path):
+                   update_data[key] = str(value.resolve())
+
+         # --- Modification under lock ---
+         with self.lock:
+              # Find existing entry
+              if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                   mask = self.df['source_filepath'] == source_filepath_str
+                   exists = mask.any()
+              else: # pandas
+                   mask = self.df['source_filepath'] == source_filepath_str
+                   exists = mask.any()
+
+              if exists:
+                   # Update existing row(s) - mask should ideally match only one
+                   if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                        indices = self.df.index[mask]
+                        for col, value in update_data.items():
+                             if col in self.df.columns:
+                                  # cuDF inplace update can be tricky, safer to assign
+                                  # self.df.loc[indices, col] = value # May not work reliably for all types
+                                  # Workaround: Update the specific column series
+                                  col_series = self.df[col].copy()
+                                  col_series.loc[indices] = value
+                                  self.df[col] = col_series
+                             else:
+                                  logger.warning(f"Attempted to update non-existent column '{col}'")
+                   else: # pandas
+                        indices = self.df.index[mask]
+                        for col, value in update_data.items():
+                             if col in self.df.columns:
+                                  self.df.loc[indices, col] = value
+                             else:
+                                  logger.warning(f"Attempted to update non-existent column '{col}'")
+                   logger.debug(f"Updated repository entry for: {source_filepath_str}")
+              else:
+                   # Add new entry
+                   try:
+                        file_size = source_filepath.stat().st_size if source_filepath.is_file() else 0
+                        file_hash = self._calculate_hash(source_filepath) if source_filepath.is_file() else ''
+                   except Exception as e:
+                        logger.warning(f"Could not get size/hash for {source_filepath_str}: {e}")
+                        file_size = 0
+                        file_hash = ''
+
+                   new_data = {
+                        'source_filepath': source_filepath_str,
+                        'status': 'discovered', # Default status if not provided
+                        'processed_path': '',
+                        'tokenized_path': '',
+                        'file_size': file_size,
+                        'file_hash': file_hash,
+                        'last_modified': update_data['last_modified'],
+                        'error_message': ''
+                   }
+                   # Override defaults with provided kwargs
+                   for col, value in update_data.items():
+                        if col in new_data:
+                             new_data[col] = value
+
+                   # Ensure all columns are present
+                   for col in self.columns:
+                        if col not in new_data:
+                             new_data[col] = '' if self.columns[col] == 'str' else (0 if self.columns[col] == 'int64' else pd.NaT if self.columns[col].startswith('datetime') else None)
+
+
+                   # Create DataFrame for the new row and concatenate
+                   if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                        new_row_df = cudf.DataFrame({k: [v] for k, v in new_data.items()})
+                        # Ensure column types match before concat
+                        for col in self.df.columns:
+                             if col in new_row_df.columns and self.df[col].dtype != new_row_df[col].dtype:
+                                  try:
+                                       new_row_df[col] = new_row_df[col].astype(self.df[col].dtype)
+                                  except Exception as e:
+                                       logger.error(f"Type mismatch for column '{col}' during concat ({new_row_df[col].dtype} vs {self.df[col].dtype}). Error: {e}")
+                                       # Fallback: convert both to string? Or handle error more gracefully.
+                                       new_row_df[col] = new_row_df[col].astype(str)
+                                       self.df[col] = self.df[col].astype(str)
+                        self.df = cudf.concat([self.df, new_row_df], ignore_index=True)
+
+                   else: # pandas
+                        new_row_df = pd.DataFrame([new_data])
+                        # Ensure column types match before concat
+                        for col in self.df.columns:
+                             if col in new_row_df.columns and self.df[col].dtype != new_row_df[col].dtype:
+                                  try:
+                                       new_row_df[col] = new_row_df[col].astype(self.df[col].dtype)
+                                  except Exception as e:
+                                       logger.error(f"Type mismatch for column '{col}' during concat ({new_row_df[col].dtype} vs {self.df[col].dtype}). Error: {e}")
+                                       new_row_df[col] = new_row_df[col].astype(str) # Fallback
+                                       self.df[col] = self.df[col].astype(str)
+                        self.df = pd.concat([self.df, new_row_df], ignore_index=True)
+
+                   logger.debug(f"Added new repository entry for: {source_filepath_str}")
+         # --- End modification under lock ---
+
+
+    def get_status(self, source_filepath: Path) -> str | None:
+         """Gets the current status of a file."""
+         source_filepath_str = str(source_filepath.resolve())
+         with self.lock:
+              if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                   entry = self.df[self.df['source_filepath'] == source_filepath_str]
+                   return entry['status'].iloc[0] if not entry.empty else None
+              else: # pandas
+                   entry = self.df[self.df['source_filepath'] == source_filepath_str]
+                   return entry['status'].iloc[0] if not entry.empty else None
+
+    def get_files_by_status(self, status: str) -> list[Path]:
+         """Gets a list of source file paths with a specific status."""
+         with self.lock:
+              if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                   paths = self.df[self.df['status'] == status]['source_filepath'].to_pandas().tolist()
+              else: # pandas
+                   paths = self.df[self.df['status'] == status]['source_filepath'].tolist()
+         return [Path(p) for p in paths]
+
+    def get_processed_path(self, source_filepath: Path) -> Path | None:
+         """Gets the path to the processed file for a given source file."""
+         source_filepath_str = str(source_filepath.resolve())
+         with self.lock:
+              if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
+                   entry = self.df[self.df['source_filepath'] == source_filepath_str]
+                   processed_path_str = entry['processed_path'].iloc[0] if not entry.empty else None
+              else: # pandas
+                   entry = self.df[self.df['source_filepath'] == source_filepath_str]
+                   processed_path_str = entry['processed_path'].iloc[0] if not entry.empty else None
+         return Path(processed_path_str) if processed_path_str else None
+
+
+    def _calculate_hash(self, filepath: Path, chunk_size=DataProcessingConfig.PROCESSING_CHUNK_SIZE):
+        """Calculates the BLAKE2b hash of a file's content."""
+        h = hashlib.blake2b()
+        try:
+            with open(filepath, 'rb') as f:
+                while chunk := f.read(chunk_size):
+                    h.update(chunk)
+            return h.hexdigest()
+        except FileNotFoundError:
+             logger.error(f"File not found during hash calculation: {filepath}")
+             return None
+        except Exception as e:
+            logger.error(f"Hash calculation failed for {filepath}: {str(e)}", exc_info=True)
+            return None
+
+# --- Data Processor ---
+class DataProcessor:
+    """
+    Handles the data processing pipeline using multiple processes.
+    Reads raw files, applies text or numerical processing, and saves results.
+    """
+    def __init__(self, max_workers: int = None):
+        """
+        Initializes the DataProcessor.
+
+        Args:
+            max_workers (int, optional): Max number of worker processes.
+                                         Defaults to DataProcessingConfig.MAX_WORKERS.
+        """
+        self.repo = DataRepository()
+        self.max_workers = max_workers or DataProcessingConfig.MAX_WORKERS
+        # Use ProcessPoolExecutor for CPU-bound tasks (like text processing, file IO)
+        self.executor = ProcessPoolExecutor(max_workers=self.max_workers)
+
+        # Initialize scaler if GPU available
+        self.scaler = CumlScaler() if GPU_AVAILABLE else None
+        if self.scaler:
+             logger.info("Using cuML StandardScaler for numerical processing.")
+        else:
+             logger.info("cuML StandardScaler not available. Skipping scaling for numerical data.")
+
+        # Ensure NLTK data is available if needed (can be slow)
+        if NLTK_AVAILABLE:
+             # download_nltk_data() # Call here if essential and not done globally/manually
+             pass # Assume downloaded or handled externally
+
+        # Ensure output directories exist
+        PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    def process_all(self, statuses_to_process=('discovered', 'error')):
+        """
+        Processes all files in the repository marked with specified statuses.
+
+        Args:
+             statuses_to_process (tuple): A tuple of statuses indicating which files to process.
+                                         Defaults to ('discovered', 'error').
+        """
+        files_to_process = []
+        for status in statuses_to_process:
+             files_to_process.extend(self.repo.get_files_by_status(status))
+
+        if not files_to_process:
+            logger.info("No files found with specified statuses to process.")
+            return
+
+        logger.info(f"Starting processing for {len(files_to_process)} files.")
+        futures = [self.executor.submit(self._process_file, f_path) for f_path in files_to_process]
+
+        # Process results as they complete
+        with tqdm(total=len(futures), desc="Processing Files") as pbar:
+            for future in futures:
+                try:
+                    future.result() # Wait for completion and catch exceptions
+                except Exception as e:
+                    # Errors within _process_file should be logged there and status updated
+                    # This catches errors in the executor submission itself, unlikely here
+                    logger.error(f"Unexpected error during future execution: {e}", exc_info=True)
+                pbar.update(1)
+
+        # Save the updated repository state after processing
+        self.repo.save()
+        logger.info("File processing complete.")
+
+    def _process_file(self, source_filepath: Path):
+        """Processes a single file."""
+        logger.debug(f"Processing file: {source_filepath}")
+        try:
+            # Update status to 'processing'
+            self.repo.update_entry(source_filepath, status='processing', error_message='')
+
+            # Determine processing type based on extension
+            ext = source_filepath.suffix.lower().strip('.')
+            if ext in ['txt', 'csv', 'jsonl']: # Add other text formats if needed
+                processed_data = self._process_text(source_filepath)
+            elif ext in ['json']: # Assuming JSON contains numerical data lists/arrays
+                 processed_data = self._process_numerical(source_filepath)
+            # Add elif blocks for other formats (e.g., extracting text from PDF/Excel first)
+            # elif ext in ['pdf', 'xlsx', 'xls']:
+            #     # Need to read first, then process text/numerical content
+            #     # Requires integrating reader logic here or a multi-step process
+            #     logger.warning(f"Processing for .{ext} files needs specific reader integration. Skipping {source_filepath.name}")
+            #     self.repo.update_entry(source_filepath, status='skipped', error_message=f'Direct processing for .{ext} not implemented')
+            #     return
+            else:
+                logger.warning(f"No specific processing logic defined for file type .{ext}. Skipping {source_filepath.name}")
+                self.repo.update_entry(source_filepath, status='skipped', error_message=f'No processor for .{ext}')
+                return
+
+            if processed_data is None:
+                 # Error occurred during processing sub-step
+                 logger.error(f"Processing returned None for {source_filepath.name}. Status likely already set to 'error'.")
+                 return # Status should have been updated in sub-step
+
+            # Save the processed data
+            save_path = self._save_processed(processed_data, source_filepath)
+
+            # Update status to 'processed'
+            self.repo.update_entry(source_filepath, status='processed', processed_path=save_path)
+            logger.info(f"Successfully processed and saved: {source_filepath.name} -> {save_path.name}")
+
+        except Exception as e:
+            logger.error(f"Processing failed for {source_filepath}: {str(e)}", exc_info=True)
+            self.repo.update_entry(source_filepath, status='error', error_message=str(e))
+
+
+    def _read_content(self, filepath: Path) -> str:
+         """Reads file content as text, handling potential decompression."""
+         # Basic text reader - enhance if binary or specific encodings needed
+         try:
+              if filepath.suffix == '.zst':
+                   dctx = zstd.ZstdDecompressor()
+                   with open(filepath, 'rb') as ifh:
+                        with dctx.stream_reader(ifh) as reader:
+                             # Assuming UTF-8, adjust if needed
+                             return reader.read().decode('utf-8', errors='replace')
+              else:
+                   # Assuming UTF-8, adjust if needed
+                   return filepath.read_text(encoding='utf-8', errors='replace')
+         except Exception as e:
+              logger.error(f"Failed to read content from {filepath}: {e}", exc_info=True)
+              raise # Re-raise to be caught by _process_file
+
+    def _process_text(self, filepath: Path):
+        """Processes text data: lowercasing, removing non-alphanumeric, stopwords, lemmatization."""
+        if not NLTK_AVAILABLE:
+             logger.warning(f"Skipping text processing for {filepath.name}: NLTK not available.")
+             # Option: Perform basic cleaning without NLTK
+             try:
+                  content = self._read_content(filepath)
+                  processed = content.lower() # Basic lowercasing
+                  # Minimal cleaning (remove punctuation maybe?) - adjust regex as needed
+                  import re
+                  processed = re.sub(r'[^\w\s]', '', processed)
+                  processed = re.sub(r'\s+', ' ', processed).strip()
+                  # Return as pandas Series for consistency with _save_processed
+                  return pd.Series(processed.splitlines()) # Split into lines/docs
+             except Exception as e:
+                  logger.error(f"Basic text processing failed for {filepath}: {e}", exc_info=True)
+                  self.repo.update_entry(filepath, status='error', error_message=f"Basic text processing failed: {e}")
+                  return None
+
+
+        logger.debug(f"Processing text file: {filepath.name}")
+        try:
+            content = self._read_content(filepath)
+            lines = content.splitlines()
+            if not lines:
+                 logger.warning(f"Text file is empty: {filepath.name}")
+                 return pd.Series(dtype=str) # Return empty Series
+
+            # Use cuDF if available for potential speedup
+            if GPU_AVAILABLE:
+                 gdf = cudf.Series(lines)
+                 # Chain string operations
+                 processed = gdf.str.lower()
+                 processed = processed.str.replace(r'[^\w\s]', '', regex=True) # Remove non-alphanumeric/space
+                 processed = processed.str.split() # Split into words
+                 processed = processed.explode().dropna() # Create row per word, drop NaNs
+                 # Filter stopwords (cuDF isin can be slow with large lists, alternative might be needed)
+                 # Convert stop_words list to cuDF Series for potential faster isin
+                 # stop_words_gpu = cudf.Series(list(stop_words))
+                 # processed = processed[~processed.isin(stop_words_gpu)] # Filter out stopwords
+                 # Simpler approach if isin is slow: convert to pandas, filter, convert back (might negate benefit)
+                 pdf = processed.to_pandas()
+                 pdf_filtered = pdf[~pdf.isin(stop_words)]
+                 processed = cudf.from_pandas(pdf_filtered)
+
+                 # Lemmatization requires iteration, often done on CPU with pandas
+                 pdf_lemmatized = processed.to_pandas().apply(lemmatizer.lemmatize)
+                 logger.debug(f"Text processing complete for {filepath.name} (GPU assisted)")
+                 return pdf_lemmatized # Return pandas Series after lemmatization
+
+            else: # Use pandas
+                 pdf = pd.Series(lines)
+                 processed = pdf.str.lower()
+                 processed = processed.str.replace(r'[^\w\s]', '', regex=True)
+                 processed = processed.str.split()
+                 processed = processed.explode().dropna()
+                 processed = processed[~processed.isin(stop_words)] # Filter stopwords
+                 processed = processed.apply(lemmatizer.lemmatize) # Lemmatize
+                 logger.debug(f"Text processing complete for {filepath.name} (CPU)")
+                 return processed
+
+        except Exception as e:
+            logger.error(f"Text processing failed for {filepath}: {e}", exc_info=True)
+            self.repo.update_entry(filepath, status='error', error_message=f"Text processing failed: {e}")
+            return None
+
+
+    def _process_numerical(self, filepath: Path):
+        """Processes numerical data: Load from JSON, potentially scale using cuML."""
+        logger.debug(f"Processing numerical file: {filepath.name}")
+        try:
+            content = self._read_content(filepath)
+            data = json.loads(content) # Assumes JSON contains list/array of numbers
+
+            if not isinstance(data, (list, np.ndarray)): # Basic check
+                 raise ValueError("Loaded JSON data is not a list or array.")
+            if len(data) == 0:
+                 logger.warning(f"Numerical file is empty: {filepath.name}")
+                 return np.array([]) # Return empty numpy array
+
+            # Use GPU if available
+            if GPU_AVAILABLE and self.scaler:
+                try:
+                    array_gpu = cp.array(data, dtype=cp.float32)
+                    # Reshape if necessary, assuming scaler expects 2D (n_samples, n_features=1)
+                    if array_gpu.ndim == 1:
+                        array_gpu = array_gpu.reshape(-1, 1)
+                    scaled_gpu = self.scaler.fit_transform(array_gpu)
+                    logger.debug(f"Numerical processing complete for {filepath.name} (GPU)")
+                    return scaled_gpu # Return CuPy array
+                except Exception as gpu_err:
+                     logger.error(f"GPU numerical processing failed for {filepath.name}: {gpu_err}. Falling back to CPU (no scaling).", exc_info=True)
+                     # Fallback to numpy without scaling
+                     array_cpu = np.array(data, dtype=np.float32)
+                     return array_cpu
+
+            else: # Use CPU (numpy), skip scaling as cuML scaler isn't available
+                array_cpu = np.array(data, dtype=np.float32)
+                logger.debug(f"Numerical processing complete for {filepath.name} (CPU, no scaling)")
+                return array_cpu
+
+        except json.JSONDecodeError as e:
+             logger.error(f"Invalid JSON in numerical file {filepath}: {e}", exc_info=True)
+             self.repo.update_entry(filepath, status='error', error_message=f"Invalid JSON: {e}")
+             return None
+        except Exception as e:
+            logger.error(f"Numerical processing failed for {filepath}: {e}", exc_info=True)
+            self.repo.update_entry(filepath, status='error', error_message=f"Numerical processing failed: {e}")
+            return None
+
+    def _save_processed(self, data, original_path: Path) -> Path:
+        """Saves the processed data (pandas Series, numpy/cupy array) using zstd compression."""
+        # Create a unique filename based on the original stem
+        save_stem = original_path.stem
+        # Define save path in the processed directory
+        save_path = PROCESSED_DATA_DIR / f"{save_stem}_processed.zst"
+        save_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+
+        logger.debug(f"Saving processed data for '{original_path.name}' to '{save_path.name}'")
+
+        try:
+            cctx = zstd.ZstdCompressor(level=3)
+            with open(save_path, 'wb') as f:
+                with cctx.stream_writer(f) as compressor:
+                    if isinstance(data, pd.Series) or isinstance(data, pd.DataFrame):
+                        # Save pandas Series/DataFrame as CSV within the compressed file
+                        data.to_csv(compressor, index=False, header=isinstance(data, pd.DataFrame)) # Include header for DataFrame
+                    elif GPU_AVAILABLE and isinstance(data, cp.ndarray):
+                        # Convert CuPy array to NumPy before saving
+                        np.save(compressor, cp.asnumpy(data))
+                    elif isinstance(data, np.ndarray):
+                        # Save NumPy array
+                        np.save(compressor, data)
+                    else:
+                        # Handle other potential data types or raise error
+                        raise TypeError(f"Unsupported data type for saving: {type(data)}")
+            logger.debug(f"Successfully saved processed file: {save_path}")
+            return save_path
+        except Exception as e:
+            logger.error(f"Failed to save processed data to {save_path}: {e}", exc_info=True)
+            # Clean up potentially corrupted file?
+            if save_path.exists():
+                 try: save_path.unlink()
+                 except OSError: pass
+            raise # Re-raise to be caught by _process_file
+
+
+# --- Tokenizer ---
+class Tokenizer:
+    """
+    Handles the tokenization/vectorization pipeline.
+    Loads processed data and converts it into tensors suitable for model input.
+    """
+    def __init__(self, max_workers: int = None):
+        """
+        Initializes the Tokenizer.
+
+        Args:
+            max_workers (int, optional): Max number of worker processes.
+                                         Defaults to DataProcessingConfig.MAX_WORKERS.
+        """
+        self.repo = DataRepository()
+        self.max_workers = max_workers or DataProcessingConfig.MAX_WORKERS
+        # Use ProcessPoolExecutor for potentially CPU-bound loading/saving or simple tensor conversion
+        self.executor = ProcessPoolExecutor(max_workers=self.max_workers)
+        self.device = DEFAULT_DEVICE # Use default device from config for tensor creation
+
+        # Ensure output directory exists
+        TOKENIZED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    def tokenize_all(self, statuses_to_process=('processed',)):
+        """
+        Tokenizes all files in the repository marked as 'processed'.
+
+        Args:
+             statuses_to_process (tuple): A tuple of statuses indicating which files to tokenize.
+                                         Defaults to ('processed',).
+        """
+        files_to_tokenize_info = []
+        with self.repo.lock: # Access DataFrame safely
+             df_slice = self.repo.df[self.repo.df['status'].isin(statuses_to_process)]
+             if GPU_AVAILABLE and isinstance(df_slice, cudf.DataFrame):
+                  df_slice = df_slice.to_pandas() # Convert relevant part to pandas for iteration
+             # Store tuples of (source_path_str, processed_path_str)
+             files_to_tokenize_info = list(zip(df_slice['source_filepath'], df_slice['processed_path']))
+
+        if not files_to_tokenize_info:
+            logger.info("No processed files found to tokenize.")
+            return
+
+        logger.info(f"Starting tokenization for {len(files_to_tokenize_info)} files.")
+        # Submit tasks with both source and processed paths
+        futures = [self.executor.submit(self._tokenize_file, Path(src_path), Path(proc_path))
+                   for src_path, proc_path in files_to_tokenize_info if proc_path] # Ensure proc_path is not empty
+
+        # Process results as they complete
+        with tqdm(total=len(futures), desc="Tokenizing Files") as pbar:
+            for future in futures:
+                try:
+                    future.result() # Wait for completion and catch exceptions
+                except Exception as e:
+                    logger.error(f"Unexpected error during tokenizer future execution: {e}", exc_info=True)
+                pbar.update(1)
+
+        # Save the updated repository state after tokenization
+        self.repo.save()
+        logger.info("File tokenization complete.")
+
+    def _tokenize_file(self, source_filepath: Path, processed_filepath: Path):
+        """Loads a processed file, converts it to a tensor, and saves it."""
+        logger.debug(f"Tokenizing file: {processed_filepath.name} (from {source_filepath.name})")
+        try:
+             # Update status to 'tokenizing' using the source filepath as the key
+             self.repo.update_entry(source_filepath, status='tokenizing', error_message='')
+
+             # Load the processed data (handle compressed CSV or NPY)
+             data = self._load_processed(processed_filepath)
+
+             if data is None:
+                  raise ValueError("Loaded processed data is None.")
+
+             # Convert data to tensor
+             tokenized_tensor = self._vectorize(data)
+
+             # Save the tokenized tensor
+             save_path = self._save_tokenized(tokenized_tensor, processed_filepath)
+
+             # Update status to 'tokenized' using the source filepath as the key
+             self.repo.update_entry(source_filepath, status='tokenized', tokenized_path=save_path)
+             logger.info(f"Successfully tokenized: {processed_filepath.name} -> {save_path.name}")
+
+        except Exception as e:
+            logger.error(f"Tokenization failed for {processed_filepath.name}: {str(e)}", exc_info=True)
+            # Update status to 'error' using the source filepath as the key
+            self.repo.update_entry(source_filepath, status='error', error_message=f"Tokenization failed: {e}")
+
+    def _load_processed(self, filepath: Path):
+         """Loads data saved by _save_processed (compressed CSV or NPY)."""
+         logger.debug(f"Loading processed file {filepath.name} for tokenization.")
+         try:
+              dctx = zstd.ZstdDecompressor()
+              with open(filepath, 'rb') as ifh:
+                   with dctx.stream_reader(ifh) as reader:
+                        # Try loading as numpy array first
+                        try:
+                             # Use a BytesIO buffer as np.load needs seekable stream
+                             import io
+                             buffer = io.BytesIO(reader.read())
+                             data = np.load(buffer, allow_pickle=True)
+                             logger.debug(f"Loaded {filepath.name} as numpy array.")
+                             return data
+                        except ValueError as np_err:
+                             logger.debug(f"Failed to load {filepath.name} as numpy array ({np_err}), attempting CSV load.")
+                             # If numpy fails, rewind buffer (if possible) or re-read and try pandas
+                             # Re-reading is safer if stream isn't seekable
+                             ifh.seek(0) # Go back to start of file
+                             with dctx.stream_reader(ifh) as reader2:
+                                  # Load as pandas Series/DataFrame (assuming it was saved from text processing)
+                                  # header=0 infers header from first line, None means no header
+                                  df = pd.read_csv(reader2, header=0, keep_default_na=False)
+                                  logger.debug(f"Loaded {filepath.name} as pandas DataFrame/Series.")
+                                  # Return the Series/DataFrame - _vectorize needs to handle it
+                                  return df
+         except Exception as e:
+              logger.error(f"Failed to load processed file {filepath}: {e}", exc_info=True)
+              return None
+
+
+    def _vectorize(self, data) -> torch.Tensor:
+        """
+        Converts loaded processed data (numpy array, pandas Series/DataFrame) into a tensor.
+        Placeholder: Actual vectorization/embedding logic depends heavily on the data type and model requirements.
+        """
+        logger.debug(f"Vectorizing data of type: {type(data)}")
+        if isinstance(data, torch.Tensor):
+            # Already a tensor, ensure correct type and device
+            return data.to(dtype=torch.float32, device=self.device)
+        elif isinstance(data, np.ndarray):
+            # Convert numpy array to tensor
+             try:
+                  # Attempt direct conversion, assuming numerical data
+                  return torch.tensor(data, dtype=torch.float32, device=self.device)
+             except Exception as e:
+                  logger.error(f"Failed to convert numpy array to tensor: {e}. Array dtype: {data.dtype}, Shape: {data.shape}", exc_info=True)
+                  raise # Re-raise error
+        elif isinstance(data, pd.Series) or isinstance(data, pd.DataFrame):
+            # --- Placeholder for Text Vectorization ---
+            # This is highly dependent on the desired model input.
+            # Needs actual tokenization (e.g., SentencePiece, HuggingFace Tokenizer)
+            # and potentially embedding lookup.
+            logger.warning("Vectorization for pandas Series/DataFrame (text data) is not fully implemented. Returning dummy tensor.")
+            # Example: Convert to list of strings (assuming Series of words/sentences)
+            if isinstance(data, pd.DataFrame):
+                 # Assuming single text column if DataFrame
+                 if 'text' in data.columns:
+                      text_list = data['text'].astype(str).tolist()
+                 else: # Take first column
+                      text_list = data.iloc[:, 0].astype(str).tolist()
+            else: # pandas Series
+                 text_list = data.astype(str).tolist()
+
+            # --- Replace with actual tokenizer/embedding ---
+            # Example dummy: create tensor of zeros with shape (num_items, feature_dim)
+            num_items = len(text_list)
+            feature_dim = 128 # Example dimension, should match model input
+            dummy_tensor = torch.zeros((num_items, feature_dim), dtype=torch.float32, device=self.device)
+            # --------------------------------------------
+            return dummy_tensor
+        else:
+            raise TypeError(f"Unsupported data type for vectorization: {type(data)}")
+
+    def _save_tokenized(self, data: torch.Tensor, original_processed_path: Path) -> Path:
+        """Saves the tokenized tensor using torch.save."""
+        # Create filename based on the processed file stem
+        save_stem = original_processed_path.stem.replace('_processed', '_tokenized')
+        save_path = TOKENIZED_DATA_DIR / f"{save_stem}.pt" # Save as .pt file
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.debug(f"Saving tokenized tensor to: {save_path}")
+        try:
+            torch.save(data, save_path)
+            logger.debug(f"Successfully saved tokenized tensor: {save_path}")
+            return save_path
+        except Exception as e:
+            logger.error(f"Failed to save tokenized tensor to {save_path}: {e}", exc_info=True)
+            if save_path.exists():
+                 try: save_path.unlink()
+                 except OSError: pass
+            raise # Re-raise error
+
+
+# Example usage (for scripting or notebooks)
+# if __name__ == "__main__":
+#     logging.basicConfig(level=logging.INFO, format=DataProcessingConfig.LOG_FORMAT, datefmt=DataProcessingConfig.DATE_FORMAT)
+#     logger.info("Starting data processing and tokenization pipeline...")
+#
+#     processor = DataProcessor()
+#     processor.process_all() # Process 'discovered' and 'error' files
+#
+#     tokenizer = Tokenizer()
+#     tokenizer.tokenize_all() # Tokenize 'processed' files
+#
+#     logger.info("Pipeline finished.")
+
