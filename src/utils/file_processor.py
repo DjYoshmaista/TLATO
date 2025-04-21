@@ -1,6 +1,6 @@
 # --- Standalone Data Processing Functions ---
 # (These could be part of DataRepository or separate)
-from ..utils.logger import configure_logger
+from ..utils.logger import configure_logging, log_statement
 from ..utils.compression import decompress_file, compress_file, stream_decompress_lines, stream_compress_lines
 import os
 import shutil
@@ -8,8 +8,7 @@ from typing import List, Dict, Any
 from datetime import timezone
 import logging
 
-configure_logger()
-logger = logging.getLogger(__name__)
+configure_logging()
 
 class FileProcessor:
     def __init(self, input_filepath: str, output_filepath: str):
@@ -25,7 +24,7 @@ class FileProcessor:
     def process_file_content(self, input_filepath: str, output_filepath: str):
         """Processes content of a single file."""
         # TODO: Implement based on file type, calling specific readers/processors
-        logger.debug(f"Stub: Processing {input_filepath} -> {output_filepath}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Stub: Processing {input_filepath} -> {output_filepath}"), main_logger=str(__name__))
         # Example: Copying for now, replace with real processing
         try:
             # If input is zstd, need to decompress first
@@ -50,7 +49,7 @@ class FileProcessor:
                 os.remove(temp_decompressed)
 
         except Exception as e:
-            logger.error(f"Error in process_file_content for {input_filepath}: {e}")
+            log_statement(loglevel=str("error"), logstatement=str(f"Error in process_file_content for {input_filepath}: {e}"), main_logger=str(__name__))
             # Clean up partial files
             if os.path.exists(output_filepath): os.remove(output_filepath)
             if os.path.exists(output_filepath + ".tmp"): os.remove(output_filepath + ".tmp")
@@ -61,7 +60,7 @@ class FileProcessor:
     # Placeholder for actual tokenization logic called by DataRepository.tokenize_processed_data
     def tokenize_file_content(self, input_processed_zst_filepath: str, output_tokenized_zst_filepath: str):
         # Tokenizes content of a single processed file
-        logger.debug(f"Stub: Tokenizing {input_processed_zst_filepath} -> {output_tokenized_zst_filepath}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Stub: Tokenizing {input_processed_zst_filepath} -> {output_tokenized_zst_filepath}"), main_logger=str(__name__))
         # Example: Read decompressed, tokenize, write compressed
         try:
             def tokenization_generator():
@@ -73,7 +72,7 @@ class FileProcessor:
             stream_compress_lines(output_tokenized_zst_filepath, tokenization_generator())
 
         except Exception as e:
-            logger.error(f"Error in tokenize_file_content for {input_processed_zst_filepath}: {e}")
+            log_statement(loglevel=str("error"), logstatement=str(f"Error in tokenize_file_content for {input_processed_zst_filepath}: {e}"), main_logger=str(__name__))
             if os.path.exists(output_tokenized_zst_filepath): os.remove(output_tokenized_zst_filepath)
             raise
 

@@ -444,3 +444,34 @@ EOFError
 2025-04-18 08:46:35 - __main__ - INFO - [main.py:183] - Effective device set for orchestrator: cpu
 2025-04-18 08:46:47 - __main__ - WARNING - [main.py:290] - Attempted to run data pipeline, but modules are missing.
 2025-04-18 08:46:49 - __main__ - INFO - [main.py:578] - --- System Orchestrator Exiting ---
+2025-04-18 13:24:41 - root - ERROR - [logger.py:155] - Failed to configure custom logging: 'Logger' object is not callable
+Traceback (most recent call last):
+  File "/home/yosh/repos/TLATOv4.1/src/utils/logger.py", line 144, in configure_logging
+    init_logger(loglevel=str("info"), logstatement=str(f"Logging configured. Main log: {log_file_path}, Error log: {error_log_file_path}"), main_logger=str(__name__))
+TypeError: 'Logger' object is not callable
+2025-04-18 13:24:41 - src.training.trainer - INFO - [logger.py:174] - Training module initialized with logging.
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Training module initialized with logging.
+2025-04-18 13:24:41 - src.training.trainer - INFO - [logger.py:174] - Using device: cuda
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Using device: cuda
+2025-04-18 13:24:41 - src.training.trainer - INFO - [logger.py:174] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Checkpoint directory: /home/yosh/repos/TLATOv4.1/checkpoints
+2025-04-18 13:24:41 - src.training.trainer - INFO - [logger.py:174] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Log directory: /home/yosh/repos/TLATOv4.1/logs
+2025-04-18 13:24:41 - src.training.trainer - INFO - [logger.py:174] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Training configuration: {'__module__': 'src.utils.config', 'MAX_EPOCHS': 50, 'INITIAL_LR': 0.0003, 'WEIGHT_DECAY': 0.01, 'MODEL_INPUT_DIM': 128, 'MODEL_NUM_CLASSES': 6, 'LOSS_FUNCTION': 'MSELoss', 'PRUNE_INTERVAL_EPOCHS': 5, 'PRUNE_AMOUNT': 0.2, 'CHECKPOINT_DIR': PosixPath('/home/yosh/repos/TLATOv4.1/checkpoints'), 'CHECKPOINT_INTERVAL_BATCH_PERCENT': 0.1, 'PRUNE_METHOD': 'magnitude', 'METRICS_FILENAME_PREFIX': 'training_metrics', '__dict__': <attribute '__dict__' of 'TrainingConfig' objects>, '__weakref__': <attribute '__weakref__' of 'TrainingConfig' objects>, '__doc__': None}
+2025-04-18 13:24:41 - __main__ - WARNING - [logger.py:174] - Analysis (labeler) module not available: cannot import name 'configure_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-18 13:24:41 - app.log - WARNING - [logger.py:176] - Analysis (labeler) module not available: cannot import name 'configure_logger' from 'src.utils.logger' (/home/yosh/repos/TLATOv4.1/src/utils/logger.py)
+2025-04-18 13:24:41 - __main__ - INFO - [logger.py:174] - --- System Orchestrator Main Function ---
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - --- System Orchestrator Main Function ---
+2025-04-18 13:24:41 - __main__ - INFO - [logger.py:174] - Initializing System Orchestrator...
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Initializing System Orchestrator...
+2025-04-18 13:24:41 - __main__ - ERROR - [logger.py:174] - Error during GPU check for device determination: name 'log_statement' is not defined. Falling back to 'cpu'.
+2025-04-18 13:24:41 - app.log - ERROR - [logger.py:176] - Error during GPU check for device determination: name 'log_statement' is not defined. Falling back to 'cpu'.
+2025-04-18 13:24:41 - __main__ - INFO - [logger.py:174] - Effective device set for orchestrator: cpu
+2025-04-18 13:24:41 - app.log - INFO - [logger.py:176] - Effective device set for orchestrator: cpu
+2025-04-18 13:24:42 - __main__ - WARNING - [logger.py:174] - Attempted to run data pipeline, but modules are missing.
+2025-04-18 13:24:42 - app.log - WARNING - [logger.py:176] - Attempted to run data pipeline, but modules are missing.
+2025-04-18 13:24:51 - __main__ - WARNING - [logger.py:174] - User interrupted execution (Ctrl+C). Exiting.
+2025-04-18 13:24:51 - app.log - WARNING - [logger.py:176] - User interrupted execution (Ctrl+C). Exiting.
+2025-04-18 13:24:51 - __main__ - INFO - [logger.py:174] - --- System Orchestrator Exiting ---
+2025-04-18 13:24:51 - app.log - INFO - [logger.py:176] - --- System Orchestrator Exiting ---

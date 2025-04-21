@@ -143,7 +143,7 @@ def configure_logging(
         if file_logging:
             init_logger.info(f"Logging configured. Main log: {log_file_path}, Error log: {error_log_file_path}")
         elif console_logging:
-            init_logger.info(f"Logging configured (Console only).")
+            init_logger(loglevel=str("info"), logstatement=str(f"Logging configured (Console only)."), main_logger=str(__name__))
         else:
             print("WARNING: All logging handlers disabled.") # Use print if logger might not output
 
@@ -162,11 +162,33 @@ LOG_DIR = DEFAULT_LOG_DIR
 APP_LOG_FILE = DEFAULT_LOG_FILE_APP
 ERROR_LOG_FILE = DEFAULT_LOG_FILE_ERR
 
-def log_statement(loglevel, logstatement, main_logger):
+def log_statement(loglevel, logstatement, main_logger, exc_info=None):
+    """
+    Logs a statement with the specified log level, logger, and optional exception info.
+
+    Args:
+        loglevel (str): The log level as a string (e.g., "info", "error").
+        logstatement (str): The log message to be logged.
+        main_logger (str): The name of the logger to use.
+        exc_info (bool | Exception, optional): If True, includes exception traceback. 
+                                               If an Exception object is provided, logs its traceback.
+    """
     main_log = logging.getLogger(main_logger)
-    main_log.str(loglevel)(f"{logstatement}")
+    loglevel_mapping = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL
+    }
+    log_level = loglevel_mapping.get(loglevel.lower(), logging.INFO)
+
+    # Log the message with optional exception info and correct stacklevel
+    main_log.log(log_level, logstatement, exc_info=exc_info, stacklevel=2)
+
+    # Additionally log to the "app.log" logger with correct stacklevel
     app_log = logging.getLogger("app.log")
-    app_log.str(loglevel)(f"{logstatement}")
+    app_log.log(log_level, logstatement, exc_info=exc_info, stacklevel=2)
 
 # --- Example Usage (if run directly) ---
 if __name__ == '__main__':
@@ -182,7 +204,7 @@ if __name__ == '__main__':
     test_log_file = os.path.join(test_log_dir, "test_app.log")
     test_error_file = os.path.join(test_log_dir, "test_errors.log")
 
-    logger.info("Configuring logging for test...")
+    log_statement(loglevel=str("info"), logstatement=str("Configuring logging for test..."), main_logger=str(__name__))
     configure_logging(log_file_path=test_log_file,
                       error_log_file_path=test_error_file,
                       log_level=logging.DEBUG) # Set root to DEBUG for testing
@@ -190,14 +212,14 @@ if __name__ == '__main__':
     # Get a logger instance for testing
     test_logger = logging.getLogger("TestLogger")
 
-    logger.info("Sending test log messages...")
-    test_logger.debug("This is a debug message.")
-    test_logger.info("This is an info message.")
-    test_logger.warning("This is a warning message.")
-    test_logger.error("This is an error message.")
-    test_logger.critical("This is a critical message.")
+    log_statement(loglevel=str("info"), logstatement=str("Sending test log messages..."), main_logger=str(__name__))
+    test_logger(loglevel=str("debug"), logstatement=str("This is a debug message."), main_logger=str(__name__))
+    test_logger(loglevel=str("info"), logstatement=str("This is an info message."), main_logger=str(__name__))
+    test_logger(loglevel=str("warning"), logstatement=str("This is a warning message."), main_logger=str(__name__))
+    test_logger(loglevel=str("error"), logstatement=str("This is an error message."), main_logger=str(__name__))
+    test_logger(loglevel=str("critical"), logstatement=str("This is a critical message."), main_logger=str(__name__))
 
-    logger.info(f"Check '{test_log_file}' and '{test_error_file}' for output.")
+    log_statement(loglevel=str("info"), logstatement=str(f"Check '{test_log_file}' and '{test_error_file}' for output."), main_logger=str(__name__))
 
     # Example of logging an exception
     try:
@@ -206,7 +228,7 @@ if __name__ == '__main__':
         test_logger.error("An exception occurred!", exc_info=True) # exc_info=True adds traceback
 
     logging.shutdown() # Cleanly close handlers
-    logger.info("Logging test complete.")
+    log_statement(loglevel=str("info"), logstatement=str("Logging test complete."), main_logger=str(__name__))
 
 # --- Usage in other modules ---
 # In other modules (e.g., src/data/processing.py), simply do:

@@ -11,7 +11,7 @@ configure_logging()
 
 # Zstandard compression level (1-22, default 3). Higher is slower but better compression.
 # Use zstd.max_compress_level() for the absolute highest.
-ZSTD_COMPRESSION_LEVEL = zstd.ZSTD_MAX_COMPRESSION_LEVEL
+ZSTD_COMPRESSION_LEVEL = zstd.MAX_COMPRESSION_LEVEL
 ZSTD_THREADS = 0 # 0 means auto-detect number of CPU cores for multi-threaded compression
 
 def compress_file(input_filepath: str, output_filepath: str):

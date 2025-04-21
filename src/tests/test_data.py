@@ -30,7 +30,7 @@ DUMMY_SYNTHETIC_DIR = TEST_ARTIFACT_DIR / 'synthetic'
 
 def setup_dummy_files():
     """Creates dummy files for testing."""
-    logger.info(f"Setting up dummy data files in {TEST_ARTIFACT_DIR}")
+    log_statement(loglevel=str("info"), logstatement=str(f"Setting up dummy data files in {TEST_ARTIFACT_DIR}"), main_logger=str(__name__))
     # Create directories
     for d in [DUMMY_RAW_DIR, DUMMY_PROCESSED_DIR, DUMMY_TOKENIZED_DIR, DUMMY_SYNTHETIC_DIR]:
         os.makedirs(d, exist_ok=True)
@@ -54,7 +54,7 @@ def setup_dummy_files():
             with cctx.stream_writer(f) as compressor:
                 np.save(compressor, dummy_numeric_data)
     except Exception as e:
-         logger.error(f"Failed to create dummy processed NPY file: {e}")
+         log_statement(loglevel=str("error"), logstatement=str(f"Failed to create dummy processed NPY file: {e}"), main_logger=str(__name__))
 
 
     # Create dummy tokenized PT
@@ -74,18 +74,18 @@ def setup_dummy_files():
             for sample in dummy_synth_samples:
                 f.write(json.dumps(sample) + '\n')
     except Exception as e:
-         logger.error(f"Failed to create dummy synthetic JSONL file: {e}")
+         log_statement(loglevel=str("error"), logstatement=str(f"Failed to create dummy synthetic JSONL file: {e}"), main_logger=str(__name__))
 
 
 def tearDown_dummy_files():
     """Removes dummy files after testing."""
-    logger.info(f"Tearing down dummy data files in {TEST_ARTIFACT_DIR}")
+    log_statement(loglevel=str("info"), logstatement=str(f"Tearing down dummy data files in {TEST_ARTIFACT_DIR}"), main_logger=str(__name__))
     import shutil
     if TEST_ARTIFACT_DIR.exists():
         try:
             shutil.rmtree(TEST_ARTIFACT_DIR)
         except OSError as e:
-            logger.error(f"Error removing test artifact directory {TEST_ARTIFACT_DIR}: {e}")
+            log_statement(loglevel=str("error"), logstatement=str(f"Error removing test artifact directory {TEST_ARTIFACT_DIR}: {e}"), main_logger=str(__name__))
 
 
 # --- Test Classes ---
@@ -103,7 +103,7 @@ class ReadersTests(unittest.TestCase):
         tearDown_dummy_files()
 
     def test_csv_reader(self):
-        logger.debug("Testing CSVReader.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing CSVReader."), main_logger=str(__name__))
         reader = readers.CSVReader(DUMMY_RAW_DIR / 'dummy_data.csv')
         df = reader.read()
         self.assertIsInstance(df, pd.DataFrame)
@@ -112,7 +112,7 @@ class ReadersTests(unittest.TestCase):
         # Add more assertions
 
     def test_txt_reader(self):
-        logger.debug("Testing TXTReader.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing TXTReader."), main_logger=str(__name__))
         reader = readers.TXTReader(DUMMY_RAW_DIR / 'dummy_text.txt')
         df = reader.read()
         self.assertIsInstance(df, pd.DataFrame)
@@ -122,14 +122,14 @@ class ReadersTests(unittest.TestCase):
         # Add more assertions
 
     def test_get_reader_class(self):
-        logger.debug("Testing get_reader_class function.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing get_reader_class function."), main_logger=str(__name__))
         self.assertIs(readers.get_reader_class('csv'), readers.CSVReader)
         self.assertIs(readers.get_reader_class('.TXT'), readers.TXTReader)
         self.assertIsNone(readers.get_reader_class('unknown'))
         # Add tests for optional readers (pdf, jsonl) based on availability
 
     def test_open_files_recursively(self):
-        logger.debug("Testing open_files_recursively.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing open_files_recursively."), main_logger=str(__name__))
         repo_path = TEST_ARTIFACT_DIR / "test_repo.csv"
         prog_path = TEST_ARTIFACT_DIR / "test_prog.csv"
         readers.open_files_recursively(DUMMY_RAW_DIR, repo_file=repo_path, progress_file=prog_path)
@@ -154,7 +154,7 @@ class LoadersTests(unittest.TestCase):
         tearDown_dummy_files()
 
     def test_enhanced_data_loader(self):
-        logger.debug("Testing EnhancedDataLoader.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing EnhancedDataLoader."), main_logger=str(__name__))
         # Test loading .pt files created in setup
         loader = loaders.EnhancedDataLoader(data_dir=DUMMY_TOKENIZED_DIR, batch_size=2, shuffle=False)
         batches = list(loader) # Consume iterator
@@ -167,7 +167,7 @@ class LoadersTests(unittest.TestCase):
         # Add more checks: device, number of batches, handling different file types
 
     def test_synthetic_data_loader(self):
-        logger.debug("Testing SyntheticDataLoader.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing SyntheticDataLoader."), main_logger=str(__name__))
         loader = loaders.SyntheticDataLoader(data_dir=DUMMY_SYNTHETIC_DIR, batch_size=1, shuffle=False)
         batches = list(loader)
         self.assertEqual(len(batches), 2, "Should yield 2 batches for 2 samples with batch_size=1.")
@@ -214,7 +214,7 @@ class ProcessingTests(unittest.TestCase):
              os.remove(self.repo_path)
 
     def test_data_repository_add_update(self):
-        logger.debug("Testing DataRepository add/update.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing DataRepository add/update."), main_logger=str(__name__))
         test_path = DUMMY_RAW_DIR / 'dummy_data.csv'
         status = self.repo.get_status(test_path)
         self.assertEqual(status, 'discovered')
@@ -232,7 +232,7 @@ class ProcessingTests(unittest.TestCase):
 
 
     def test_data_processor_text(self):
-        logger.debug("Testing DataProcessor text processing.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing DataProcessor text processing."), main_logger=str(__name__))
         processor = processing.DataProcessor()
         # Process the dummy text file added in setUp
         processor.process_all(statuses_to_process=('discovered',)) # Only process newly discovered
@@ -249,7 +249,7 @@ class ProcessingTests(unittest.TestCase):
     # Add test_data_processor_numerical similarly
 
     def test_tokenizer(self):
-        logger.debug("Testing Tokenizer.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing Tokenizer."), main_logger=str(__name__))
         # Setup: Ensure a file is marked as 'processed' with a valid processed_path
         processed_file_path = DUMMY_PROCESSED_DIR / 'dummy_numeric_processed.npy.zst'
         source_file_path = DUMMY_RAW_DIR / 'dummy_numeric.json' # Assume this was the source
@@ -284,7 +284,7 @@ class SyntheticTests(unittest.TestCase):
         pass
 
     def test_validate_sample(self):
-        logger.debug("Testing synthetic sample validation.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing synthetic sample validation."), main_logger=str(__name__))
         generator = synthetic.SyntheticDataGenerator() # Need instance for validation method
         valid_json_str = '{"input": [0.5]*128, "target": [0.1]*10}'
         invalid_json_str_keys = '{"inputs": [0.5]*128, "targets": [0.1]*10}'
@@ -301,7 +301,7 @@ class SyntheticTests(unittest.TestCase):
 # Standard unittest execution
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Running data tests...")
+    log_statement(loglevel=str("info"), logstatement=str("Running data tests..."), main_logger=str(__name__))
     # Be cautious running tests that modify/delete files, ensure proper setup/teardown
     unittest.main()
 

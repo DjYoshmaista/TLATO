@@ -11,7 +11,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-
+from ..utils.logger import log_statement, configure_logging
+configure_logging()
+# --- Configuration ---
+# This is a placeholder for any model-specific configurations.
+# It could include hyperparameters, architecture details, etc.
+# For now, we will assume these are passed directly to the model classes.
+# --- Imports ---
+# Import PyTorch and any other necessary libraries
+# Import any additional libraries needed for the model
+# For example, if using PyTorch Geometric for GNNs, import those here
 # Import necessary components from PyTorch Geometric if used
 try:
     # These imports are based on the usage seen in the original tests.txt
@@ -26,9 +35,6 @@ except ImportError:
     class Data: pass
     class Batch: pass
 
-
-logger = logging.getLogger(__name__)
-
 # --- Placeholder for GATLayer (implied by tests.txt) ---
 class GATLayer(nn.Module):
     """
@@ -42,7 +48,7 @@ class GATLayer(nn.Module):
         if not PYG_AVAILABLE:
             raise ImportError("GATLayer requires PyTorch Geometric to be installed.")
 
-        logger.info(f"Initializing GATLayer: In={input_dim}, Out={output_dim}, Heads={heads}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Initializing GATLayer: In={input_dim}, Out={output_dim}, Heads={heads}"), main_logger=str(__name__))
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.heads = heads
@@ -66,7 +72,7 @@ class GATLayer(nn.Module):
                   (Or potentially just the updated node features tensor).
         """
         if not PYG_AVAILABLE:
-             logger.error("Cannot perform GATLayer forward pass: PyTorch Geometric not available.")
+             log_statement(loglevel=str("error"), logstatement=str("Cannot perform GATLayer forward pass: PyTorch Geometric not available."), main_logger=str(__name__))
              # Return input features or raise error
              return data # Or return data.x, or raise RuntimeError
 
@@ -79,7 +85,7 @@ class GATLayer(nn.Module):
         # Alternatively, just return the tensor x
         data.x = F.elu(x) # Apply activation (ELU is common after GAT)
 
-        logger.debug(f"GATLayer output shape: {data.x.shape}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"GATLayer output shape: {data.x.shape}"), main_logger=str(__name__))
         return data # Or return data.x
 
 
@@ -106,7 +112,7 @@ class ZoneClassifier(nn.Module):
         self.input_features = input_features
         self.num_classes = num_classes
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Initializing ZoneClassifier: In={input_features}, Classes={num_classes}, Device={self.device}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Initializing ZoneClassifier: In={input_features}, Classes={num_classes}, Device={self.device}"), main_logger=str(__name__))
 
         # --- Example Architecture ---
         # This is a *very* basic example. Replace with your actual model design.
@@ -133,7 +139,7 @@ class ZoneClassifier(nn.Module):
              # Fallback or alternative architecture if PyG is not used
              # Example: Simple MLP assuming input is a flat tensor per batch item
              # This might not match the dummy_input shape in helpers.py - adjust as needed!
-             logger.warning("ZoneClassifier falling back to MLP architecture due to missing PyTorch Geometric.")
+             log_statement(loglevel=str("warning"), logstatement=str("ZoneClassifier falling back to MLP architecture due to missing PyTorch Geometric."), main_logger=str(__name__))
              # Assuming input needs flattening or different handling
              # Example: Flatten sequence data (batch, seq, feat) -> (batch, seq*feat)
              # self.flatten = nn.Flatten()
@@ -147,7 +153,7 @@ class ZoneClassifier(nn.Module):
 
         # Move model to the specified device
         self.to(self.device)
-        logger.info(f"ZoneClassifier moved to device: {self.device}")
+        log_statement(loglevel=str("info"), logstatement=str(f"ZoneClassifier moved to device: {self.device}"), main_logger=str(__name__))
 
 
     def forward(self, input_data):
@@ -165,12 +171,12 @@ class ZoneClassifier(nn.Module):
 
         if PYG_AVAILABLE and isinstance(input_data, (Data, Batch)):
             # --- Graph-based forward pass ---
-            logger.debug(f"ZoneClassifier (GNN) input type: {type(input_data)}, x shape: {input_data.x.shape}")
+            log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (GNN) input type: {type(input_data)}, x shape: {input_data.x.shape}"), main_logger=str(__name__))
 
             # Ensure data is on the correct device
             if input_data.x.device != self.device:
                  input_data = input_data.to(self.device)
-                 logger.warning(f"Input data moved to device {self.device} during forward pass.")
+                 log_statement(loglevel=str("warning"), logstatement=str(f"Input data moved to device {self.device} during forward pass."), main_logger=str(__name__))
 
 
             x = self.gat_layer1(input_data).x # Get updated node features
@@ -183,27 +189,27 @@ class ZoneClassifier(nn.Module):
                  # Import pooling if needed: from torch_geometric.nn import global_mean_pool
                  # x = global_mean_pool(x, input_data.batch)
                  # Placeholder: simple mean if pooling not imported/used
-                 logger.warning("Applying simple mean pooling as PyG pooling function is not explicitly used.")
+                 log_statement(loglevel=str("warning"), logstatement=str("Applying simple mean pooling as PyG pooling function is not explicitly used."), main_logger=str(__name__))
                  x = x.mean(dim=0, keepdim=True) # Simple mean pooling - likely needs proper PyG pooling
             else:
                  # Handle single graph Data object - e.g., mean pool all nodes
                  x = x.mean(dim=0, keepdim=True) # Pool across nodes
 
-            logger.debug(f"Shape after pooling: {x.shape}")
+            log_statement(loglevel=str("debug"), logstatement=str(f"Shape after pooling: {x.shape}"), main_logger=str(__name__))
 
             # Apply final linear layers
             x = F.relu(self.linear1(x))
             x = self.dropout(x)
             x = self.linear2(x)
-            logger.debug(f"ZoneClassifier (GNN) output shape: {x.shape}")
+            log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (GNN) output shape: {x.shape}"), main_logger=str(__name__))
             return x
 
         elif isinstance(input_data, torch.Tensor):
              # --- Tensor-based forward pass (e.g., MLP fallback) ---
-             logger.debug(f"ZoneClassifier (Tensor) input shape: {input_data.shape}")
+             log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (Tensor) input shape: {input_data.shape}"), main_logger=str(__name__))
              if input_data.device != self.device:
                   input_data = input_data.to(self.device)
-                  logger.warning(f"Input tensor moved to device {self.device} during forward pass.")
+                  log_statement(loglevel=str("warning"), logstatement=str(f"Input tensor moved to device {self.device} during forward pass."), main_logger=str(__name__))
 
              # Adapt based on expected tensor input and MLP structure
              # Example: if input is (batch, seq, feat) and MLP expects (batch, features)
@@ -213,10 +219,10 @@ class ZoneClassifier(nn.Module):
              x = self.relu(self.linear1(input_data))
              x = self.dropout(x)
              x = self.linear2(x)
-             logger.debug(f"ZoneClassifier (Tensor) output shape: {x.shape}")
+             log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (Tensor) output shape: {x.shape}"), main_logger=str(__name__))
              return x
         else:
-            logger.error(f"ZoneClassifier received unsupported input type: {type(input_data)}")
+            log_statement(loglevel=str("error"), logstatement=str(f"ZoneClassifier received unsupported input type: {type(input_data)}"), main_logger=str(__name__))
             raise TypeError(f"Unsupported input type for ZoneClassifier: {type(input_data)}")
 
 

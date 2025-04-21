@@ -10,6 +10,8 @@ import importlib
 import pandas as pd
 import numpy as np
 import logging
+from src.utils.logger import configure_logging, log_statement
+configure_logging()
 
 # Use standard logging
 logger = logging.getLogger(__name__)
@@ -29,22 +31,22 @@ def get_pycuda_compute_capability(device_index=0):
         cuda = importlib.import_module('pycuda.driver')
         cuda.init() # Initialize the CUDA driver
         if device_index >= cuda.Device.count():
-            logger.warning(f"Device index {device_index} out of range. Found {cuda.Device.count()} devices.")
+            log_statement(loglevel=str("warning"), logstatement=str(f"Device index {device_index} out of range. Found {cuda.Device.count()} devices."), main_logger=str(__name__))
             return None
         device = cuda.Device(device_index)
         major = device.get_attribute(cuda.device_attribute.COMPUTE_CAPABILITY_MAJOR)
         minor = device.get_attribute(cuda.device_attribute.COMPUTE_CAPABILITY_MINOR)
         capability = f"{major}.{minor}"
-        logger.info(f"Device {device_index} ({device.name()}): Compute Capability {capability}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Device {device_index} ({device.name()}): Compute Capability {capability}"), main_logger=str(__name__))
         return capability
     except ImportError:
-        logger.warning("PyCUDA not found. Cannot check GPU compute capability.")
+        log_statement(loglevel=str("warning"), logstatement=str("PyCUDA not found. Cannot check GPU compute capability."), main_logger=str(__name__))
         return None
     except cuda.RuntimeError as e:
-        logger.error(f"PyCUDA runtime error during capability check: {e}")
+        log_statement(loglevel=str("error"), logstatement=str(f"PyCUDA runtime error during capability check: {e}"), main_logger=str(__name__))
         return None
     except Exception as e:
-        logger.error(f"Unexpected error during compute capability check: {e}")
+        log_statement(loglevel=str("error"), logstatement=str(f"Unexpected error during compute capability check: {e}"), main_logger=str(__name__))
         return None
 
 def check_gpu_support(min_capability_threshold=7.0):
@@ -62,7 +64,7 @@ def check_gpu_support(min_capability_threshold=7.0):
         cuda.init()
         num_devices = cuda.Device.count()
         if num_devices == 0:
-            logger.info("No CUDA devices found. Using CPU.")
+            log_statement(loglevel=str("info"), logstatement=str("No CUDA devices found. Using CPU."), main_logger=str(__name__))
             return False
 
         for i in range(num_devices):
@@ -70,19 +72,19 @@ def check_gpu_support(min_capability_threshold=7.0):
             if capability_str:
                 capability = float(capability_str)
                 if capability >= min_capability_threshold:
-                    logger.info(f"Found suitable GPU (Device {i}) with capability {capability} >= {min_capability_threshold}.")
+                    log_statement(loglevel=str("info"), logstatement=str(f"Found suitable GPU (Device {i}) with capability {capability} >= {min_capability_threshold}."), main_logger=str(__name__))
                     return True
                 else:
-                     logger.warning(f"Device {i} capability {capability} is below threshold {min_capability_threshold}.")
+                     log_statement(loglevel=str("warning"), logstatement=str(f"Device {i} capability {capability} is below threshold {min_capability_threshold}."), main_logger=str(__name__))
 
-        logger.warning(f"No GPU found with compute capability >= {min_capability_threshold}. Using CPU.")
+        log_statement(loglevel=str("warning"), logstatement=str(f"No GPU found with compute capability >= {min_capability_threshold}. Using CPU."), main_logger=str(__name__))
         return False
 
     except ImportError:
-        logger.info("PyCUDA not found. Assuming CPU execution.")
+        log_statement(loglevel=str("info"), logstatement=str("PyCUDA not found. Assuming CPU execution."), main_logger=str(__name__))
         return False
     except Exception as e:
-        logger.error(f"Error during GPU support check: {e}. Defaulting to CPU.")
+        log_statement(loglevel=str("error"), logstatement=str(f"Error during GPU support check: {e}. Defaulting to CPU."), main_logger=str(__name__))
         return False
 
 def get_compute_backend(min_capability_threshold=7.0):
@@ -105,13 +107,13 @@ def get_compute_backend(min_capability_threshold=7.0):
             # Try importing GPU libraries
             cudf = importlib.import_module('cudf')
             cupy = importlib.import_module('cupy')
-            logger.info("Successfully imported cuDF and CuPy. Using GPU backend.")
+            log_statement(loglevel=str("info"), logstatement=str("Successfully imported cuDF and CuPy. Using GPU backend."), main_logger=str(__name__))
             return 'gpu', cudf, cupy
         except ImportError as e:
-            logger.warning(f"GPU support detected, but failed to import cuDF/CuPy: {e}. Falling back to CPU.")
+            log_statement(loglevel=str("warning"), logstatement=str(f"GPU support detected, but failed to import cuDF/CuPy: {e}. Falling back to CPU."), main_logger=str(__name__))
             return 'cpu', pd, np
     else:
-        logger.info("Using CPU backend (pandas and numpy).")
+        log_statement(loglevel=str("info"), logstatement=str("Using CPU backend (pandas and numpy)."), main_logger=str(__name__))
         return 'cpu', pd, np
 
 # Example Usage (can be removed or placed in a separate script/notebook)

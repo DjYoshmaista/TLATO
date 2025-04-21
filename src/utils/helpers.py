@@ -179,7 +179,87 @@ class DummyDataLoader:
 # for inputs, targets in dummy_loader:
 #     print(f"Inputs shape: {inputs.shape}, Targets shape: {targets.shape}")
 #     print(f"Inputs: {inputs}, Targets: {targets}")
-    
+
+import io
+import pandas as pd
+from ..utils.logger import configure_logging, log_statement
+import zstandard as zstd
+from pathlib import Path
+from typing import Dict, Any, Optional
+from ..utils.hashing import generate_data_hash
+from ..utils.compression import stream_compress_lines, ZSTD_COMPRESSION_LEVEL, ZSTD_THREADS
+import os
+import sys
+from ..data.constants import (COL_FILEPATH, COL_STATUS, COL_ERROR, COL_DATA_HASH,
+                                STATUS_PROCESSING, STATUS_PROCESSED, STATUS_ERROR)
+from ..data.readers import (FileReader, PDFReader, CSVReader, TXTReader, JSONReader, JSONLReader, ExcelReader)
+from ..utils.config import PROCESSED_DATA_DIR # Assuming self.output_dir = PROCESSED_DATA_DIR
+
+configure_logging()
+
+# --- Helper Function for Saving DataFrame to Compressed Parquet (Needs Integration) ---
+# This function is added based on the comment in the user prompt suggesting parquet output
+# It should be placed within the DataProcessor class or imported if defined elsewhere.
+
+def save_dataframe_to_parquet_zst(self, df: pd.DataFrame, output_path: Path):
+    """Saves a pandas DataFrame to a Zstandard-compressed Parquet file."""
+    try:
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Check if using cuDF DataFrame and convert if necessary before saving with pandas
+        if 'cudf' in sys.modules and isinstance(df, sys.modules['cudf'].DataFrame):
+            log_statement(loglevel='debug', logstatement="Converting cuDF DataFrame to Pandas before Parquet save.", main_logger=str(__name__))
+            df_pandas = df.to_pandas()
+        else:
+            df_pandas = df # Assume it's already a pandas DataFrame
+
+        # Save using pandas to_parquet with zstd compression
+        df_pandas.to_parquet(output_path, compression='zstd', engine='pyarrow') # engine='fastparquet' is another option
+
+        log_statement(loglevel='info', logstatement=f"DataFrame saved to compressed Parquet: {output_path}", main_logger=str(__name__))
+        return True
+    except ImportError:
+        log_statement(loglevel='error', logstatement="Error saving to Parquet: 'pyarrow' or 'fastparquet' library not found. Please install one.", main_logger=str(__name__))
+        return False
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"Failed to save DataFrame to compressed Parquet {output_path}: {e}", main_logger=str(__name__), exc_info=True)
+        # Clean up potentially incomplete file
+        if output_path.exists():
+            try:
+                output_path.unlink()
+            except OSError:
+                pass
+        return False
+
+# --- Helper Function for Saving String to Compressed File (Needs Integration) ---
+def compress_string_to_file(self, text_content: str, output_path: Path):
+    """Compresses a string content into a Zstandard file using streaming."""
+    try:
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def text_generator():
+            # Yield the content line by line or in chunks if very large
+            # For simplicity, yielding the whole string (ensure it fits memory)
+            # For very large strings, consider splitting into lines or chunks
+            yield text_content
+
+        # Use stream_compress_lines utility function
+        stream_compress_lines(str(output_path), text_generator())
+
+        log_statement(loglevel='debug', logstatement=f"Stream compressed string to '{output_path}'", main_logger=str(__name__))
+        return True
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"Error during streaming compression of string to '{output_path}': {e}", main_logger=str(__name__), exc_info=True)
+        # Clean up potentially incomplete output file
+        if output_path.exists():
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+        return False
+
 # --- Helper Function (Optional) ---
 def get_config_value(key_path, default=None):
     """
@@ -276,9 +356,9 @@ def dummy_input(input_shape, device=None):
 #     self.assertEqual(self.scheduler.state_dict(), loaded_scheduler.state_dict())
 #         self.assertEqual(loaded_meta['epoch'], epoch_to_save)
 #         self.assertEqual(loaded_meta['info'], extra_meta['info'])
-#         logger.debug("Save and load cycle completed successfully.")
+#         log_statement(loglevel=str("debug"), logstatement=str("Save and load cycle completed successfully."), main_logger=str(__name__))
 #         # Clean up
 #         if self.test_filepath.exists():
 #             os.remove(self.test_filepath)
-#         logger.debug(f"Removed test checkpoint file: {self.test_filepath}")
-#         logger.debug("Save and load cycle completed successfully.")
+#         log_statement(loglevel=str("debug"), logstatement=str(f"Removed test checkpoint file: {self.test_filepath}"), main_logger=str(__name__))
+#         log_statement(loglevel=str("debug"), logstatement=str("Save and load cycle completed successfully."), main_logger=str(__name__))

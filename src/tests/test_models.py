@@ -56,20 +56,20 @@ class GATLayerTests(unittest.TestCase):
 
     def test_forward_pass_shape(self):
         """Test the output shape of the GATLayer forward pass."""
-        logger.debug("Testing GATLayer forward pass output shape.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing GATLayer forward pass output shape."), main_logger=str(__name__))
         # The forward pass in the placeholder returns the modified data object
         output_data = self.gat_layer(self.test_data)
         # Check the shape of the node features 'x' within the output data object
         expected_shape = (self.num_nodes, self.output_dim)
         self.assertEqual(output_data.x.shape, expected_shape)
-        logger.debug(f"GATLayer output shape validated: {output_data.x.shape}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"GATLayer output shape validated: {output_data.x.shape}"), main_logger=str(__name__))
 
     def test_forward_pass_no_nan(self):
         """Test the GATLayer forward pass output for NaN values."""
-        logger.debug("Testing GATLayer forward pass for NaN.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing GATLayer forward pass for NaN."), main_logger=str(__name__))
         output_data = self.gat_layer(self.test_data)
         self.assertFalse(torch.isnan(output_data.x).any(), "GATLayer output contains NaN values.")
-        logger.debug("GATLayer NaN check passed.")
+        log_statement(loglevel=str("debug"), logstatement=str("GATLayer NaN check passed."), main_logger=str(__name__))
 
     # Add more tests: different graph structures, edge cases, batch processing
 
@@ -102,7 +102,7 @@ class ZoneClassifierTests(unittest.TestCase):
                   data_list.append(data)
              # Import Batch class if needed: from torch_geometric.data import Batch
              self.dummy_input_data = Batch.from_data_list(data_list).to(DEFAULT_DEVICE)
-             logger.debug(f"Created dummy PyG Batch input for ZoneClassifier test.")
+             log_statement(loglevel=str("debug"), logstatement=str(f"Created dummy PyG Batch input for ZoneClassifier test."), main_logger=str(__name__))
 
         else:
              # Assume standard tensor input (adjust shape if needed)
@@ -114,12 +114,12 @@ class ZoneClassifierTests(unittest.TestCase):
              )
              # If model expects (batch, features) instead of (batch, seq, features):
              # self.dummy_input_data = torch.randn(self.batch_size, self.input_dim, device=DEFAULT_DEVICE)
-             logger.debug(f"Created dummy Tensor input for ZoneClassifier test: shape={self.dummy_input_data.shape}")
+             log_statement(loglevel=str("debug"), logstatement=str(f"Created dummy Tensor input for ZoneClassifier test: shape={self.dummy_input_data.shape}"), main_logger=str(__name__))
 
 
     def test_forward_pass_shape(self):
         """Test the output shape of the ZoneClassifier forward pass."""
-        logger.debug("Testing ZoneClassifier forward pass output shape.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing ZoneClassifier forward pass output shape."), main_logger=str(__name__))
         with torch.no_grad():
             output = self.model(self.dummy_input_data)
 
@@ -130,15 +130,15 @@ class ZoneClassifierTests(unittest.TestCase):
         # Assuming output is (batch_size, num_classes) after pooling/flattening
         expected_shape = (self.batch_size, self.num_classes)
         self.assertEqual(output.shape, expected_shape, f"Output shape mismatch. Expected {expected_shape}, got {output.shape}")
-        logger.debug(f"ZoneClassifier output shape validated: {output.shape}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier output shape validated: {output.shape}"), main_logger=str(__name__))
 
     def test_forward_pass_no_nan(self):
         """Test the ZoneClassifier forward pass output for NaN values."""
-        logger.debug("Testing ZoneClassifier forward pass for NaN.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing ZoneClassifier forward pass for NaN."), main_logger=str(__name__))
         with torch.no_grad():
             output = self.model(self.dummy_input_data)
         self.assertFalse(torch.isnan(output).any(), "ZoneClassifier output contains NaN values.")
-        logger.debug("ZoneClassifier NaN check passed.")
+        log_statement(loglevel=str("debug"), logstatement=str("ZoneClassifier NaN check passed."), main_logger=str(__name__))
 
     # Add more tests: different input types, training mode vs eval mode, specific layer outputs
 
@@ -146,6 +146,6 @@ class ZoneClassifierTests(unittest.TestCase):
 # Standard unittest execution
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Running model tests...")
+    log_statement(loglevel=str("info"), logstatement=str("Running model tests..."), main_logger=str(__name__))
     unittest.main()
 

@@ -87,7 +87,7 @@ class TrainingConfig:
     LOSS_FUNCTION = 'MSELoss' # Example: 'MSELoss' or 'CrossEntropyLoss'
     # Pruning settings
     PRUNE_INTERVAL_EPOCHS = 5
-    PRUNE_AMOUNT = 0.20
+    PRUNE_AMOUNT = 0.05
     # Checkpointing
     CHECKPOINT_DIR = CHECKPOINT_DIR
     CHECKPOINT_INTERVAL_BATCH_PERCENT = 0.10
@@ -143,3 +143,31 @@ def get_config_value(key_path, default=None):
         return value
     except (AttributeError, KeyError):
         return default
+    
+def load_config():
+    """
+    Loads the configuration settings.
+    This can be expanded to load from JSON/YAML files if needed.
+    """
+    return {
+        'base_data_dir': BASE_DATA_DIR,
+        'raw_data_dir': RAW_DATA_DIR,
+        'processed_data_dir': PROCESSED_DATA_DIR,
+        'tokenized_data_dir': TOKENIZED_DATA_DIR,
+        'synthetic_data_dir': SYNTHETIC_DATA_DIR,
+        'data_repo_file': DATA_REPO_FILE,
+        'checkpoint_dir': CHECKPOINT_DIR,
+        'log_dir': LOG_DIR,
+        'test_data_output_dir': TEST_DATA_OUTPUT_DIR,
+        'default_device': DEFAULT_DEVICE,
+        'compression_enabled': COMPRESSION_ENABLED,
+        'compression_level': COMPRESSION_LEVEL,
+        'data_processing_config': DataProcessingConfig(),
+        'data_loader_config': DataLoaderConfig(),
+        'synthetic_data_config': SyntheticDataConfig(),
+        'training_config': TrainingConfig(),
+        'zone_config': ZoneConfig(),
+        'labeler_config': LabelerConfig(),
+        'core_config': CoreConfig(),
+        'test_config': TestConfig()
+    }

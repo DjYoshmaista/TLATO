@@ -74,7 +74,7 @@ class TrainingMetricsTests(unittest.TestCase):
         self.metrics.clear()
 
     def test_record_and_get_dataframe(self):
-        logger.debug("Testing TrainingMetrics record and get_dataframe.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing TrainingMetrics record and get_dataframe."), main_logger=str(__name__))
         self.metrics.record(epoch=0, batch=1, loss=0.5, lr=1e-4, pruned_count=10, duration=0.1, batch_size=4)
         self.metrics.record(epoch=0, batch=2, loss=0.4, lr=1e-4, pruned_count=10, duration=0.11, batch_size=4)
         df = self.metrics.get_dataframe()
@@ -85,7 +85,7 @@ class TrainingMetricsTests(unittest.TestCase):
         self.assertListEqual(list(df.columns), self.metrics.columns)
 
     def test_save_and_clear(self):
-        logger.debug("Testing TrainingMetrics save and clear.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing TrainingMetrics save and clear."), main_logger=str(__name__))
         self.metrics.record(epoch=0, batch=1, loss=0.5, lr=1e-4, pruned_count=10, duration=0.1, batch_size=4)
         self.metrics.save(filename=self.test_file.name) # Save to test dir
         self.assertTrue(self.test_file.exists())
@@ -146,13 +146,13 @@ class EnhancedTrainerTests(unittest.TestCase):
             if filepath.exists():
                 try:
                     os.remove(filepath)
-                    logger.debug(f"Removed test checkpoint: {filepath}")
+                    log_statement(loglevel=str("debug"), logstatement=str(f"Removed test checkpoint: {filepath}"), main_logger=str(__name__))
                 except OSError as e:
-                    logger.error(f"Failed to remove test checkpoint {filepath}: {e}")
+                    log_statement(loglevel=str("error"), logstatement=str(f"Failed to remove test checkpoint {filepath}: {e}"), main_logger=str(__name__))
 
     def test_train_epoch(self):
         """Test running a single training epoch."""
-        logger.debug("Testing EnhancedTrainer train_epoch.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing EnhancedTrainer train_epoch."), main_logger=str(__name__))
         initial_params = [p.clone() for p in self.model.parameters()]
 
         avg_loss = self.trainer.train_epoch()
@@ -164,11 +164,11 @@ class EnhancedTrainerTests(unittest.TestCase):
         self.assertTrue(params_changed, "Model parameters should change after one epoch.")
         # Check if metrics were recorded
         self.assertEqual(len(self.trainer.metrics.metrics_data), self.num_batches)
-        logger.debug(f"train_epoch finished with avg_loss: {avg_loss:.4f}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"train_epoch finished with avg_loss: {avg_loss:.4f}"), main_logger=str(__name__))
 
     def test_full_train_loop(self):
         """Test running the full training loop for a few epochs."""
-        logger.debug("Testing EnhancedTrainer full train loop.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing EnhancedTrainer full train loop."), main_logger=str(__name__))
         initial_params = [p.clone() for p in self.model.parameters()]
         max_epochs = self.trainer.config.MAX_EPOCHS # Use the (potentially overridden) config value
 
@@ -186,7 +186,7 @@ class EnhancedTrainerTests(unittest.TestCase):
              self.assertTrue((CHECKPOINT_DIR / chkpt_name).exists(), f"Checkpoint {chkpt_name} not found.")
              self.checkpoint_files_to_clean.append(chkpt_name) # Mark for cleanup
 
-        logger.debug("Full train loop test finished.")
+        log_statement(loglevel=str("debug"), logstatement=str("Full train loop test finished."), main_logger=str(__name__))
 
     # Add tests for pruning, checkpoint loading/saving specifically
 
@@ -194,5 +194,5 @@ class EnhancedTrainerTests(unittest.TestCase):
 # Standard unittest execution
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Running training tests...")
+    log_statement(loglevel=str("info"), logstatement=str("Running training tests..."), main_logger=str(__name__))
     unittest.main()

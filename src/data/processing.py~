@@ -42,11 +42,11 @@ try:
     from cuml.preprocessing import StandardScaler as CumlScaler
     GPU_AVAILABLE = torch.cuda.is_available() # Double check torch sees GPU
     if not GPU_AVAILABLE:
-        logger.warning("GPU libraries (cuDF, CuPy, cuML) seem available, but torch.cuda.is_available() is False. Using CPU fallback.")
+        log_statement(loglevel=str("warning"), logstatement=str("GPU libraries (cuDF, CuPy, cuML) seem available, but torch.cuda.is_available() is False. Using CPU fallback."), main_logger=str(__name__))
     else:
-         logger.info("GPU libraries (cuDF, CuPy, cuML) loaded successfully.")
+         log_statement(loglevel=str("info"), logstatement=str("GPU libraries (cuDF, CuPy, cuML) loaded successfully."), main_logger=str(__name__))
 except ImportError as e:
-    logger.warning(f"GPU libraries (cuDF/CuPy/cuML) not found ({e}). Using CPU fallback (pandas/numpy). Scaling will be skipped for numerical data.")
+    log_statement(loglevel=str("warning"), logstatement=str(f"GPU libraries (cuDF/CuPy/cuML) not found ({e}). Using CPU fallback (pandas/numpy). Scaling will be skipped for numerical data."), main_logger=str(__name__))
     GPU_AVAILABLE = False
     # Define dummy classes to avoid NameErrors if needed, though conditional logic is preferred
     class cudf: pass
@@ -68,12 +68,12 @@ try:
         try:
             nltk.data.find('corpora/wordnet')
         except nltk.downloader.DownloadError:
-            logger.info("Downloading NLTK 'wordnet' data...")
+            log_statement(loglevel=str("info"), logstatement=str("Downloading NLTK 'wordnet' data..."), main_logger=str(__name__))
             nltk.download('wordnet', quiet=True)
         try:
             nltk.data.find('corpora/stopwords')
         except nltk.downloader.DownloadError:
-            logger.info("Downloading NLTK 'stopwords' data...")
+            log_statement(loglevel=str("info"), logstatement=str("Downloading NLTK 'stopwords' data..."), main_logger=str(__name__))
             nltk.download('stopwords', quiet=True)
 
     # Consider calling download_nltk_data() here or ensuring it's run during setup
@@ -83,10 +83,10 @@ try:
     # Initialize lemmatizer and stopwords globally for efficiency if NLTK is available
     lemmatizer = WordNetLemmatizer()
     stop_words = set(stopwords.words('english'))
-    logger.info("NLTK components loaded successfully.")
+    log_statement(loglevel=str("info"), logstatement=str("NLTK components loaded successfully."), main_logger=str(__name__))
 
 except ImportError:
-    logger.warning("NLTK library not found. Text processing features (lemmatization, stopword removal) will be disabled.")
+    log_statement(loglevel=str("warning"), logstatement=str("NLTK library not found. Text processing features (lemmatization, stopword removal) will be disabled."), main_logger=str(__name__))
     NLTK_AVAILABLE = False
     # Define dummy classes/variables
     class WordNetLemmatizer: pass
@@ -129,7 +129,7 @@ class DataRepository:
     def _load_repo(self):
         """Loads the repository DataFrame from the compressed CSV file."""
         if self.repo_path.exists():
-            logger.info(f"Loading data repository from: {self.repo_path}")
+            log_statement(loglevel=str("info"), logstatement=str(f"Loading data repository from: {self.repo_path}"), main_logger=str(__name__))
             try:
                 # Decompress and read with pandas first (more robust)
                 dctx = zstd.ZstdDecompressor()
@@ -145,7 +145,7 @@ class DataRepository:
                      if col not in pdf.columns:
                           default_val = '' if dtype == 'str' else (0 if dtype == 'int64' else pd.NaT if dtype.startswith('datetime') else None)
                           pdf[col] = default_val
-                          logger.warning(f"Added missing column '{col}' to repository.")
+                          log_statement(loglevel=str("warning"), logstatement=str(f"Added missing column '{col}' to repository."), main_logger=str(__name__))
 
                 # Ensure correct dtypes (handle potential read issues)
                 for col, dtype in self.columns.items():
@@ -157,7 +157,7 @@ class DataRepository:
                         elif dtype.startswith('datetime'):
                              pdf[col] = pd.to_datetime(pdf[col], errors='coerce')
                     except Exception as e:
-                         logger.error(f"Error converting column '{col}' to dtype '{dtype}': {e}. Check repository file integrity.")
+                         log_statement(loglevel=str("error"), logstatement=str(f"Error converting column '{col}' to dtype '{dtype}': {e}. Check repository file integrity."), main_logger=str(__name__))
                          # Fallback: keep as object or attempt safe conversion
                          pdf[col] = pdf[col].astype(str).fillna('')
 
@@ -166,20 +166,20 @@ class DataRepository:
                 if GPU_AVAILABLE:
                     try:
                         cdf = cudf.from_pandas(pdf)
-                        logger.info("Repository loaded into cuDF DataFrame.")
+                        log_statement(loglevel=str("info"), logstatement=str("Repository loaded into cuDF DataFrame."), main_logger=str(__name__))
                         return cdf
                     except Exception as e:
                         logger.error(f"Failed to convert repository to cuDF: {e}. Using pandas.", exc_info=True)
                         return pdf
                 else:
-                    logger.info("Repository loaded into pandas DataFrame.")
+                    log_statement(loglevel=str("info"), logstatement=str("Repository loaded into pandas DataFrame."), main_logger=str(__name__))
                     return pdf
 
             except Exception as e:
                 logger.error(f"Repository load failed: {e}. Initializing empty repository.", exc_info=True)
                 # Fall through to return empty DataFrame
         else:
-            logger.info("No existing repository found. Initializing empty repository.")
+            log_statement(loglevel=str("info"), logstatement=str("No existing repository found. Initializing empty repository."), main_logger=str(__name__))
 
         # Return empty DataFrame matching the schema
         if GPU_AVAILABLE:
@@ -193,7 +193,7 @@ class DataRepository:
     def save(self):
         """Saves the repository DataFrame to a compressed CSV file atomically."""
         temp_path = self.repo_path.with_suffix(f'.tmp_{int(time.time())}')
-        logger.info(f"Saving repository to temporary file: {temp_path}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Saving repository to temporary file: {temp_path}"), main_logger=str(__name__))
         try:
             # Convert to pandas for robust CSV writing
             if GPU_AVAILABLE and isinstance(self.df, cudf.DataFrame):
@@ -214,7 +214,7 @@ class DataRepository:
 
             # Atomic replace
             os.replace(temp_path, self.repo_path)
-            logger.info(f"Repository saved successfully to: {self.repo_path}")
+            log_statement(loglevel=str("info"), logstatement=str(f"Repository saved successfully to: {self.repo_path}"), main_logger=str(__name__))
 
         except Exception as e:
             logger.error(f"Repository save failed: {e}", exc_info=True)
@@ -223,7 +223,7 @@ class DataRepository:
                 try:
                     os.remove(temp_path)
                 except OSError:
-                    logger.error(f"Failed to remove temporary save file: {temp_path}")
+                    log_statement(loglevel=str("error"), logstatement=str(f"Failed to remove temporary save file: {temp_path}"), main_logger=str(__name__))
 
     def update_entry(self, source_filepath: Path, **kwargs):
          """
@@ -267,22 +267,22 @@ class DataRepository:
                                   col_series.loc[indices] = value
                                   self.df[col] = col_series
                              else:
-                                  logger.warning(f"Attempted to update non-existent column '{col}'")
+                                  log_statement(loglevel=str("warning"), logstatement=str(f"Attempted to update non-existent column '{col}'"), main_logger=str(__name__))
                    else: # pandas
                         indices = self.df.index[mask]
                         for col, value in update_data.items():
                              if col in self.df.columns:
                                   self.df.loc[indices, col] = value
                              else:
-                                  logger.warning(f"Attempted to update non-existent column '{col}'")
-                   logger.debug(f"Updated repository entry for: {source_filepath_str}")
+                                  log_statement(loglevel=str("warning"), logstatement=str(f"Attempted to update non-existent column '{col}'"), main_logger=str(__name__))
+                   log_statement(loglevel=str("debug"), logstatement=str(f"Updated repository entry for: {source_filepath_str}"), main_logger=str(__name__))
               else:
                    # Add new entry
                    try:
                         file_size = source_filepath.stat().st_size if source_filepath.is_file() else 0
                         file_hash = self._calculate_hash(source_filepath) if source_filepath.is_file() else ''
                    except Exception as e:
-                        logger.warning(f"Could not get size/hash for {source_filepath_str}: {e}")
+                        log_statement(loglevel=str("warning"), logstatement=str(f"Could not get size/hash for {source_filepath_str}: {e}"), main_logger=str(__name__))
                         file_size = 0
                         file_hash = ''
 
@@ -316,7 +316,7 @@ class DataRepository:
                                   try:
                                        new_row_df[col] = new_row_df[col].astype(self.df[col].dtype)
                                   except Exception as e:
-                                       logger.error(f"Type mismatch for column '{col}' during concat ({new_row_df[col].dtype} vs {self.df[col].dtype}). Error: {e}")
+                                       log_statement(loglevel=str("error"), logstatement=str(f"Type mismatch for column '{col}' during concat ({new_row_df[col].dtype} vs {self.df[col].dtype}). Error: {e}"), main_logger=str(__name__))
                                        # Fallback: convert both to string? Or handle error more gracefully.
                                        new_row_df[col] = new_row_df[col].astype(str)
                                        self.df[col] = self.df[col].astype(str)
@@ -330,12 +330,12 @@ class DataRepository:
                                   try:
                                        new_row_df[col] = new_row_df[col].astype(self.df[col].dtype)
                                   except Exception as e:
-                                       logger.error(f"Type mismatch for column '{col}' during concat ({new_row_df[col].dtype} vs {self.df[col].dtype}). Error: {e}")
+                                       log_statement(loglevel=str("error"), logstatement=str(f"Type mismatch for column '{col}' during concat ({new_row_df[col].dtype} vs {self.df[col].dtype}). Error: {e}"), main_logger=str(__name__))
                                        new_row_df[col] = new_row_df[col].astype(str) # Fallback
                                        self.df[col] = self.df[col].astype(str)
                         self.df = pd.concat([self.df, new_row_df], ignore_index=True)
 
-                   logger.debug(f"Added new repository entry for: {source_filepath_str}")
+                   log_statement(loglevel=str("debug"), logstatement=str(f"Added new repository entry for: {source_filepath_str}"), main_logger=str(__name__))
          # --- End modification under lock ---
 
 
@@ -381,7 +381,7 @@ class DataRepository:
                     h.update(chunk)
             return h.hexdigest()
         except FileNotFoundError:
-             logger.error(f"File not found during hash calculation: {filepath}")
+             log_statement(loglevel=str("error"), logstatement=str(f"File not found during hash calculation: {filepath}"), main_logger=str(__name__))
              return None
         except Exception as e:
             logger.error(f"Hash calculation failed for {filepath}: {str(e)}", exc_info=True)
@@ -409,9 +409,9 @@ class DataProcessor:
         # Initialize scaler if GPU available
         self.scaler = CumlScaler() if GPU_AVAILABLE else None
         if self.scaler:
-             logger.info("Using cuML StandardScaler for numerical processing.")
+             log_statement(loglevel=str("info"), logstatement=str("Using cuML StandardScaler for numerical processing."), main_logger=str(__name__))
         else:
-             logger.info("cuML StandardScaler not available. Skipping scaling for numerical data.")
+             log_statement(loglevel=str("info"), logstatement=str("cuML StandardScaler not available. Skipping scaling for numerical data."), main_logger=str(__name__))
 
         # Ensure NLTK data is available if needed (can be slow)
         if NLTK_AVAILABLE:
@@ -434,10 +434,10 @@ class DataProcessor:
              files_to_process.extend(self.repo.get_files_by_status(status))
 
         if not files_to_process:
-            logger.info("No files found with specified statuses to process.")
+            log_statement(loglevel=str("info"), logstatement=str("No files found with specified statuses to process."), main_logger=str(__name__))
             return
 
-        logger.info(f"Starting processing for {len(files_to_process)} files.")
+        log_statement(loglevel=str("info"), logstatement=str(f"Starting processing for {len(files_to_process)} files."), main_logger=str(__name__))
         futures = [self.executor.submit(self._process_file, f_path) for f_path in files_to_process]
 
         # Process results as they complete
@@ -453,11 +453,11 @@ class DataProcessor:
 
         # Save the updated repository state after processing
         self.repo.save()
-        logger.info("File processing complete.")
+        log_statement(loglevel=str("info"), logstatement=str("File processing complete."), main_logger=str(__name__))
 
     def _process_file(self, source_filepath: Path):
         """Processes a single file."""
-        logger.debug(f"Processing file: {source_filepath}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Processing file: {source_filepath}"), main_logger=str(__name__))
         try:
             # Update status to 'processing'
             self.repo.update_entry(source_filepath, status='processing', error_message='')
@@ -472,17 +472,17 @@ class DataProcessor:
             # elif ext in ['pdf', 'xlsx', 'xls']:
             #     # Need to read first, then process text/numerical content
             #     # Requires integrating reader logic here or a multi-step process
-            #     logger.warning(f"Processing for .{ext} files needs specific reader integration. Skipping {source_filepath.name}")
+            #     log_statement(loglevel=str("warning"), logstatement=str(f"Processing for .{ext} files needs specific reader integration. Skipping {source_filepath.name}"), main_logger=str(__name__))
             #     self.repo.update_entry(source_filepath, status='skipped', error_message=f'Direct processing for .{ext} not implemented')
             #     return
             else:
-                logger.warning(f"No specific processing logic defined for file type .{ext}. Skipping {source_filepath.name}")
+                log_statement(loglevel=str("warning"), logstatement=str(f"No specific processing logic defined for file type .{ext}. Skipping {source_filepath.name}"), main_logger=str(__name__))
                 self.repo.update_entry(source_filepath, status='skipped', error_message=f'No processor for .{ext}')
                 return
 
             if processed_data is None:
                  # Error occurred during processing sub-step
-                 logger.error(f"Processing returned None for {source_filepath.name}. Status likely already set to 'error'.")
+                 log_statement(loglevel=str("error"), logstatement=str(f"Processing returned None for {source_filepath.name}. Status likely already set to 'error'."), main_logger=str(__name__))
                  return # Status should have been updated in sub-step
 
             # Save the processed data
@@ -490,7 +490,7 @@ class DataProcessor:
 
             # Update status to 'processed'
             self.repo.update_entry(source_filepath, status='processed', processed_path=save_path)
-            logger.info(f"Successfully processed and saved: {source_filepath.name} -> {save_path.name}")
+            log_statement(loglevel=str("info"), logstatement=str(f"Successfully processed and saved: {source_filepath.name} -> {save_path.name}"), main_logger=str(__name__))
 
         except Exception as e:
             logger.error(f"Processing failed for {source_filepath}: {str(e)}", exc_info=True)
@@ -517,7 +517,7 @@ class DataProcessor:
     def _process_text(self, filepath: Path):
         """Processes text data: lowercasing, removing non-alphanumeric, stopwords, lemmatization."""
         if not NLTK_AVAILABLE:
-             logger.warning(f"Skipping text processing for {filepath.name}: NLTK not available.")
+             log_statement(loglevel=str("warning"), logstatement=str(f"Skipping text processing for {filepath.name}: NLTK not available."), main_logger=str(__name__))
              # Option: Perform basic cleaning without NLTK
              try:
                   content = self._read_content(filepath)
@@ -534,12 +534,12 @@ class DataProcessor:
                   return None
 
 
-        logger.debug(f"Processing text file: {filepath.name}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Processing text file: {filepath.name}"), main_logger=str(__name__))
         try:
             content = self._read_content(filepath)
             lines = content.splitlines()
             if not lines:
-                 logger.warning(f"Text file is empty: {filepath.name}")
+                 log_statement(loglevel=str("warning"), logstatement=str(f"Text file is empty: {filepath.name}"), main_logger=str(__name__))
                  return pd.Series(dtype=str) # Return empty Series
 
             # Use cuDF if available for potential speedup
@@ -561,7 +561,7 @@ class DataProcessor:
 
                  # Lemmatization requires iteration, often done on CPU with pandas
                  pdf_lemmatized = processed.to_pandas().apply(lemmatizer.lemmatize)
-                 logger.debug(f"Text processing complete for {filepath.name} (GPU assisted)")
+                 log_statement(loglevel=str("debug"), logstatement=str(f"Text processing complete for {filepath.name} (GPU assisted)"), main_logger=str(__name__))
                  return pdf_lemmatized # Return pandas Series after lemmatization
 
             else: # Use pandas
@@ -572,7 +572,7 @@ class DataProcessor:
                  processed = processed.explode().dropna()
                  processed = processed[~processed.isin(stop_words)] # Filter stopwords
                  processed = processed.apply(lemmatizer.lemmatize) # Lemmatize
-                 logger.debug(f"Text processing complete for {filepath.name} (CPU)")
+                 log_statement(loglevel=str("debug"), logstatement=str(f"Text processing complete for {filepath.name} (CPU)"), main_logger=str(__name__))
                  return processed
 
         except Exception as e:
@@ -583,7 +583,7 @@ class DataProcessor:
 
     def _process_numerical(self, filepath: Path):
         """Processes numerical data: Load from JSON, potentially scale using cuML."""
-        logger.debug(f"Processing numerical file: {filepath.name}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Processing numerical file: {filepath.name}"), main_logger=str(__name__))
         try:
             content = self._read_content(filepath)
             data = json.loads(content) # Assumes JSON contains list/array of numbers
@@ -591,7 +591,7 @@ class DataProcessor:
             if not isinstance(data, (list, np.ndarray)): # Basic check
                  raise ValueError("Loaded JSON data is not a list or array.")
             if len(data) == 0:
-                 logger.warning(f"Numerical file is empty: {filepath.name}")
+                 log_statement(loglevel=str("warning"), logstatement=str(f"Numerical file is empty: {filepath.name}"), main_logger=str(__name__))
                  return np.array([]) # Return empty numpy array
 
             # Use GPU if available
@@ -602,7 +602,7 @@ class DataProcessor:
                     if array_gpu.ndim == 1:
                         array_gpu = array_gpu.reshape(-1, 1)
                     scaled_gpu = self.scaler.fit_transform(array_gpu)
-                    logger.debug(f"Numerical processing complete for {filepath.name} (GPU)")
+                    log_statement(loglevel=str("debug"), logstatement=str(f"Numerical processing complete for {filepath.name} (GPU)"), main_logger=str(__name__))
                     return scaled_gpu # Return CuPy array
                 except Exception as gpu_err:
                      logger.error(f"GPU numerical processing failed for {filepath.name}: {gpu_err}. Falling back to CPU (no scaling).", exc_info=True)
@@ -612,7 +612,7 @@ class DataProcessor:
 
             else: # Use CPU (numpy), skip scaling as cuML scaler isn't available
                 array_cpu = np.array(data, dtype=np.float32)
-                logger.debug(f"Numerical processing complete for {filepath.name} (CPU, no scaling)")
+                log_statement(loglevel=str("debug"), logstatement=str(f"Numerical processing complete for {filepath.name} (CPU, no scaling)"), main_logger=str(__name__))
                 return array_cpu
 
         except json.JSONDecodeError as e:
@@ -632,7 +632,7 @@ class DataProcessor:
         save_path = PROCESSED_DATA_DIR / f"{save_stem}_processed.zst"
         save_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
 
-        logger.debug(f"Saving processed data for '{original_path.name}' to '{save_path.name}'")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Saving processed data for '{original_path.name}' to '{save_path.name}'"), main_logger=str(__name__))
 
         try:
             cctx = zstd.ZstdCompressor(level=3)
@@ -650,7 +650,7 @@ class DataProcessor:
                     else:
                         # Handle other potential data types or raise error
                         raise TypeError(f"Unsupported data type for saving: {type(data)}")
-            logger.debug(f"Successfully saved processed file: {save_path}")
+            log_statement(loglevel=str("debug"), logstatement=str(f"Successfully saved processed file: {save_path}"), main_logger=str(__name__))
             return save_path
         except Exception as e:
             logger.error(f"Failed to save processed data to {save_path}: {e}", exc_info=True)
@@ -701,10 +701,10 @@ class Tokenizer:
              files_to_tokenize_info = list(zip(df_slice['source_filepath'], df_slice['processed_path']))
 
         if not files_to_tokenize_info:
-            logger.info("No processed files found to tokenize.")
+            log_statement(loglevel=str("info"), logstatement=str("No processed files found to tokenize."), main_logger=str(__name__))
             return
 
-        logger.info(f"Starting tokenization for {len(files_to_tokenize_info)} files.")
+        log_statement(loglevel=str("info"), logstatement=str(f"Starting tokenization for {len(files_to_tokenize_info)} files."), main_logger=str(__name__))
         # Submit tasks with both source and processed paths
         futures = [self.executor.submit(self._tokenize_file, Path(src_path), Path(proc_path))
                    for src_path, proc_path in files_to_tokenize_info if proc_path] # Ensure proc_path is not empty
@@ -720,11 +720,11 @@ class Tokenizer:
 
         # Save the updated repository state after tokenization
         self.repo.save()
-        logger.info("File tokenization complete.")
+        log_statement(loglevel=str("info"), logstatement=str("File tokenization complete."), main_logger=str(__name__))
 
     def _tokenize_file(self, source_filepath: Path, processed_filepath: Path):
         """Loads a processed file, converts it to a tensor, and saves it."""
-        logger.debug(f"Tokenizing file: {processed_filepath.name} (from {source_filepath.name})")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Tokenizing file: {processed_filepath.name} (from {source_filepath.name})"), main_logger=str(__name__))
         try:
              # Update status to 'tokenizing' using the source filepath as the key
              self.repo.update_entry(source_filepath, status='tokenizing', error_message='')
@@ -743,7 +743,7 @@ class Tokenizer:
 
              # Update status to 'tokenized' using the source filepath as the key
              self.repo.update_entry(source_filepath, status='tokenized', tokenized_path=save_path)
-             logger.info(f"Successfully tokenized: {processed_filepath.name} -> {save_path.name}")
+             log_statement(loglevel=str("info"), logstatement=str(f"Successfully tokenized: {processed_filepath.name} -> {save_path.name}"), main_logger=str(__name__))
 
         except Exception as e:
             logger.error(f"Tokenization failed for {processed_filepath.name}: {str(e)}", exc_info=True)
@@ -752,7 +752,7 @@ class Tokenizer:
 
     def _load_processed(self, filepath: Path):
          """Loads data saved by _save_processed (compressed CSV or NPY)."""
-         logger.debug(f"Loading processed file {filepath.name} for tokenization.")
+         log_statement(loglevel=str("debug"), logstatement=str(f"Loading processed file {filepath.name} for tokenization."), main_logger=str(__name__))
          try:
               dctx = zstd.ZstdDecompressor()
               with open(filepath, 'rb') as ifh:
@@ -763,10 +763,10 @@ class Tokenizer:
                              import io
                              buffer = io.BytesIO(reader.read())
                              data = np.load(buffer, allow_pickle=True)
-                             logger.debug(f"Loaded {filepath.name} as numpy array.")
+                             log_statement(loglevel=str("debug"), logstatement=str(f"Loaded {filepath.name} as numpy array."), main_logger=str(__name__))
                              return data
                         except ValueError as np_err:
-                             logger.debug(f"Failed to load {filepath.name} as numpy array ({np_err}), attempting CSV load.")
+                             log_statement(loglevel=str("debug"), logstatement=str(f"Failed to load {filepath.name} as numpy array ({np_err}), attempting CSV load."), main_logger=str(__name__))
                              # If numpy fails, rewind buffer (if possible) or re-read and try pandas
                              # Re-reading is safer if stream isn't seekable
                              ifh.seek(0) # Go back to start of file
@@ -774,7 +774,7 @@ class Tokenizer:
                                   # Load as pandas Series/DataFrame (assuming it was saved from text processing)
                                   # header=0 infers header from first line, None means no header
                                   df = pd.read_csv(reader2, header=0, keep_default_na=False)
-                                  logger.debug(f"Loaded {filepath.name} as pandas DataFrame/Series.")
+                                  log_statement(loglevel=str("debug"), logstatement=str(f"Loaded {filepath.name} as pandas DataFrame/Series."), main_logger=str(__name__))
                                   # Return the Series/DataFrame - _vectorize needs to handle it
                                   return df
          except Exception as e:
@@ -787,7 +787,7 @@ class Tokenizer:
         Converts loaded processed data (numpy array, pandas Series/DataFrame) into a tensor.
         Placeholder: Actual vectorization/embedding logic depends heavily on the data type and model requirements.
         """
-        logger.debug(f"Vectorizing data of type: {type(data)}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Vectorizing data of type: {type(data)}"), main_logger=str(__name__))
         if isinstance(data, torch.Tensor):
             # Already a tensor, ensure correct type and device
             return data.to(dtype=torch.float32, device=self.device)
@@ -804,7 +804,7 @@ class Tokenizer:
             # This is highly dependent on the desired model input.
             # Needs actual tokenization (e.g., SentencePiece, HuggingFace Tokenizer)
             # and potentially embedding lookup.
-            logger.warning("Vectorization for pandas Series/DataFrame (text data) is not fully implemented. Returning dummy tensor.")
+            log_statement(loglevel=str("warning"), logstatement=str("Vectorization for pandas Series/DataFrame (text data) is not fully implemented. Returning dummy tensor."), main_logger=str(__name__))
             # Example: Convert to list of strings (assuming Series of words/sentences)
             if isinstance(data, pd.DataFrame):
                  # Assuming single text column if DataFrame
@@ -832,10 +832,10 @@ class Tokenizer:
         save_path = TOKENIZED_DATA_DIR / f"{save_stem}.pt" # Save as .pt file
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.debug(f"Saving tokenized tensor to: {save_path}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Saving tokenized tensor to: {save_path}"), main_logger=str(__name__))
         try:
             torch.save(data, save_path)
-            logger.debug(f"Successfully saved tokenized tensor: {save_path}")
+            log_statement(loglevel=str("debug"), logstatement=str(f"Successfully saved tokenized tensor: {save_path}"), main_logger=str(__name__))
             return save_path
         except Exception as e:
             logger.error(f"Failed to save tokenized tensor to {save_path}: {e}", exc_info=True)
@@ -848,7 +848,7 @@ class Tokenizer:
 # Example usage (for scripting or notebooks)
 # if __name__ == "__main__":
 #     logging.basicConfig(level=logging.INFO, format=DataProcessingConfig.LOG_FORMAT, datefmt=DataProcessingConfig.DATE_FORMAT)
-#     logger.info("Starting data processing and tokenization pipeline...")
+#     log_statement(loglevel=str("info"), logstatement=str("Starting data processing and tokenization pipeline..."), main_logger=str(__name__))
 #
 #     processor = DataProcessor()
 #     processor.process_all() # Process 'discovered' and 'error' files
@@ -856,5 +856,5 @@ class Tokenizer:
 #     tokenizer = Tokenizer()
 #     tokenizer.tokenize_all() # Tokenize 'processed' files
 #
-#     logger.info("Pipeline finished.")
+#     log_statement(loglevel=str("info"), logstatement=str("Pipeline finished."), main_logger=str(__name__))
 

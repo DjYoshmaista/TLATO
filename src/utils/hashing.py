@@ -5,17 +5,20 @@ import base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
-# Basic logger setup - adjust as needed or integrate with your main logger
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from typing import Union, Optional
+from pathlib import Path
+from .logger import configure_logging, log_statement
+configure_logging()
 
 # --- Configuration ---
 # WARNING: Keep this key secure and manage it properly (e.g., env variables, secrets manager)
 # For demonstration, we derive a key from a password. In production, generate and store safely.
 PASSWORD = b"your-secure-password-for-filepath-encryption" # CHANGE THIS!
 SALT = os.urandom(16) # Store this salt alongside the encrypted data or derive consistently
+
+# Constants
+HASH_BUFFER_SIZE = 65536  # 64k buffer
+
 
 # --- Key Derivation ---
 kdf = PBKDF2HMAC(
@@ -28,6 +31,8 @@ kdf = PBKDF2HMAC(
 ENCRYPTION_KEY = base64.urlsafe_b64encode(kdf.derive(PASSWORD))
 _CIPHER_SUITE = Fernet(ENCRYPTION_KEY)
 
+
+
 # --- Filepath Hashing (Encryption/Decryption) ---
 # Using encryption for filepaths as hashing is one-way
 def hash_filepath(filepath: str) -> str:
@@ -39,7 +44,7 @@ def hash_filepath(filepath: str) -> str:
         encrypted_path = _CIPHER_SUITE.encrypt(filepath.encode('utf-8'))
         return encrypted_path.decode('utf-8')
     except Exception as e:
-        logger.error(f"Error encrypting filepath '{filepath}': {e}")
+        log_statement(loglevel=str("error"), logstatement=str(f"Error encrypting filepath '{filepath}': {e}"), main_logger=str(__name__))
         return "" # Return empty string or handle error as appropriate
 
 def unhash_filepath(hashed_path: str) -> str:
@@ -51,39 +56,58 @@ def unhash_filepath(hashed_path: str) -> str:
         return decrypted_path.decode('utf-8')
     except Exception as e:
         # This can happen if the key is wrong, data is corrupt, or not valid base64/fernet token
-        logger.error(f"Error decrypting filepath hash '{hashed_path[:20]}...': {e}")
+        log_statement(loglevel=str("error"), logstatement=str(f"Error decrypting filepath hash '{hashed_path[:20]}...': {e}"), main_logger=str(__name__))
         return "" # Return empty string or handle error as appropriate
 
 # --- Data Hashing (Content-based) ---
-def generate_data_hash(filepath: str, buffer_size=65536) -> str:
+def generate_data_hash(file_path: Union[str, Path]) -> Optional[str]:
     """
-    Generates a SHA-256 hash representing the file's content,
-    filename, size, and extension. Reads file in chunks for memory efficiency.
-    Returns the hex digest of the hash.
-    """
-    sha256 = hashlib.sha256()
-    try:
-        # 1. Include file metadata
-        filename = os.path.basename(filepath)
-        filesize = os.path.getsize(filepath)
-        _, extension = os.path.splitext(filename)
-        metadata_str = f"{filename}:{filesize}:{extension}"
-        sha256.update(metadata_str.encode('utf-8'))
+    Generates a SHA256 hash for the contents of a file.
 
-        # 2. Include file content
-        with open(filepath, 'rb') as f:
+    Args:
+        file_path (Union[str, Path]): The path to the file.
+
+    Returns:
+        Optional[str]: The hexadecimal SHA256 hash of the file content,
+                       or None if an error occurs (e.g., file not found, permission error).
+    """
+    sha256_hash = hashlib.sha256()
+    file_path = Path(file_path) # Ensure it's a Path object
+
+    try:
+        if not file_path.is_file():
+            log_statement(loglevel='error',
+                          logstatement=f"File not found or is not a regular file: {file_path}",
+                          main_logger=str(__name__))
+            return None
+
+        with file_path.open("rb") as f:
             while True:
-                data = f.read(buffer_size)
+                data = f.read(HASH_BUFFER_SIZE)
                 if not data:
                     break
-                sha256.update(data)
-        return sha256.hexdigest()
-    except FileNotFoundError:
-        logger.error(f"File not found for data hashing: {filepath}")
-        return ""
+                sha256_hash.update(data)
+        return sha256_hash.hexdigest()
+
+    except PermissionError:
+        log_statement(loglevel='error',
+                      logstatement=f"Permission denied while trying to read file: {file_path}",
+                      main_logger=str(__name__), exc_info=True)
+        return None
     except OSError as e:
-        logger.error(f"OS error reading file for data hashing '{filepath}': {e}")
-        return ""
+        log_statement(loglevel='error',
+                      logstatement=f"OS error reading file {file_path}: {e}",
+                      main_logger=str(__name__), exc_info=True)
+        return None
     except Exception as e:
-        logger.error(f"Unexpected error during data hashing for '{filepath}': {e}")
-        return ""
+        # Catch any other unexpected errors during hashing
+        log_statement(loglevel='error',
+                      logstatement=f"Unexpected error hashing file {file_path}: {e}",
+                      main_logger=str(__name__), exc_info=True)
+        return None
+
+# Keep the hash_filepath function as is (or review separately if needed)
+def hash_filepath(filepath: Union[str, Path]) -> str:
+    """Generates a SHA256 hash for a given filepath string."""
+    filepath_str = str(filepath) # Ensure string representation
+    return hashlib.sha256(filepath_str.encode('utf-8')).hexdigest()

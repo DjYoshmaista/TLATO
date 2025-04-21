@@ -6,7 +6,9 @@ Provides PyTorch DataLoader-like classes for efficiently loading processed
 or synthetic datasets, handling Zstandard compressed files if needed,
 filtering by base directory, and providing accurate batch count calculation.
 """
-
+import os
+import csv
+import hashlib
 import torch
 import numpy as np
 import zstandard as zstd
@@ -20,22 +22,22 @@ from typing import List, Optional
 # Import configuration and utility functions
 try:
     from ..utils.config import DataLoaderConfig, DEFAULT_DEVICE, COMPRESSION_ENABLED, TOKENIZED_DATA_DIR
-    from ..utils.logger import configure_logging
+    from ..utils.logger import configure_logging, log_statement
     configure_logging()
     logger = logging.getLogger(__name__)
-    logger.debug("EnhancedDataLoader and SyntheticDataLoader initialized.")
+    log_statement(loglevel=str("debug"), logstatement=str("EnhancedDataLoader and SyntheticDataLoader initialized."), main_logger=str(__name__))
 except ImportError:
     try: # Fallback relative
         from ..utils.config import DataLoaderConfig, DEFAULT_DEVICE, COMPRESSION_ENABLED, TOKENIZED_DATA_DIR
-        from ..utils.logger import configure_logging
+        from ..utils.logger import configure_logging, log_statement
         configure_logging()
         logger = logging.getLogger(__name__)
-        logger.debug("EnhancedDataLoader and SyntheticDataLoader initialized.")
+        log_statement(loglevel=str("debug"), logstatement=str("EnhancedDataLoader and SyntheticDataLoader initialized."), main_logger=str(__name__))
     except ImportError: # Fallback dummy
         logging.critical("Failed config import for DataLoader. Using defaults.")
         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - [loaders.py] - %(message)s')
         logger = logging.getLogger(__name__)
-        logger.debug("Dummy config import for DataLoader.")
+        log_statement(loglevel=str("debug"), logstatement=str("Dummy config import for DataLoader."), main_logger=str(__name__))
         class DataLoaderConfig: ENHANCED_LOADER_DATA_DIR = './tokenized'; ENHANCED_LOADER_BATCH_SIZE = 32; ENHANCED_LOADER_FILE_PATTERN = '*.pt.zst'; SYNTHETIC_LOADER_DATA_DIR = './synthetic'; SYNTHETIC_LOADER_BATCH_SIZE = 32; SYNTHETIC_LOADER_FILE_PATTERN = '*.jsonl'
         DEFAULT_DEVICE = 'cpu'; COMPRESSION_ENABLED = True; TOKENIZED_DATA_DIR = Path('./tokenized')
 
@@ -77,12 +79,12 @@ class EnhancedDataLoader:
         self._validate_data_dir()
         self.files = self._get_files() # Apply filtering here
 
-        logger.info(f"EnhancedDataLoader initialized: Dir='{self.data_dir}', BatchSize={self.batch_size}, Device='{self.device}', Pattern='{self.file_pattern}', Filter='{self.base_dir_filter}', Files={len(self.files)}")
+        log_statement(loglevel=str("info"), logstatement=str(f"EnhancedDataLoader initialized: Dir='{self.data_dir}', BatchSize={self.batch_size}, Device='{self.device}', Pattern='{self.file_pattern}', Filter='{self.base_dir_filter}', Files={len(self.files)}"), main_logger=str(__name__))
 
     def _validate_data_dir(self):
         """Checks if the data directory exists."""
         if not self.data_dir.is_dir():
-            logger.error(f"Data directory not found: {self.data_dir}")
+            log_statement(loglevel=str("error"), logstatement=str(f"Data directory not found: {self.data_dir}"), main_logger=str(__name__))
             raise FileNotFoundError(f"Data directory {self.data_dir} not found")
 
     def _get_files(self) -> List[Path]:
@@ -90,20 +92,20 @@ class EnhancedDataLoader:
         # (Filtering logic requires improvement - see previous notes)
         all_files = sorted(list(self.data_dir.glob(self.file_pattern)))
         if not all_files:
-             logger.warning(f"No files found matching pattern '{self.file_pattern}' in '{self.data_dir}'.")
+             log_statement(loglevel=str("warning"), logstatement=str(f"No files found matching pattern '{self.file_pattern}' in '{self.data_dir}'."), main_logger=str(__name__))
              return []
 
         if not self.base_dir_filter:
-             logger.debug(f"Found {len(all_files)} files. No base_dir filter applied.")
+             log_statement(loglevel=str("debug"), logstatement=str(f"Found {len(all_files)} files. No base_dir filter applied."), main_logger=str(__name__))
              return all_files
         else:
              # TODO: Implement robust filtering based on DataRepository lookup.
              # Current placeholder returns all files.
-             logger.warning(f"Base directory filtering ('{self.base_dir_filter}') requires DataRepository integration for accuracy. Currently returning all found files.")
+             log_statement(loglevel=str("warning"), logstatement=str(f"Base directory filtering ('{self.base_dir_filter}') requires DataRepository integration for accuracy. Currently returning all found files."), main_logger=str(__name__))
              filtered_files = all_files
-             logger.debug(f"Found {len(all_files)} files, filtered to {len(filtered_files)} (placeholder filter) based on base_dir: {self.base_dir_filter}")
+             log_statement(loglevel=str("debug"), logstatement=str(f"Found {len(all_files)} files, filtered to {len(filtered_files)} (placeholder filter) based on base_dir: {self.base_dir_filter}"), main_logger=str(__name__))
              if not filtered_files:
-                  logger.warning(f"No files matched pattern '{self.file_pattern}' AND base_dir filter '{self.base_dir_filter}' (placeholder filter).")
+                  log_statement(loglevel=str("warning"), logstatement=str(f"No files matched pattern '{self.file_pattern}' AND base_dir filter '{self.base_dir_filter}' (placeholder filter)."), main_logger=str(__name__))
              return filtered_files
 
     def __iter__(self):
@@ -127,16 +129,16 @@ class EnhancedDataLoader:
                         decompressed_data = dctx.decompress(ifh.read())
                     buffer = io.BytesIO(decompressed_data)
                     data = torch.load(buffer, map_location=self.device)
-                    # logger.debug(f"Loaded compressed tensor from {fpath.name}") # Reduce log noise
+                    # log_statement(loglevel=str("debug"), logstatement=str(f"Loaded compressed tensor from {fpath.name}"), main_logger=str(__name__)) # Reduce log noise
                 else:
                     data = torch.load(fpath, map_location=self.device)
-                    # logger.debug(f"Loaded uncompressed tensor from {fpath.name}") # Reduce log noise
+                    # log_statement(loglevel=str("debug"), logstatement=str(f"Loaded uncompressed tensor from {fpath.name}"), main_logger=str(__name__)) # Reduce log noise
 
                 # --- Batching Logic ---
                 if isinstance(data, dict):
                     inputs, targets = data.get('inputs'), data.get('targets')
                     if inputs is None or targets is None:
-                        logger.error(f"Dict loaded from {fpath.name} missing keys 'inputs' or 'targets'. Skipping.")
+                        log_statement(loglevel=str("error"), logstatement=str(f"Dict loaded from {fpath.name} missing keys 'inputs' or 'targets'. Skipping."), main_logger=str(__name__))
                         continue
                     current_batch_inputs, current_batch_targets = [], []
                     # Use zip for potentially variable length inputs/targets if needed
@@ -153,11 +155,11 @@ class EnhancedDataLoader:
                     for i in range(0, len(tensor_data), self.batch_size):
                         yield tensor_data[i:min(i + self.batch_size, len(tensor_data))]
                 else:
-                     logger.error(f"Unsupported data type {type(data)} loaded from {fpath.name}. Skipping.")
+                     log_statement(loglevel=str("error"), logstatement=str(f"Unsupported data type {type(data)} loaded from {fpath.name}. Skipping."), main_logger=str(__name__))
                      continue
 
             except FileNotFoundError:
-                 logger.error(f"File not found during iteration: {fpath.name}")
+                 log_statement(loglevel=str("error"), logstatement=str(f"File not found during iteration: {fpath.name}"), main_logger=str(__name__))
                  continue
             except Exception as e:
                 logger.error(f"Error loading/processing file {fpath.name}: {str(e)}", exc_info=True)
@@ -175,7 +177,7 @@ class EnhancedDataLoader:
         if self._cached_len is not None:
             return self._cached_len
 
-        logger.info("Calculating total batches for EnhancedDataLoader (might take time)...")
+        log_statement(loglevel=str("info"), logstatement=str("Calculating total batches for EnhancedDataLoader (might take time)..."), main_logger=str(__name__))
         total_samples = 0
         file_iterator = tqdm(self.files, desc="Calculating Length", unit="file", disable=len(self.files) <= 1)
 
@@ -197,24 +199,24 @@ class EnhancedDataLoader:
                     inputs = data.get('inputs')
                     if inputs is not None and hasattr(inputs, '__len__'):
                         total_samples += len(inputs)
-                    else: logger.warning(f"Cannot determine sample count from dict in {fpath.name}.")
+                    else: log_statement(loglevel=str("warning"), logstatement=str(f"Cannot determine sample count from dict in {fpath.name}."), main_logger=str(__name__))
                 elif isinstance(data, torch.Tensor):
                     total_samples += len(data) # Assumes first dimension is samples
-                else: logger.warning(f"Unsupported data type {type(data)} in {fpath.name} for length calc.")
+                else: log_statement(loglevel=str("warning"), logstatement=str(f"Unsupported data type {type(data)} in {fpath.name} for length calc."), main_logger=str(__name__))
 
-            except FileNotFoundError: logger.error(f"File not found during len calc: {fpath.name}")
+            except FileNotFoundError: log_statement(loglevel=str("error"), logstatement=str(f"File not found during len calc: {fpath.name}"), main_logger=str(__name__))
             except Exception as e: logger.error(f"Error reading {fpath.name} for len calc: {e}", exc_info=True)
 
-        if total_samples == 0: logger.warning("Total sample count is zero. __len__ returns 0.")
+        if total_samples == 0: log_statement(loglevel=str("warning"), logstatement=str("Total sample count is zero. __len__ returns 0."), main_logger=str(__name__))
         num_batches = (total_samples + self.batch_size - 1) // self.batch_size if self.batch_size > 0 else 0
         self._cached_len = num_batches
-        logger.info(f"Length calculation complete. Total samples: {total_samples}, Batches: {num_batches}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Length calculation complete. Total samples: {total_samples}, Batches: {num_batches}"), main_logger=str(__name__))
         return self._cached_len
 
     def reset_cache(self):
         """Resets the cached length calculation."""
         self._cached_len = None
-        logger.info("EnhancedDataLoader length cache reset.")
+        log_statement(loglevel=str("info"), logstatement=str("EnhancedDataLoader length cache reset."), main_logger=str(__name__))
 
 class SyntheticDataLoader:
     """
@@ -237,19 +239,19 @@ class SyntheticDataLoader:
 
         self._validate_data_dir()
         self.files = self._get_files()
-        logger.info(f"SyntheticDataLoader initialized: Dir='{self.data_dir}', BS={self.batch_size}, Dev='{self.device}', Files={len(self.files)}")
+        log_statement(loglevel=str("info"), logstatement=str(f"SyntheticDataLoader initialized: Dir='{self.data_dir}', BS={self.batch_size}, Dev='{self.device}', Files={len(self.files)}"), main_logger=str(__name__))
 
     def _validate_data_dir(self):
         """ Checks if the data directory exists. """
         if not self.data_dir.is_dir():
-            logger.error(f"Synthetic data directory not found: {self.data_dir}")
+            log_statement(loglevel=str("error"), logstatement=str(f"Synthetic data directory not found: {self.data_dir}"), main_logger=str(__name__))
             raise FileNotFoundError(f"Synthetic data directory {self.data_dir} not found")
 
     def _get_files(self) -> List[Path]:
         """ Gets the list of files matching the pattern. """
         files = sorted(list(self.data_dir.glob(self.file_pattern)))
         if not files:
-            logger.warning(f"No synthetic files found matching pattern '{self.file_pattern}' in directory '{self.data_dir}'.")
+            log_statement(loglevel=str("warning"), logstatement=str(f"No synthetic files found matching pattern '{self.file_pattern}' in directory '{self.data_dir}'."), main_logger=str(__name__))
         return files
 
     def __iter__(self):
@@ -270,9 +272,9 @@ class SyntheticDataLoader:
                             target_tensor = torch.tensor(sample['target'], dtype=torch.float32, device=self.device)
                             batch_inputs.append(input_tensor); batch_targets.append(target_tensor)
                             if len(batch_inputs) >= self.batch_size: yield self._format_batch(batch_inputs, batch_targets); batch_inputs, batch_targets = [], []
-                        except (json.JSONDecodeError, KeyError) as e: logger.error(f"Error line {line_num+1} in {fpath.name}: {e}")
+                        except (json.JSONDecodeError, KeyError) as e: log_statement(loglevel=str("error"), logstatement=str(f"Error line {line_num+1} in {fpath.name}: {e}"), main_logger=str(__name__))
                         except Exception as e_inner: logger.error(f"Error proc line {line_num+1} in {fpath.name}: {e_inner}", exc_info=True)
-            except FileNotFoundError: logger.error(f"File not found during iter: {fpath.name}")
+            except FileNotFoundError: log_statement(loglevel=str("error"), logstatement=str(f"File not found during iter: {fpath.name}"), main_logger=str(__name__))
             except Exception as e_outer: logger.error(f"Error reading {fpath.name}: {e_outer}", exc_info=True)
         if batch_inputs: yield self._format_batch(batch_inputs, batch_targets)
 
@@ -280,14 +282,14 @@ class SyntheticDataLoader:
         """ Stacks lists of tensors into batch tensors. """
         # (Implementation remains the same as previous version)
         try: return torch.stack(inputs), torch.stack(targets)
-        except Exception as e: logger.error(f"Failed batch stack: {e}"); return torch.tensor([]), torch.tensor([])
+        except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Failed batch stack: {e}"), main_logger=str(__name__)); return torch.tensor([]), torch.tensor([])
 
     def __len__(self):
         """ Calculates total batches by counting lines in JSONL files (cached). """
         if self._cached_len is not None:
             return self._cached_len
 
-        logger.info("Calculating total batches for SyntheticDataLoader (counting lines)...")
+        log_statement(loglevel=str("info"), logstatement=str("Calculating total batches for SyntheticDataLoader (counting lines)..."), main_logger=str(__name__))
         total_samples = 0
         file_iterator = tqdm(self.files, desc="Calculating Synth Length", unit="file", disable=len(self.files) <= 1)
         for fpath in file_iterator:
@@ -295,19 +297,19 @@ class SyntheticDataLoader:
                 with open(fpath, 'r', encoding='utf-8') as f:
                     line_count = sum(1 for line in f if line.strip()) # Count non-empty lines
                 total_samples += line_count
-            except FileNotFoundError: logger.error(f"File not found during len calc: {fpath.name}")
+            except FileNotFoundError: log_statement(loglevel=str("error"), logstatement=str(f"File not found during len calc: {fpath.name}"), main_logger=str(__name__))
             except Exception as e: logger.error(f"Error reading {fpath.name} for len calc: {e}", exc_info=True)
 
-        if total_samples == 0: logger.warning("Total synthetic sample count is zero. __len__ returns 0.")
+        if total_samples == 0: log_statement(loglevel=str("warning"), logstatement=str("Total synthetic sample count is zero. __len__ returns 0."), main_logger=str(__name__))
         num_batches = (total_samples + self.batch_size - 1) // self.batch_size if self.batch_size > 0 else 0
         self._cached_len = num_batches
-        logger.info(f"Length calculation complete. Total synthetic samples: {total_samples}, Batches: {num_batches}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Length calculation complete. Total synthetic samples: {total_samples}, Batches: {num_batches}"), main_logger=str(__name__))
         return self._cached_len
 
     def reset_cache(self):
         """ Resets the cached length calculation. """
         self._cached_len = None
-        logger.info("SyntheticDataLoader length cache reset.")
+        log_statement(loglevel=str("info"), logstatement=str("SyntheticDataLoader length cache reset."), main_logger=str(__name__))
 
 def hash_folder_path(folder_path: str) -> str:
     """Generates a hash for the given folder path."""

@@ -3,18 +3,14 @@
 Neural Zone Module
 Implements neural zones and groups with activation dynamics based on configuration.
 """
-
+from ..utils.logger import log_statement, configure_logging
 import torch
 import random
 import logging
 # Import the specific config class and the logger setup
-from src.utils.config import ZoneConfig
-from src.utils.logger import setup_logger # Or directly use SemanticLogger if it's a class
+from ..utils.config import ZoneConfig
 
-# Get a logger for this module
-logger = logging.getLogger(__name__) # Use standard logging; setup_logger configures the root
-
-# Note: The original ZoneConfig dataclass is removed as it's now imported from src.utils.config
+configure_logging()
 
 class NeuralZone:
     """
@@ -61,7 +57,7 @@ class NeuralZone:
                   (e.g., if the connection limit is reached).
         """
         if len(self.connections) >= self.config.MAX_CONNECTIONS:
-            logger.warning(f"Connection limit ({self.config.MAX_CONNECTIONS}) reached for zone '{self.identifier}'. Cannot link to '{target.identifier}'.")
+            log_statement(loglevel=str("warning"), logstatement=str(f"Connection limit ({self.config.MAX_CONNECTIONS}) reached for zone '{self.identifier}'. Cannot link to '{target.identifier}'."), main_logger=str(__name__))
             return False
 
         # Use provided strength or default from config
@@ -75,7 +71,7 @@ class NeuralZone:
             'last_activated': None # Placeholder for potential future use (e.g., Hebbian learning)
         }
         self.connections.append(connection_info)
-        logger.debug(f"Linked '{self.identifier}' -> '{target.identifier}' with strength {link_strength.item():.2f}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Linked '{self.identifier}' -> '{target.identifier}' with strength {link_strength.item():.2f}"), main_logger=str(__name__))
         return True
 
     def update_activation(self, stimulus: torch.Tensor):
@@ -121,7 +117,7 @@ class NeuralZone:
             # Clamp the activation to be within [0, 1]
             self.activation = torch.clamp(new_activation, 0.0, 1.0)
 
-            logger.debug(f"Zone '{self.identifier}' updated activation: {self.activation.item():.4f} (Stimulus: {stimulus.item():.4f}, Incoming: {incoming_activation.item():.4f})")
+            log_statement(loglevel=str("debug"), logstatement=str(f"Zone '{self.identifier}' updated activation: {self.activation.item():.4f} (Stimulus: {stimulus.item():.4f}, Incoming: {incoming_activation.item():.4f})"), main_logger=str(__name__))
             return self.activation
 
         except Exception as e:
@@ -155,7 +151,7 @@ class NeuralZoneGroup:
         self.config = config
 
         if capacity <= 0:
-             logger.warning(f"Attempted to create NeuralZoneGroup '{group_id}' with non-positive capacity ({capacity}). Setting capacity to 1.")
+             log_statement(loglevel=str("warning"), logstatement=str(f"Attempted to create NeuralZoneGroup '{group_id}' with non-positive capacity ({capacity}). Setting capacity to 1."), main_logger=str(__name__))
              capacity = 1
 
         for i in range(capacity):
@@ -163,7 +159,7 @@ class NeuralZoneGroup:
             zone_id = f"{self.group_id}-zone{i}"
             self.zones[zone_id] = NeuralZone(zone_id, self.config)
 
-        logger.info(f"Created NeuralZoneGroup '{self.group_id}' with {len(self.zones)} zones.")
+        log_statement(loglevel=str("info"), logstatement=str(f"Created NeuralZoneGroup '{self.group_id}' with {len(self.zones)} zones."), main_logger=str(__name__))
 
     def propagate_activations(self, external_stimuli: dict = None):
         """
@@ -177,7 +173,7 @@ class NeuralZoneGroup:
                                                 to external stimulus tensors for this step.
                                                 Defaults to None, applying random stimuli.
         """
-        logger.debug(f"Propagating activations for group '{self.group_id}'")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Propagating activations for group '{self.group_id}'"), main_logger=str(__name__))
         updated_count = 0
         for zone_id, zone in self.zones.items():
             # Determine stimulus: use provided external stimulus or a default random one
@@ -192,10 +188,10 @@ class NeuralZoneGroup:
                 updated_count += 1
             except Exception as e:
                  # Error is logged within update_activation
-                 logger.error(f"Skipping activation update for zone '{zone_id}' due to error.")
+                 log_statement(loglevel=str("error"), logstatement=str(f"Skipping activation update for zone '{zone_id}' due to error."), main_logger=str(__name__))
                  continue # Skip to the next zone if update fails
 
-        logger.debug(f"Completed activation propagation for {updated_count}/{len(self.zones)} zones in group '{self.group_id}'.")
+        log_statement(loglevel=str("debug"), logstatement=str(f"Completed activation propagation for {updated_count}/{len(self.zones)} zones in group '{self.group_id}'."), main_logger=str(__name__))
 
 
     def connect_randomly(self, max_links_per_zone: int = None):
@@ -211,11 +207,11 @@ class NeuralZoneGroup:
                                                 Defaults to config.MAX_CONNECTIONS.
         """
         if len(self.zones) < 2:
-             logger.warning(f"Cannot establish random connections in group '{self.group_id}': requires at least 2 zones.")
+             log_statement(loglevel=str("warning"), logstatement=str(f"Cannot establish random connections in group '{self.group_id}': requires at least 2 zones."), main_logger=str(__name__))
              return
 
         max_links = max_links_per_zone if max_links_per_zone is not None else self.config.MAX_CONNECTIONS
-        logger.info(f"Establishing random connections within group '{self.group_id}' (max_links_per_zone={max_links}).")
+        log_statement(loglevel=str("info"), logstatement=str(f"Establishing random connections within group '{self.group_id}' (max_links_per_zone={max_links})."), main_logger=str(__name__))
 
         zone_list = list(self.zones.values())
         connection_attempts = 0
@@ -246,7 +242,7 @@ class NeuralZoneGroup:
                 if source_zone.link_zone(target_zone): # Default strength used
                     successful_connections += 1
 
-        logger.info(f"Random connection process complete for group '{self.group_id}'. Attempted: {connection_attempts}, Succeeded: {successful_connections}.")
+        log_statement(loglevel=str("info"), logstatement=str(f"Random connection process complete for group '{self.group_id}'. Attempted: {connection_attempts}, Succeeded: {successful_connections}."), main_logger=str(__name__))
 
     def get_activation_states(self) -> dict:
         """

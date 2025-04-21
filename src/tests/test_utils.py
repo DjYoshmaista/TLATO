@@ -42,23 +42,23 @@ class HelpersTests(unittest.TestCase):
         if self.test_filepath.exists():
             try:
                 os.remove(self.test_filepath)
-                logger.debug(f"Removed test checkpoint file: {self.test_filepath}")
+                log_statement(loglevel=str("debug"), logstatement=str(f"Removed test checkpoint file: {self.test_filepath}"), main_logger=str(__name__))
             except OSError as e:
-                logger.error(f"Error removing test checkpoint file {self.test_filepath}: {e}")
+                log_statement(loglevel=str("error"), logstatement=str(f"Error removing test checkpoint file {self.test_filepath}: {e}"), main_logger=str(__name__))
 
     def test_dummy_input_shape(self):
         """Test the shape of the generated dummy input."""
-        logger.debug("Testing dummy_input shape.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing dummy_input shape."), main_logger=str(__name__))
         batch, seq, feat = 4, 10, 128
         input_tensor = dummy_input(batch_size=batch, seq_len=seq, features=feat, device=DEFAULT_DEVICE)
         expected_shape = (batch, seq, feat)
         self.assertEqual(input_tensor.shape, expected_shape)
         self.assertEqual(str(input_tensor.device), str(DEFAULT_DEVICE)) # Check device
-        logger.debug(f"dummy_input shape validated: {input_tensor.shape}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"dummy_input shape validated: {input_tensor.shape}"), main_logger=str(__name__))
 
     def test_save_load_cycle(self):
         """Test saving and loading model, optimizer, and scheduler state."""
-        logger.debug("Testing save_state and load_state cycle.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing save_state and load_state cycle."), main_logger=str(__name__))
         epoch_to_save = 5
         extra_meta = {"info": "test_metadata"}
 
@@ -105,14 +105,14 @@ class HelpersTests(unittest.TestCase):
         # Check scheduler state
         self.assertEqual(self.scheduler.state_dict(), scheduler_new.state_dict(), "Scheduler state mismatch after loading.")
 
-        logger.debug("Save/load cycle test passed.")
+        log_statement(loglevel=str("debug"), logstatement=str("Save/load cycle test passed."), main_logger=str(__name__))
 
     def test_load_state_not_found(self):
         """Test load_state behavior when the file doesn't exist."""
-        logger.debug("Testing load_state with non-existent file.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing load_state with non-existent file."), main_logger=str(__name__))
         loaded_meta = load_state(self.model, "non_existent_file.pt")
         self.assertIsNone(loaded_meta, "load_state should return None for non-existent file.")
-        logger.debug("Load non-existent file test passed.")
+        log_statement(loglevel=str("debug"), logstatement=str("Load non-existent file test passed."), main_logger=str(__name__))
 
 
 # --- Test Class for src.utils.gpu_switch ---
@@ -128,11 +128,11 @@ try:
         CUDA_INITIALIZED = True
         DEVICE_COUNT = cuda.Device.count()
     except Exception as e:
-        logger.warning(f"PyCUDA imported but failed to initialize CUDA: {e}. GPU tests may fail or be skipped.")
+        log_statement(loglevel=str("warning"), logstatement=str(f"PyCUDA imported but failed to initialize CUDA: {e}. GPU tests may fail or be skipped."), main_logger=str(__name__))
         CUDA_INITIALIZED = False
         DEVICE_COUNT = 0
 except ImportError:
-    logger.warning("PyCUDA not found. Skipping GPU switch tests.")
+    log_statement(loglevel=str("warning"), logstatement=str("PyCUDA not found. Skipping GPU switch tests."), main_logger=str(__name__))
     PYCUDA_AVAILABLE = False
     CUDA_INITIALIZED = False
     DEVICE_COUNT = 0
@@ -144,27 +144,27 @@ class GPUSwitchTests(unittest.TestCase):
 
     def test_get_pycuda_compute_capability(self):
         """Test retrieving compute capability."""
-        logger.debug("Testing get_pycuda_compute_capability.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing get_pycuda_compute_capability."), main_logger=str(__name__))
         capability = get_pycuda_compute_capability(device_index=0)
         self.assertIsNotNone(capability, "Compute capability should not be None.")
         self.assertIsInstance(capability, str, "Compute capability should be a string.")
         self.assertRegex(capability, r"^\d+\.\d+$", "Compute capability format should be 'major.minor'.")
-        logger.info(f"Detected compute capability for device 0: {capability}")
+        log_statement(loglevel=str("info"), logstatement=str(f"Detected compute capability for device 0: {capability}"), main_logger=str(__name__))
 
     def test_check_gpu_support(self):
         """Test the GPU support check function."""
-        logger.debug("Testing check_gpu_support.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing check_gpu_support."), main_logger=str(__name__))
         # Test with a threshold likely met by modern GPUs
         supported_high_thresh = check_gpu_support(min_capability_threshold=3.0)
         self.assertTrue(supported_high_thresh, "GPU should be supported with a low threshold.")
         # Test with a very high threshold (likely to fail)
         supported_low_thresh = check_gpu_support(min_capability_threshold=99.0)
         self.assertFalse(supported_low_thresh, "GPU should NOT be supported with an extremely high threshold.")
-        logger.debug("check_gpu_support tests passed.")
+        log_statement(loglevel=str("debug"), logstatement=str("check_gpu_support tests passed."), main_logger=str(__name__))
 
     def test_get_compute_backend(self):
         """Test obtaining the compute backend and libraries."""
-        logger.debug("Testing get_compute_backend.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing get_compute_backend."), main_logger=str(__name__))
         backend, pd_lib, np_lib = get_compute_backend(min_capability_threshold=3.0) # Use low threshold
 
         # Check if backend matches GPU availability and library imports
@@ -184,12 +184,12 @@ class GPUSwitchTests(unittest.TestCase):
             self.assertEqual(backend, 'cpu', "Backend should be 'cpu' if GPU libs not installed.")
             self.assertTrue(hasattr(pd_lib, 'DataFrame') and 'pandas' in str(pd_lib), "pd_lib should be pandas.")
             self.assertTrue(hasattr(np_lib, 'array') and 'numpy' in str(np_lib), "np_lib should be NumPy.")
-        logger.debug(f"get_compute_backend test passed with backend '{backend}'.")
+        log_statement(loglevel=str("debug"), logstatement=str(f"get_compute_backend test passed with backend '{backend}'."), main_logger=str(__name__))
 
 
 # Standard unittest execution
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Running utility tests...")
+    log_statement(loglevel=str("info"), logstatement=str("Running utility tests..."), main_logger=str(__name__))
     unittest.main()
 

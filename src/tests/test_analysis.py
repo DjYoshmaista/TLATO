@@ -41,7 +41,7 @@ class LabelerTests(unittest.TestCase):
             cls.labeler = SemanticLabeler(device=DEFAULT_DEVICE)
             # Determine embedding size from the loaded model
             cls.embedding_size = cls.labeler.model.config.hidden_size if cls.labeler.model else 768 # Default fallback
-            logger.info(f"SemanticLabeler initialized for tests. Embedding size: {cls.embedding_size}")
+            log_statement(loglevel=str("info"), logstatement=str(f"SemanticLabeler initialized for tests. Embedding size: {cls.embedding_size}"), main_logger=str(__name__))
         except Exception as e:
              logger.critical(f"Failed to initialize SemanticLabeler for testing: {e}", exc_info=True)
              # Skip all tests in this class if setup fails
@@ -57,42 +57,42 @@ class LabelerTests(unittest.TestCase):
 
     def test_label_generation_output_type(self):
         """Test if generate_label returns a string label."""
-        logger.debug("Testing generate_label output type.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing generate_label output type."), main_logger=str(__name__))
         label = self.labeler.generate_label(self.test_embedding)
         self.assertIsInstance(label, str, "generate_label should return a string.")
         self.assertNotIn("error", label.lower(), f"Label generation returned an error state: {label}")
-        logger.debug(f"generate_label returned: {label}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"generate_label returned: {label}"), main_logger=str(__name__))
 
     def test_label_generation_known_labels(self):
         """Test if generate_label returns one of the expected labels."""
-        logger.debug("Testing generate_label output value.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing generate_label output value."), main_logger=str(__name__))
         label = self.labeler.generate_label(self.test_embedding)
         # Expected labels based on the implementation in labeler.py
         expected_labels = ["high_level_cognition", "basic_processing", "unclassified"]
         self.assertIn(label, expected_labels, f"Generated label '{label}' not in expected labels {expected_labels}.")
-        logger.debug(f"generate_label returned expected value: {label}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"generate_label returned expected value: {label}"), main_logger=str(__name__))
 
     def test_recursive_labeling_output_type(self):
         """Test if recursive_labeling returns a list of strings."""
-        logger.debug("Testing recursive_labeling output type.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing recursive_labeling output type."), main_logger=str(__name__))
         labels = self.labeler.recursive_labeling(self.test_embeddings_list)
         self.assertIsInstance(labels, list, "recursive_labeling should return a list.")
         # Check if all elements in the list are strings (or handle nested lists if recursion is complex)
         self.assertTrue(all(isinstance(lbl, str) for lbl in labels), "All items in recursive_labeling output should be strings.")
         # Check for errors
         self.assertFalse(any("error" in str(lbl).lower() for lbl in labels), f"Recursive labeling returned error states: {labels}")
-        logger.debug(f"recursive_labeling returned: {labels}")
+        log_statement(loglevel=str("debug"), logstatement=str(f"recursive_labeling returned: {labels}"), main_logger=str(__name__))
 
     def test_recursive_labeling_output_length(self):
         """Test if recursive_labeling returns a list of the correct length."""
-        logger.debug("Testing recursive_labeling output length.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing recursive_labeling output length."), main_logger=str(__name__))
         labels = self.labeler.recursive_labeling(self.test_embeddings_list)
         self.assertEqual(len(labels), len(self.test_embeddings_list), "Output list length should match input list length.")
-        logger.debug("recursive_labeling output length validated.")
+        log_statement(loglevel=str("debug"), logstatement=str("recursive_labeling output length validated."), main_logger=str(__name__))
 
     def test_recursive_labeling_max_depth(self):
         """Test the max recursion depth mechanism."""
-        logger.debug("Testing recursive_labeling max depth.")
+        log_statement(loglevel=str("debug"), logstatement=str("Testing recursive_labeling max depth."), main_logger=str(__name__))
         # Temporarily set max depth to 0 for testing
         original_max_depth = self.labeler.config.MAX_RECURSION_DEPTH
         self.labeler.config.MAX_RECURSION_DEPTH = 0
@@ -102,7 +102,7 @@ class LabelerTests(unittest.TestCase):
         finally:
             # Restore original max depth
             self.labeler.config.MAX_RECURSION_DEPTH = original_max_depth
-        logger.debug("Max depth test passed.")
+        log_statement(loglevel=str("debug"), logstatement=str("Max depth test passed."), main_logger=str(__name__))
 
     # Add more tests:
     # - Test with different embedding shapes (e.g., batched) if supported
@@ -113,6 +113,6 @@ class LabelerTests(unittest.TestCase):
 # Standard unittest execution
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    logger.info("Running analysis (labeler) tests...")
+    log_statement(loglevel=str("info"), logstatement=str("Running analysis (labeler) tests..."), main_logger=str(__name__))
     unittest.main()
 
