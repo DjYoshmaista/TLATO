@@ -7,6 +7,7 @@ of the neural processing project (data processing, training, analysis, etc.).
 Handles fallback to CPU libraries indirectly by relying on imported modules
 that contain the necessary checks and alternative implementations.
 """
+from src.data.constants import *
 
 # --- Add project root to sys.path ---
 # This MUST happen before importing any modules from 'src'
@@ -55,23 +56,22 @@ if src_dir not in sys.path:
 try:
     from src.utils.logger import configure_logging, log_statement
     configure_logging()
-    log_statement(loglevel=str("info"), logstatement=str(f"Adding project root to sys.path for imports: {project_root}"), main_logger=str(__name__))
-    log_statement(loglevel=str("info"), logstatement=str(f"Current working directory: {Path.cwd()}"), main_logger=str(__name__))
-    log_statement(loglevel=str("info"), logstatement=str(f"sys.path after modification: {sys.path}"), main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Adding project root to sys.path for imports: {project_root}", main_logger=__file__)
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Current working directory: {Path.cwd()}", main_logger=__file__)
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} -- sys.path after modification: {sys.path}", main_logger=__file__)
     # Import the whole config module for easy access to various config classes
     from src.utils import config
     try:
         from src.utils import gpu_switch
         GPU_UTILS_AVAILABLE = True
     except ImportError:
-        log_statement(loglevel=str("warning"), logstatement=str("gpu_switch module not found. GPU utilities may be limited."), main_logger=str(__name__))
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- gpu_switch module not found. GPU utilities may be limited.", main_logger=__file__)
         GPU_UTILS_AVAILABLE = False
     try:
-        from src.analysis import labeler
         from src.analysis.labeler import SemanticLabeler
         LABELER_AVAILABLE = True
     except ImportError:
-        log_statement(loglevel=str("warning"), logstatement=str("labeler module not found. Analysis utilities may be limited."), main_logger=str(__name__))
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- labeler module not found. Analysis utilities may be limited.", main_logger=__file__)
         LABELER_AVAILABLE = False
 except ImportError as e:
     # Fallback if src structure isn't found or logger setup fails
@@ -80,7 +80,7 @@ except ImportError as e:
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    log_statement(loglevel=str("critical"), logstatement=str('f"Failed to initialize core components from src. Limited functionality."'), main_logger=str(__name__))
+    log_statement(loglevel='critical', logstatement=str('f"Failed to initialize core components from src. Limited functionality."'), main_logger=__file__)
     log_statement = str("logger0.critical")
     # Define fallbacks or exit if core components are essential
     LOG_FILE = Path("main_fallback.log") # type: ignore
@@ -116,7 +116,7 @@ try:
     config.SYNTHETIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
     config.TOKENIZED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 except Exception as dir_e:
-    log_statement(loglevel=str("error"), logstatement=str(f"Failed to create necessary directories defined in config: {dir_e}"), main_logger=str(__name__), exc_info=True)
+    log_statement(loglevel='error', logstatement=f"{LOG_INS} -- Failed to create necessary directories defined in config: {dir_e}", main_logger=__file__, exc_info=True)
     # Decide if execution should continue; maybe critical if logs can't be written
 
 # --- Import Components ---
@@ -129,7 +129,7 @@ try:
     from src.utils.gpu_switch import get_compute_backend, check_gpu_support, get_pycuda_compute_capability, set_compute_device
     UTILS_AVAILABLE = True
 except ImportError as e:
-    log_statement(loglevel=str("warning"), logstatement=str(f"Core utilities not fully available: {e}"), main_logger=str(__name__))
+    log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Core utilities not fully available: {e}", main_logger=__file__)
     UTILS_AVAILABLE = False
     # Define dummy functions if essential for basic operation
     def dummy_input(*args, **kwargs): return None
@@ -145,7 +145,7 @@ try:
 except ImportError as e:
     from src.utils.logger import log_statement, configure_logging
     configure_logging()
-    log_statement(loglevel=str("warning"), logstatement=str(f"Data processing modules not fully available: {e}"), main_logger=str(__name__))
+    log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Data processing modules not fully available: {e}", main_logger=__file__)
     DATA_PROCESSING_AVAILABLE = False
     # Dummy classes allow the menu to run but operations will fail gracefully
     class DataProcessor:
@@ -155,12 +155,11 @@ except ImportError as e:
         def __init__(self, *args, **kwargs): pass
         def tokenize_all(self, *args, **kwargs): raise NotImplementedError(f"Tokenizer module not loaded due to import error: {e}")
 
-
 try:
     from src.data.synthetic import SyntheticDataGenerator
     SYNTHETIC_DATA_AVAILABLE = True
 except ImportError as e:
-    log_statement(loglevel=str("warning"), logstatement=str(f"Synthetic data module not available: {e}"), main_logger=str(__name__))
+    log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Synthetic data module not available: {e}", main_logger=__file__)
     SYNTHETIC_DATA_AVAILABLE = False
     class SyntheticDataGenerator:
         def __init__(self, *args, **kwargs): pass
@@ -175,7 +174,7 @@ try:
     import torch.nn as nn # For loss function example
     TRAINING_AVAILABLE = True
 except ImportError as e:
-    log_statement(loglevel=str("warning"), logstatement=str(f"Training modules not fully available: {e}"), main_logger=str(__name__))
+    log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Training modules not fully available: {e}", main_logger=__file__)
     TRAINING_AVAILABLE = False
     # Define dummy classes correctly, each on its own line
     class EnhancedTrainer:
@@ -197,29 +196,27 @@ except ImportError as e:
             MSELoss = _DummyMSELoss
             CrossEntropyLoss = _DummyCrossEntropyLoss
 
-
 try:
     # Analysis components might use embeddings generated on GPU/CPU
     from src.analysis.labeler import SemanticLabeler
     ANALYSIS_AVAILABLE = True
 except ImportError as e:
-    log_statement(loglevel=str("warning"), logstatement=str(f"Analysis (labeler) module not available: {e}"), main_logger=str(__name__))
+    log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Analysis (labeler) module not available: {e}", main_logger=__file__)
     ANALYSIS_AVAILABLE = False
     class SemanticLabeler:
         def __init__(self, *args, **kwargs): pass
         def generate_label(self, emb, *args, **kwargs): raise NotImplementedError(f"SemanticLabeler module not loaded due to import error: {e}")
 
-
 # --- Main Orchestrator Class ---
 class SystemOrchestrator:
     """Handles the main CLI menu and orchestrates subsystem calls."""
     def __init__(self):
-        log_statement(loglevel=str("info"), logstatement=str("Initializing System Orchestrator..."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Initializing System Orchestrator...", main_logger=__file__)
         # Config accessed via imported module: config.ClassName.ATTRIBUTE
         # Determine the effective device based on config and actual availability
         self.effective_device = self._determine_effective_device()
         self.data_proc_submenu = data_processing_submenu()
-        log_statement(loglevel=str("info"), logstatement=str(f"Effective device set for orchestrator: {self.effective_device}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Effective device set for orchestrator: {self.effective_device}", main_logger=__file__)
 
     def _determine_effective_device(self):
         """Checks config preference and GPU availability to set the device."""
@@ -247,24 +244,24 @@ class SystemOrchestrator:
                     if gpus_supported:
                         # Check if PyTorch can actually use the CUDA device
                         if torch.cuda.is_available():
-                            log_statement(loglevel=str("info"), logstatement=str(f"GPU support verified. Config prefers CUDA. Using 'cuda'."), main_logger=str(__name__))
+                            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- GPU support verified. Config prefers CUDA. Using 'cuda'.", main_logger=__file__)
                             # Return the standard string 'cuda' for consistency downstream
                             return 'cuda'
                         else:
-                            log_statement(loglevel=str("warning"), logstatement=str(f"Config prefers CUDA and compatible GPUs found, but torch.cuda.is_available() is False. Falling back to 'cpu'."), main_logger=str(__name__))
+                            log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Config prefers CUDA and compatible GPUs found, but torch.cuda.is_available() is False. Falling back to 'cpu'.", main_logger=__file__)
                             return 'cpu'
                     else:
-                        log_statement(loglevel=str("warning"), logstatement=str(f"Config prefers CUDA, but no compatible GPUs found by check_gpu_support. Falling back to 'cpu'."), main_logger=str(__name__))
+                        log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Config prefers CUDA, but no compatible GPUs found by check_gpu_support. Falling back to 'cpu'.", main_logger=__file__)
                         return 'cpu'
                 except Exception as e:
-                    log_statement(loglevel=str("error"), logstatement=str(f"Error during GPU check for device determination: {e}. Falling back to 'cpu'."), main_logger=str(__name__))
+                    log_statement(loglevel='error', logstatement=f"{LOG_INS} -- Error during GPU check for device determination: {e}. Falling back to 'cpu'.", main_logger=__file__)
                     return 'cpu'
             else:
-                log_statement(loglevel=str("warning"), logstatement=str("GPU utilities (gpu_switch) not available. Cannot verify GPU support. Falling back to 'cpu'."), main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- GPU utilities (gpu_switch) not available. Cannot verify GPU support. Falling back to 'cpu'.", main_logger=__file__)
                 return 'cpu'
         else:
             # Config prefers 'cpu' or another non-GPU device
-            log_statement(loglevel=str("info"), logstatement=str(f"Config prefers non-GPU device. Using 'cpu'."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Config prefers non-GPU device. Using 'cpu'.", main_logger=__file__)
             # Return the standard string 'cpu'
             return 'cpu'
 
@@ -296,7 +293,7 @@ class SystemOrchestrator:
                 elif choice == '6':
                     self.view_system_logs()
                 elif choice == '7':
-                    log_statement(loglevel=str("info"), logstatement=str("System shutdown requested."), main_logger=str(__name__))
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS} -- System shutdown requested.", main_logger=__file__)
                     print("Exiting Neural System Orchestrator.")
                     sys.exit(0) # Clean exit
                 else:
@@ -304,17 +301,17 @@ class SystemOrchestrator:
 
             except KeyboardInterrupt:
                 # Handle Ctrl+C gracefully
-                log_statement(loglevel=str("warning"), logstatement=str("User interrupted execution (Ctrl+C). Exiting."), main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- User interrupted execution (Ctrl+C). Exiting.", main_logger=__file__)
                 print("\nOperation cancelled by user. Exiting.")
                 sys.exit(1) # Indicate non-zero exit code for interruption
             except NotImplementedError as ni_err:
                  # Catch errors from dummy modules if functionality is unavailable
-                 log_statement(loglevel=str("error"), logstatement=str(f"Functionality not implemented: {ni_err}"), main_logger=str(__name__), exc_info=True)
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS} -- Functionality not implemented: {ni_err}", main_logger=__file__, exc_info=True)
                  print(f"\n!! Error: This feature is unavailable. Reason: {ni_err} !!")
             except Exception as e:
                 # Log the exception with traceback to all configured handlers
                 # (console, main log, error log)
-                log_statement(loglevel=str("exception"), logstatement=str(f"Unhandled error during menu action {choice}: {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='exception', logstatement=f"{LOG_INS} -- Unhandled error during menu action {choice}: {e}", main_logger=__file__, exc_info=True)
                 # Inform the user
                 log_file_path = LOG_FILE if 'LOG_FILE' in globals() else Path('./logs/app.log') # Use actual log file path or default
                 print(f"\n!! An unexpected error occurred. Details logged to console and '{log_file_path}'. !!")
@@ -324,37 +321,37 @@ class SystemOrchestrator:
     def run_data_pipeline(self):
         """Runs the data processing and tokenization pipeline."""
         if not DATA_PROCESSING_AVAILABLE:
-            log_statement(loglevel=str("warning"), logstatement=str("Attempted to run data pipeline, but modules are missing."), main_logger=str(__name__))
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Attempted to run data pipeline, but modules are missing.", main_logger=__file__)
             return
         print("\n--- Data Processing Pipeline ---")
         try:
             # DataProcessor and Tokenizer handle their own GPU/CPU logic internally
             processor = DataProcessor()
-            log_statement(loglevel=str("info"), logstatement=str("Running data processing step (checking for 'discovered', 'error' files)..."), main_logger=str(__name__))
-            log_statement(loglevel=str("info"), logstatement=str("Starting DataProcessor.process_all()"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Running data processing step (checking for 'discovered', 'error' files)...", main_logger=__file__)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Starting DataProcessor.process_all()", main_logger=__file__)
             data_proc_submenu(processor)
             processor.process_all()
-            log_statement(loglevel=str("info"), logstatement=str("DataProcessor.process_all() finished."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- DataProcessor.process_all() finished.", main_logger=__file__)
             print("Data processing step finished.")
 
             tokenizer = Tokenizer()
             print("Running tokenization step (checking for 'processed' files)...")
-            log_statement(loglevel=str("info"), logstatement=str("Starting Tokenizer.tokenize_all()"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Starting Tokenizer.tokenize_all()", main_logger=__file__)
             tokenizer.tokenize_all() # Tokenizer will use its configured device if needed
-            log_statement(loglevel=str("info"), logstatement=str("Tokenizer.tokenize_all() finished."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Tokenizer.tokenize_all() finished.", main_logger=__file__)
             print("Tokenization step finished.")
             print("------------------------------")
         except Exception as e:
             # Log with traceback
-            log_statement(loglevel=str("exception"), logstatement=str(f"Error during data pipeline: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS} -- Error during data pipeline: {e}", main_logger=__file__, exc_info=True)
             print(f"Data pipeline failed. Check logs for details.")
 
     def run_synthetic_data_generation(self):
         """Runs the synthetic data generation process."""
         if not SYNTHETIC_DATA_AVAILABLE:
-            log_statement(loglevel=str("error"), logstatement=str("Synthetic data module is not available."), main_logger=str(__name__))
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} -- Synthetic data module is not available.", main_logger=__file__)
             module = getattr(config.SyntheticDataConfig, 'MODULE_NAME', 'N/A')
-            log_statement(loglevel=str("warning"), logstatement=str(f"Attempted to run synthetic data generation, but module is missing. {module}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Attempted to run synthetic data generation, but module is missing. {module}", main_logger=__file__, exc_info=True)
             return
         print("\n--- Synthetic Data Generation ---")
         try:
@@ -369,13 +366,13 @@ class SystemOrchestrator:
 
             generator = SyntheticDataGenerator()
             print("Starting synthetic data generation...")
-            log_statement(loglevel=str("info"), logstatement=str("Starting SyntheticDataGenerator.generate_dataset()"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Starting SyntheticDataGenerator.generate_dataset()", main_logger=__file__)
             generator.generate_dataset()
-            log_statement(loglevel=str("info"), logstatement=str("SyntheticDataGenerator.generate_dataset() finished."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- SyntheticDataGenerator.generate_dataset() finished.", main_logger=__file__)
             print("Synthetic data generation finished.")
             print("-------------------------------")
         except Exception as e:
-            log_statement(loglevel=str("exception"), logstatement=str(f"Error during synthetic data generation: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS} -- Error during synthetic data generation: {e}", main_logger=__file__, exc_info=True)
             print(f"Synthetic data generation failed. Check logs for details.")
 
 
@@ -383,13 +380,13 @@ class SystemOrchestrator:
         """Initializes and runs the model training process."""
         if not TRAINING_AVAILABLE:
             print("Training modules are not available.")
-            log_statement(loglevel=str("warning"), logstatement=str("Attempted to run training, but modules are missing."), main_logger=str(__name__))
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Attempted to run training, but modules are missing.", main_logger=__file__)
             return
         print("\n--- Model Training ---")
         try:
             # Use the effective device determined during orchestrator init
             DEVICE = self.effective_device
-            log_statement(loglevel=str("info"), logstatement=str(f"Proceeding with training on device: {DEVICE}"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Proceeding with training on device: {DEVICE}", main_logger=__file__)
 
             # --- Get model parameters from config or define defaults ---
             # Example: replace these with actual config access or robust defaults
@@ -425,13 +422,13 @@ class SystemOrchestrator:
                     print(f"Failed to load checkpoint '{checkpoint_path}'. Starting fresh training.")
 
             print("Starting training loop...")
-            log_statement(loglevel=str("info"), logstatement=str(f"Starting EnhancedTrainer.train() on device {DEVICE}"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- Starting EnhancedTrainer.train() on device {DEVICE}", main_logger=__file__)
             trainer.train() # Trainer handles moving data/model to its device
-            log_statement(loglevel=str("info"), logstatement=str("EnhancedTrainer.train() finished."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} -- EnhancedTrainer.train() finished.", main_logger=__file__)
             print("Training finished.")
             print("--------------------")
         except Exception as e:
-            log_statement(loglevel=str("exception"), logstatement=str(f"Error during training setup or execution: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS} -- Error during training setup or execution: {e}", main_logger=__file__, exc_info=True)
             print(f"Training failed. Check logs for details.")
 
 
@@ -439,7 +436,7 @@ class SystemOrchestrator:
         """Runs a simple example of the semantic labeler."""
         if not ANALYSIS_AVAILABLE:
             print("Analysis (labeler) module is not available.")
-            log_statement(loglevel=str("warning"), logstatement=str("Attempted to run labeling example, but module is missing."), main_logger=str(__name__))
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} -- Attempted to run labeling example, but module is missing.", main_logger=__file__)
             return
         print("\n--- Semantic Labeling Example ---")
         try:
@@ -457,7 +454,7 @@ class SystemOrchestrator:
             print(f"Generated label: {label}")
             print("-------------------------------")
         except Exception as e:
-            log_statement(loglevel=str("exception"), logstatement=str(f"Error during labeling example: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS} -- Error during labeling example: {e}", main_logger=__file__, exc_info=True)
             print(f"Labeling example failed. Check logs for details.")
 
     def system_utilities(self):
@@ -591,25 +588,25 @@ class SystemOrchestrator:
                 for line in lines[-lines_to_show:]:
                     print(line.strip()) # Print stripped line
             except Exception as e:
-                log_statement(loglevel=str("exception"), logstatement=str(f"Error reading log file {log_file_path}: {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='exception', logstatement=f"{LOG_INS} -- Error reading log file {log_file_path}: {e}", main_logger=__file__, exc_info=True)
                 print(f"Could not read log file: {e}")
             print("-" * (len(name) + 18)) # Separator matching the header length
 
 def main():
     """Entry point for the orchestrator script."""
     # Logging and path setup happens at the top level module import phase
-    log_statement(loglevel=str("info"), logstatement=str("--- System Orchestrator Main Function ---"), main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} -- --- System Orchestrator Main Function ---", main_logger=__file__)
     try:
         orchestrator = SystemOrchestrator()
         orchestrator.show_main_menu()
     except Exception as main_err:
         # Catch any unexpected critical error during orchestrator init or main loop
-        log_statement(loglevel=str("critical"), logstatement=str(f"Critical error in main orchestrator execution: {main_err}"), main_logger=str(__name__), exc_info=True)
+        log_statement(loglevel='critical', logstatement=f"{LOG_INS} -- Critical error in main orchestrator execution: {main_err}", main_logger=__file__, exc_info=True)
         print(f"\n!!! A critical error occurred: {main_err}. Check logs for details. Exiting. !!!")
         sys.exit(1) # Exit with error code
     finally:
         # This will run even if sys.exit() was called earlier
-        log_statement(loglevel=str("info"), logstatement=str("--- System Orchestrator Exiting ---"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} -- --- System Orchestrator Exiting ---", main_logger=__file__)
 
 if __name__ == "__main__":
     # This block executes when the script is run directly

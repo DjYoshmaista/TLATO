@@ -1,31 +1,136 @@
 # src/data/constants.py
+import os
+from pathlib import Path
+import inspect
+import dotenv
+
+dotenv.load_dotenv()
 
 # Repository file constants
-REPO_DIR = "data/repositories"
+_project_folder_str = os.getenv("TLATO41DIR")
+if not _project_folder_str:
+    raise ValueError("Environment variable TLATO41DIR is not set.")
+PROJECT_FOLDER = Path(_project_folder_str)
+REPO_DIR = PROJECT_FOLDER / "src/data/repositories"
 MAIN_REPO_FILENAME = "main_repository.csv.zst"
 PROCESSED_REPO_FILENAME = "processed_repository.csv.zst"
 TOKENIZED_REPO_FILENAME = "tokenized_repository.csv.zst"
 DATALOADER_METADATA_FILENAME = "dataloader_metadata.json.zst" # Example for DataLoader info
+DATA_REPO_DIR = REPO_DIR / "data_repository"
+LOG_DIR = PROJECT_FOLDER / "logs"
+STATE_DIR = PROJECT_FOLDER / "states"
 
-# Column names for the main repository CSV
+# --- Repository Index Structure Keys ---
+INDEX_FILE = "repositories/repository_index.json"
+INDEX_KEY_PATH = "path"
+INDEX_KEY_METADATA = "metadata"
+INDEX_KEY_CHILDREN = "children" # List of child repository hashes
+TOKENIZED_DATA_DIR = f"{os.getenv("TLATO41DIR")}/data/tokenized"
 
-COL_DESIGNATION = "Designation"
+LOG_INS = f'{__name__}:{__file__}:{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:'
+
+# --- Repository Index Metadata Keys ---
+INDEX_META_FILE_COUNT = "file_count"
+INDEX_META_TOTAL_SIZE = "total_size_bytes"
+INDEX_META_MIN_MTIME = "min_mtime_utc"
+INDEX_META_MAX_MTIME = "max_mtime_utc"
+
+# --- Core File Metadata ---
+COL_FILEPATH = 'filepath'         # Absolute path to the original file
+COL_FILENAME = 'filename'       # Just the file name
+COL_SIZE = 'size_bytes'         # File size in bytes
+COL_MTIME = 'mtime_ts'          # Modification timestamp (float seconds since epoch)
+COL_CTIME = 'ctime_ts'          # Creation timestamp (float seconds since epoch)
+COL_HASH = 'content_hash'       # Hash of the file content (e.g., SHA256)
+COL_EXTENSION = 'extension'     # File extension (lowercase, no dot)
+
+# --- Processing Status & Info ---
+COL_STATUS = 'status'           # e.g., discovered, loaded, processed, tokenized, error
+COL_ERROR = 'error_message'     # Error message if status is 'error'
+COL_PROCESSED_PATH = 'processed_path' # Relative path to processed output
+COL_TOKENIZED_PATH = 'tokenized_path' # Relative path to tokenized output
+COL_LAST_UPDATED = 'last_updated_ts' # Timestamp of last repo update for this row
+COL_DATA_CLASSIFICATION = 'data_classification'
+COL_FINAL_CLASSIFICATION = 'final_classification'
+
+# --- Optional/Additional Metadata (Add if used) ---
+COL_DESIGNATION = 'designation'     # Unique integer ID (if needed)
+COL_HASHED_PATH_ID = 'path_hash'    # Hash of the filepath string (if needed)
+COL_COMPRESSED_FLAG = 'is_compressed' # Flag for original compression ('Y'/'N')
+COL_IS_COPY_FLAG = 'is_copy'        # Flag for content duplicates ('Y'/'N').
+COL_DATA_HASH = 'content_hash'      # Redundant? Ensure COL_HASH is used consistently for content. If COL_DATA_HASH is truly different, define it. Otherwise, remove one
 COL_FILETYPE = "Filetype"
-COL_FILEPATH = "Filepath"
-COL_HASHED_PATH_ID = "HashedPathID"
-COL_COMPRESSED_FLAG = "Compressed" # Y/N for original file compression
 COL_MOD_DATE = "ModificationDate"
 COL_ACC_DATE = "AccessedDate"
-COL_DATA_HASH = "DataHash"
-COL_IS_COPY_FLAG = "IsCopy" # Y/N
-COL_STATUS = "Status"
-COL_FILENAME = "Filename" 
-COL_SIZE = "Size"
-COL_MTIME = "ModTime" # Unix timestamp
-COL_CTIME = "CreationTime" # Unix timestamp
-COL_HASH = "Hash" # SHA-256 hash of the file content
-COL_EXTENSION = "ExtType"
-COL_ERROR = "ErrorMSG"
+COL_SEMANTIC_LABEL = 'semantic_label' # Example column for storing results
+COL_LINGUISTIC_METADATA = 'linguistic_metadata' # Example column for other metadata
+
+# --- Compression Constants ---
+COMPRESSION_ENABLED = True
+COMPRESSION_LEVEL = 22
+
+# Constants for process_file
+CONTENT_SNIPPET_BYTES = 1024  # Read first 1KB for snippet
+CONTENT_SNIPPET_LINES = 5     # Max number of lines for text snippet
+
+# --- Status Constants ---
+STATUS_LINGUISTIC_PROCESSING = 'LINGUISTIC_PROCESSING'
+STATUS_LINGUISTIC_PROCESSED = 'LINGUISTIC_PROCESSED'
+STATUS_LINGUISTIC_FAILED = 'LINGUISTIC_FAILED'
+
+# Define the full header based on the columns
+MAIN_REPO_HEADER = [
+    COL_FILEPATH,
+    COL_FILENAME,
+    COL_FILETYPE,
+    COL_SIZE,
+    COL_MTIME,
+    COL_CTIME,
+    COL_EXTENSION,
+    COL_STATUS,
+    COL_PROCESSED_PATH,
+    COL_TOKENIZED_PATH,
+    COL_LAST_UPDATED,
+    COL_HASHED_PATH_ID,
+    COL_DATA_HASH,
+    COL_COMPRESSED_FLAG,
+    COL_IS_COPY_FLAG,
+    COL_DESIGNATION,
+    COL_ERROR,
+    COL_DATA_CLASSIFICATION,
+    COL_FINAL_CLASSIFICATION,
+    COL_SEMANTIC_LABEL,
+    COL_LINGUISTIC_METADATA,
+    'base_dir'       # Used by DataRepository methods
+]
+COL_SCHEMA = {
+    COL_FILEPATH: str,
+    COL_FILENAME: str,
+    COL_FILETYPE: str,
+    COL_SIZE: 'Int64',
+    COL_MTIME: 'datetime64[ns, UTC]',
+    COL_CTIME: 'datetime64[ns, UTC]',
+    COL_HASH: str,
+    COL_EXTENSION: str,
+    COL_STATUS: str,
+    COL_PROCESSED_PATH: str,
+    COL_TOKENIZED_PATH: str,
+    COL_LAST_UPDATED: 'datetime64[ns, UTC]', # Use the correct constant
+    COL_HASHED_PATH_ID: str,
+    COL_DATA_HASH: str,
+    COL_COMPRESSED_FLAG: str, 
+    COL_IS_COPY_FLAG: str,
+    COL_DESIGNATION: 'Int64',
+    COL_ERROR: str,
+    COL_DATA_CLASSIFICATION: str,
+    COL_FINAL_CLASSIFICATION: str,
+    COL_SEMANTIC_LABEL: str,
+    COL_LINGUISTIC_METADATA: str,
+    'base_dir': str,
+}
+TIMESTAMP_COLUMNS = [ COL_MTIME, COL_CTIME, COL_LAST_UPDATED ]
+PROCESSED_REPO_COLUMNS = MAIN_REPO_HEADER
+TOKENIZED_REPO_COLUMNS = MAIN_REPO_HEADER
 
 # Status Codes
 STATUS_UNKNOWN = 'U'      # Unknown status
@@ -40,12 +145,14 @@ STATUS_READING = 'R'      # File being read
 STATUS_READ = 'Rd'         # File read, hash calculated
 STATUS_WRITING = 'W'      # File being written
 STATUS_WRITTEN = 'Wr'      # File written, hash calculated
-STATUS_LOADED = 'L'       # File loaded, hash calculated
-STATUS_PROCESSING = 'P'   # File sent for processing
-STATUS_PROCESSED = 'Pd'    # File processing complete
-STATUS_TOKENIZING = 'T'   # File sent for tokenization
-STATUS_TOKENIZED = 'Td'    # File tokenization complete
-STATUS_ERROR = 'E'        # Error occurred during processing/hashing/tokenization
+STATUS_LOADED = "loaded"       # File loaded, hash calculated
+STATUS_PROCESSING = "processing"   # File sent for processing
+STATUS_PROCESSED = "processed"    # File processing complete
+STATUS_TOKENIZING = "tokenizing"   # File sent for tokenization
+STATUS_TOKENIZED = "tokenized"    # File tokenization complete
+STATUS_ERROR = "error"        # Error occurred during processing/hashing/tokenization
+STATUS_DISCOVERED = "discovered"     # Or use 'discovered' if loading isn't a distinct step
+STATUS_MISSING = "missing"
 
 # --- Data Classification Types ---
 # These constants represent the classified nature of the data content
@@ -68,6 +175,26 @@ TYPE_DOCUMENT = "DOCUMENT"       # Document files (PDF, DOCX, etc.)
 TYPE_CODE = "CODE"             # Source code files (Python, Java, etc.)
 TYPE_TOKEN = "TOKEN"
 TYPE_MIXED = "MIXED"
+TYPE_PDF = "PDF"
+TYPE_DOC = "DOC"
+TYPE_DOCX = "DOCX"
+TYPE_EXCEL = "EXCEL"
+TYPE_JSON = "JSON"
+TYPE_JSONL = "JSONL"
+TYPE_XML = "XML"
+TYPE_YAML = "YAML"
+TYPE_IMAGE_PNG = 'IMAGE_PNG'
+TYPE_IMAGE_JPEG = 'IMAGE_JPEG'
+TYPE_IMAGE_GIF = 'IMAGE_GIF'
+TYPE_IMAGE_BMP = 'IMAGE_BMP'
+TYPE_AUDIO_WAV = 'AUDIO_WAV'
+TYPE_AUDIO_MP3 = 'AUDIO_MP3' # Note: MP3 detection via magic number is less reliable due to ID3 tags
+TYPE_COMPRESSED_ZIP = 'COMPRESSED_ZIP'
+TYPE_COMPRESSED_GZIP = 'COMPRESSED_GZIP'
+TYPE_COMPRESSED_BZ2 = 'COMPRESSED_BZ2'
+TYPE_COMPRESSED_7Z = 'COMPRESSED_7Z'
+TYPE_COMPRESSED_RAR = 'COMPRESSED_RAR'
+TYPE_COMPRESSED_ZSTD = 'COMPRESSED_ZSTD'
 TYPE_PROCESSED = "PROCESSED" # Data resembling processed data (e.g., tokenized)
 TYPE_PROCESSED_CSV = "PROCESSED_CSV" # Data resembling processed CSV data
 TYPE_PROCESSED_JSONL = "PROCESSED_JSONL" # Data resembling processed JSONL data
@@ -75,35 +202,12 @@ TYPE_PROCESSED_XML = "PROCESSED_XML" # Data resembling processed XML data
 TYPE_PROCESSED_TEXT = "PROCESSED_TEXT" # Data resembling processed text data
 TYPE_PROCESSED_NUMERICAL = "PROCESSED_NUM" # Data resembling processed numerical data
 TYPE_PROCESSED_SUBWORD = "PROCESSED_SUB" # Data resembling processed subword/text tokens
-TYPE_TOKENIZED_SUBWORD = "TOKENIZED_SUBWORD" # Data resembling subword/text tokens post-tokenization
-TYPE_TOKENIZED_NUMERICAL = "TOKENIZED_NUMERICAL" # Data resembling numerical tensors/vectors post-tokenization
 TYPE_SYNTAX_ERROR = "SYNTAX_ERROR" # Syntax error in the file
 TYPE_UNSUPPORTED = "UNSUPPORTED" # Unsupported file type or format
-
-# Define the full header based on the columns
-MAIN_REPO_HEADER = [
-    COL_DESIGNATION,
-    COL_FILETYPE,
-    COL_FILEPATH,
-    COL_HASHED_PATH_ID,
-    COL_COMPRESSED_FLAG,
-    COL_MOD_DATE,
-    COL_ACC_DATE,
-    COL_DATA_HASH,
-    COL_IS_COPY_FLAG,
-    COL_STATUS, 
-    COL_SIZE,
-    COL_MTIME,
-    COL_CTIME,
-    COL_HASH,
-    COL_ERROR,
-    'processed_path', # Used by DataRepository methods
-    'tokenized_path', # Used by DataRepository methods
-    'base_dir',       # Used by DataRepository methods
-    'last_modified_scan', # Used by DataRepository methods
-    'last_updated_repo'   # Used by DataRepository methods
-]
-
+TYPE_TABULAR = 'TABULAR' # Example
+TYPE_HTML = 'HTML'       # Example
+TYPE_COMPRESSED = 'COMPRESSED' # Example
+TYPE_MARKDOWN = 'MARKDOWN' # Example
 # File extensions for processed/tokenized mirrored files
 PROCESSED_EXT = ".proc"
 TOKENIZED_EXT = ".token"

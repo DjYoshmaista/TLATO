@@ -11,8 +11,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-from ..utils.logger import log_statement, configure_logging
-configure_logging()
+from typing import Type, Union, Optional, List, Any
+import inspect
+from pathlib import Path
+import pickle
+import zipfile
+from src.utils.logger import log_statement
+from src.data.constants import *
 
 # Import necessary components from PyTorch Geometric if used
 try:
@@ -218,6 +223,139 @@ class ZoneClassifier(nn.Module):
             log_statement(loglevel=str("error"), logstatement=str(f"ZoneClassifier received unsupported input type: {type(input_data)}"), main_logger=str(__name__))
             raise TypeError(f"Unsupported input type for ZoneClassifier: {type(input_data)}")
 
+def load_model_from_checkpoint(
+    model_class: Type[nn.Module], # The class of the model to instantiate (e.g., ZoneClassifier)
+    checkpoint_path: Path,
+    device: str, # The target device ('cpu', 'cuda:0', etc.)
+    strict_load: bool = True, # Whether state_dict keys must exactly match
+    eval_mode: bool = True, # Set model.eval() after loading?
+    *model_args: Any, # Positional arguments for model_class constructor
+    **model_kwargs: Any # Keyword arguments for model_class constructor
+) -> Optional[nn.Module]:
+    """
+    Loads model weights from a saved checkpoint file onto a specified device.
 
-# Add other model definitions as needed
+    Instantiates the model architecture using the provided class and arguments,
+    loads the state dictionary from the checkpoint, moves the model to the
+    target device, and optionally sets it to evaluation mode.
 
+    Args:
+        model_class (Type[nn.Module]): The Python class of the model architecture to load.
+        checkpoint_path (Path): Path to the checkpoint file (.pt, .pth, etc.).
+        device (str): The device to load the model onto (e.g., 'cuda:0', 'cpu').
+                      Determined externally, e.g., using set_compute_device.
+        strict_load (bool): If True (default), requires the keys in the checkpoint's
+                            state_dict to exactly match the keys returned by the model's
+                            state_dict(). If False, allows loading partial or mismatched keys.
+        eval_mode (bool): If True (default), sets the model to evaluation mode
+                          (model.eval()) after loading. Set to False if loading
+                          for continued training.
+        *model_args: Positional arguments needed to initialize model_class.
+        **model_kwargs: Keyword arguments needed to initialize model_class.
+
+    Returns:
+        Optional[nn.Module]: The loaded model instance on the specified device,
+                             or None if loading fails.
+    """
+    frame = inspect.currentframe()
+    LOG_INS_CUST = f"{LOG_INS}::load_model_from_checkpoint::{frame.f_lineno if frame else 'UnknownLine'}"
+
+    log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Attempting to load model checkpoint from: {checkpoint_path}", main_logger=__file__)
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Args - model_class={model_class.__name__}, device='{device}', strict={strict_load}, eval_mode={eval_mode}, model_args={model_args}, model_kwargs={model_kwargs}", main_logger=__file__)
+
+    # --- Validate Inputs ---
+    if not checkpoint_path.exists():
+        log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint file not found: {checkpoint_path}", main_logger=__file__)
+        return None
+    if not checkpoint_path.is_file():
+        log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint path is not a file: {checkpoint_path}", main_logger=__file__)
+        return None
+    if not device:
+         log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Target device cannot be empty.", main_logger=__file__)
+         return None
+
+    try:
+        # --- Load Checkpoint Dictionary ---
+        # map_location=device ensures tensors are loaded onto the correct device directly
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Loading checkpoint dictionary using torch.load with map_location='{device}'...", main_logger=__file__)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Checkpoint dictionary loaded. Keys: {list(checkpoint.keys())}", main_logger=__file__)
+
+        # --- Validate Checkpoint Content ---
+        if not isinstance(checkpoint, dict):
+             log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint file did not contain a dictionary: {checkpoint_path}", main_logger=__file__)
+             return None
+        if 'model_state_dict' not in checkpoint:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint dictionary missing 'model_state_dict' key: {checkpoint_path}", main_logger=__file__)
+            return None
+        if 'epoch' in checkpoint: # Log epoch if available
+             log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Checkpoint is from epoch: {checkpoint.get('epoch')}", main_logger=__file__)
+        if 'extra_meta' in checkpoint: # Log extra metadata if available
+             log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Checkpoint contains extra metadata: {checkpoint.get('extra_meta')}", main_logger=__file__)
+
+
+        # --- Instantiate Model Architecture ---
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Instantiating model architecture: {model_class.__name__}(*{model_args}, **{model_kwargs})", main_logger=__file__)
+        model = model_class(*model_args, **model_kwargs)
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Model instance created.", main_logger=__file__)
+
+
+        # --- Load State Dictionary ---
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Loading state_dict into model instance (strict={strict_load})...", main_logger=__file__)
+        try:
+            load_result = model.load_state_dict(checkpoint['model_state_dict'], strict=strict_load)
+            # Log results of non-strict loading if applicable
+            if not strict_load:
+                 if load_result.missing_keys:
+                      log_statement(loglevel='warning', logstatement=f"{LOG_INS_CUST}:WARNING>>State dict loaded with missing keys (strict=False): {load_result.missing_keys}", main_logger=__file__)
+                 if load_result.unexpected_keys:
+                      log_statement(loglevel='warning', logstatement=f"{LOG_INS_CUST}:WARNING>>State dict loaded with unexpected keys (strict=False): {load_result.unexpected_keys}", main_logger=__file__)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Model state_dict loaded successfully.", main_logger=__file__)
+        except RuntimeError as state_dict_error:
+             # Common errors: size mismatches, key mismatches (if strict=True)
+             log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>RuntimeError loading state_dict: {state_dict_error}. Ensure model architecture matches checkpoint.", main_logger=__file__, exc_info=True)
+             return None
+        except KeyError as key_error:
+            # If 'model_state_dict' key itself was missing (should be caught earlier, but good practice)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>KeyError loading state_dict (likely missing 'model_state_dict'): {key_error}", main_logger=__file__)
+            return None
+
+
+        # --- Move Model to Device (should be mostly redundant if map_location worked, but ensures consistency) ---
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Moving loaded model to device: '{device}'...", main_logger=__file__)
+        model.to(device)
+
+
+        # --- Set Evaluation Mode ---
+        if eval_mode:
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Setting model to evaluation mode (model.eval()).", main_logger=__file__)
+            model.eval()
+        else:
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Leaving model in training mode (eval_mode=False).", main_logger=__file__)
+
+
+        # --- Return Loaded Model ---
+        log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Model loaded successfully from {checkpoint_path} onto device '{device}'.", main_logger=__file__)
+        # Optionally return other checkpoint info if needed, but standard practice is often just the model
+        # return {
+        #      'model': model,
+        #      'epoch': checkpoint.get('epoch'),
+        #      'optimizer_state_dict': checkpoint.get('optimizer_state_dict'), # May need deepcopy?
+        #      'extra_meta': checkpoint.get('extra_meta')
+        # }
+        return model
+
+    except FileNotFoundError:
+        # Should be caught by initial check, but handle again just in case
+        log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint file not found during load: {checkpoint_path}", main_logger=__file__)
+        return None
+    except (pickle.UnpicklingError, EOFError, zipfile.BadZipFile) as load_err: # Catch common torch.load errors
+         log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Failed to load/unpickle checkpoint file {checkpoint_path}. File may be corrupted or incompatible: {load_err}", main_logger=__file__, exc_info=True)
+         return None
+    except RuntimeError as rte: # Catch potential device loading issues
+         log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>RuntimeError during model loading (potentially device related): {rte}", main_logger=__file__, exc_info=True)
+         return None
+    except Exception as e:
+        # Catch unexpected errors during the process
+        log_statement(loglevel='critical', logstatement=f"{LOG_INS_CUST}:CRITICAL>>CRITICAL: Unexpected error loading model from checkpoint {checkpoint_path}: {e}", main_logger=__file__, exc_info=True)
+        return None

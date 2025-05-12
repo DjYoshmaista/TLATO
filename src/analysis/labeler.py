@@ -106,7 +106,7 @@ class SemanticLabeler:
         # Determine device, defaulting to config.DEFAULT_DEVICE
         self.device = device or DEFAULT_DEVICE
         self.tokenizer = None
-        self.model = None
+        self.model = 'bert-based-uncased'
         self.reference_embeddings: Dict[str, torch.Tensor] = {} # Stores label -> embedding tensor
 
         try:

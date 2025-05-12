@@ -8,62 +8,51 @@ Handles data preprocessing pipelines including:
 - Tokenizing/vectorizing processed data into tensors.
 Utilizes GPU acceleration (cuDF, CuPy, cuML) if available and configured.
 """
+import shutil
+import inspect
+import os
 import sys
+import csv
+import codecs
 import re
 from threading import Lock
-from typing import Union, List, Dict, Tuple, Optional, Generator, Any
-import gc
-from functools import partial
-import torch
+from typing import Dict, Optional, Any, List, Generator
 import pandas as pd
-import zstandard as zstd
+import time
+import pandas.api.types
 from pathlib import Path
 import hashlib
 import logging
-import importlib
 import numpy as np
+from src.data.readers import RobustTextReader, FileReader
+from src.data.readers import *
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-import csv
-import time
-import datetime
-from datetime import timezone
-import fitz  # PyMuPDF
-import shutil
-import multiprocessing
 import json
-from datetime import datetime, timezone # Import timezone
-import os
-import time
 import io
-
+import csv
+import datetime as dt
+from datetime import timezone # Import timezone
+import zstandard as zstd
+from src.core.repo_handler import DataRepository
+from src.data.constants import *
+from src.utils.config import *
+from src.utils.compression import *
+from src.utils.hashing import *
 # Import project configuration and utilities
 try:
-    from src.utils.config import (
-        DataProcessingConfig, PROCESSED_DATA_DIR, TOKENIZED_DATA_DIR, DEFAULT_DEVICE,
-        PROJECT_ROOT, BASE_DATA_DIR, COMPRESSION_LEVEL, COMPRESSION_ENABLED,
-        DATA_REPO_FILE # Import central repo file path
-    )
+    from src.utils.config import *
     from src.utils.logger import configure_logging, log_statement
-    from src.utils.gpu_switch import check_gpu_support, get_compute_backend
-    from src.utils.hashing import hash_filepath, unhash_filepath, generate_data_hash
-    from src.utils.compression import stream_decompress_lines, stream_compress_lines, compress_file, decompress_file
-    from src.data.constants import *
-    from src.data.readers import get_reader_class, FileReader, PDFReader, CSVReader, TXTReader, JSONLReader, ExcelReader
+    from src.utils.gpu_switch import *
     configure_logging()
-    log_statement(loglevel=str("info"), logstatement=str("Logger and other utils imported successfully."), main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS}::Logger and other utils imported successfully.", main_logger=__file__)
 except ImportError:
     logging.ERROR("Failed relative import in processing.py, trying absolute from src...")
     try:
-        from src.utils.config import (
-            DataProcessingConfig, PROCESSED_DATA_DIR, TOKENIZED_DATA_DIR, DEFAULT_DEVICE,
-            PROJECT_ROOT, BASE_DATA_DIR, COMPRESSION_LEVEL, COMPRESSION_ENABLED,
-            DATA_REPO_FILE
-        )
-        from src.utils.logger import configure_logging
-        from src.utils.gpu_switch import check_gpu_support
+        from src.utils.config import *
+        from src.utils.logger import configure_logging, log_statement
         configure_logging()
-        log_statement(loglevel=str("info"), logstatement=str("Logger and other utils imported successfully."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Logger and other utils imported successfully.", main_logger=__file__)
     except ImportError as e:
         logging.error(f"CRITICAL: Failed to import core config for processing: {e}")
         class DataProcessingConfig: MAX_WORKERS = 16; REPO_FILE = './data_repository.csv.zst'; SCAN_FILE_EXTENSIONS=['.txt']; TEXT_CLEANING_REGEX=r'[^\w\s]'
@@ -75,15 +64,6 @@ except ImportError:
         COMPRESSION_ENABLED = True
         COMPRESSION_LEVEL = 22
         DATA_REPO_FILE = BASE_DATA_DIR / 'data_repository.csv.zst'
-try:
-    from src.utils.helpers import save_dataframe_to_parquet_zst, compress_string_to_file
-except ImportError:
-    log_statement(loglevel='error', logstatement='Failed to import helper functions. Attempting to reload...', main_logger=str(__name__))
-    from src.utils.helpers import save_dataframe_to_parquet_zst, compress_string_to_file
-    log_statement(loglevel='info', logstatement='Helper functions imported successfully.', main_logger=str(__name__))
-except Exception as e:
-    log_statement(loglevel='error', logstatement=f'Unexpected error importing helper functions: {e}', main_logger=str(__name__))
-    raise
 
 # --- Optional GPU Library Imports ---
 # (Implementation remains the same as previous version)
@@ -95,29 +75,29 @@ try:
     if compute_backend == 'cudf':
         try:
             import cudf as pd
-            log_statement(loglevel='info', logstatement="cuDF backend selected.", main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::cuDF backend selected.", main_logger=__file__)
             IS_CUDA_AVAILABLE = True
         except ImportError:
-            log_statement(loglevel='warning', logstatement="cuDF requested but not available. Falling back to pandas.", main_logger=str(__name__))
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS}::cuDF requested but not available. Falling back to pandas.", main_logger=__file__)
             import pandas as pd
             IS_CUDA_AVAILABLE = False
     else:
         import pandas as pd
-        log_statement(loglevel='info', logstatement="Pandas backend selected.", main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Pandas backend selected.", main_logger=__file__)
         IS_CUDA_AVAILABLE = False
 
 except ImportError as initial_import_err:
-    log_statement(loglevel=str("error"), logstatement=str(f"GPU library 'cudf' not found ({initial_import_err}). Using CPU fallback."), main_logger=str(__name__))
+    log_statement(loglevel='error', logstatement=f"{LOG_INS}::GPU library 'cudf' not found ({initial_import_err}). Using CPU fallback.", main_logger=__file__)
     GPU_AVAILABLE = False
 except Exception as initial_cudf_err:
     if UnsupportedCUDAError and isinstance(initial_cudf_err, UnsupportedCUDAError):
-         log_statement(loglevel=str("warning"), logstatement=str(f"cuDF found but GPU is incompatible ({initial_cudf_err}). Using CPU fallback."), main_logger=str(__name__))
+         log_statement(loglevel="warning", logstatement=f"{LOG_INS}::cuDF found but GPU is incompatible ({initial_cudf_err}). Using CPU fallback.", main_logger=__file__)
     else:
-         log_statement(loglevel=str("error"), logstatement=str(f"Unexpected error during initial cuDF import/setup: {initial_cudf_err}"), main_logger=str(__name__), exc_info=True)
+         log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected error during initial cuDF import/setup: {initial_cudf_err}", main_logger=__file__, exc_info=True)
     GPU_AVAILABLE = False
 
 if not GPU_AVAILABLE:
-    log_statement(loglevel=str("warning"), logstatement=str("Using CPU fallback (pandas/numpy)."), main_logger=str(__name__))
+    log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Using CPU fallback (pandas/numpy).", main_logger=__file__)
     cp = np # Ensure cp is numpy alias if GPU failed
     # Define cudf dummy if necessary
     if cudf is None or not GPU_AVAILABLE:
@@ -137,7 +117,7 @@ if not GPU_AVAILABLE:
     if CumlScaler is None or not GPU_AVAILABLE:
         try:
             from sklearn.preprocessing import StandardScaler as SklearnScaler
-            log_statement(loglevel=str("warning"), logstatement=str("Using sklearn.preprocessing.StandardScaler as CPU fallback for scaling."), main_logger=str(__name__))
+            log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Using sklearn.preprocessing.StandardScaler as CPU fallback for scaling.", main_logger=__file__)
             class SklearnScalerWrapper:
                 def __init__(self, *args, **kwargs): self._scaler = SklearnScaler(*args, **kwargs)
                 def fit_transform(self, data):
@@ -150,11 +130,18 @@ if not GPU_AVAILABLE:
                     else: return data
             CumlScaler = SklearnScalerWrapper
         except ImportError:
-            log_statement(loglevel=str("warning"), logstatement=str("Scikit-learn not found. Using basic dummy scaler (no operation)."), main_logger=str(__name__))
+            log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Scikit-learn not found. Using basic dummy scaler (no operation).", main_logger=__file__)
             class CumlScaler_dummy:
                  def __init__(self, *args, **kwargs): pass
                  def fit_transform(self, data): return data
             CumlScaler = CumlScaler_dummy
+# try:
+from src.utils.helpers import *
+#     log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor Helper functions assigned.", main_logger=__file__)
+# except ImportError:
+#     log_statement(loglevel='error', logstatement=f"{LOG_INS}::DataProcessor ERROR importing helper functions.", main_logger=__file__)
+#     def dummy_save_parquet(*args, **kwargs): return False
+#     def dummy_compress_string(*args, **kwargs): return False
 
 # --- NLTK Setup (Same as previous version) ---
 NLTK_AVAILABLE = False
@@ -176,7 +163,7 @@ try:
                      # Try finding zipped version
                      nltk.data.find(f"{path_fragment}.zip")
                  except LookupError:
-                    log_statement(loglevel=str("info"), logstatement=str(f"Downloading NLTK '{resource_id}' data..."), main_logger=str(__name__))
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS}::Downloading NLTK '{resource_id}' data...", main_logger=__file__)
                     nltk.download(resource_id, quiet=True)
     download_nltk_data() # Consider calling this conditionally or manually
 
@@ -185,217 +172,492 @@ try:
     lemmatizer = WordNetLemmatizer()
     stop_words = set(stopwords.words('english'))
     NLTK_AVAILABLE = True
-    log_statement(loglevel=str("info"), logstatement=str("NLTK components loaded successfully."), main_logger=str(__name__))
-except ImportError: log_statement(loglevel=str("warning"), logstatement=str("NLTK library not found. Text processing limited."), main_logger=str(__name__))
-except LookupError as e: log_statement(loglevel=str("warning"), logstatement=str(f"NLTK data not found ({e}). Text processing limited."), main_logger=str(__name__))
-except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Unexpected error loading NLTK: {e}"), main_logger=str(__name__), exc_info=True)
+    log_statement(loglevel='info', logstatement=f"{LOG_INS}::NLTK components loaded successfully.", main_logger=__file__)
+except ImportError: log_statement(loglevel="warning", logstatement=f"{LOG_INS}::NLTK library not found. Text processing limited.", main_logger=__file__)
+except LookupError as e: log_statement(loglevel="warning", logstatement=f"{LOG_INS}::NLTK data not found ({e}). Text processing limited.", main_logger=__file__)
+except Exception as e: log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected error loading NLTK: {e}", main_logger=__file__, exc_info=True)
 if not NLTK_AVAILABLE:
     class DummyLemmatizer:
         def lemmatize(self, word, pos='n'): return word # Add pos arg for compatibility
     lemmatizer = DummyLemmatizer()
     stop_words = set() # No stop words if NLTK not available
 
-# Import readers needed for actual content processing (Placeholder)
-# from src.data.readers import FileReaderFactory
+# Import readers needed for actual content processing
+from src.data.readers import FileReader
 
 # Placeholder for tokenization logic
 # from src.core.tokenizer import tokenize_content # Assuming exists
+init_logger_name = __file__ # Logger name for init context
+content_string = None
+output_filepath = None
+
 
 # --- Data Processor ---
 class DataProcessor:
     """ Scans, processes raw data, saves compressed output. """
-    def __init__(self, repo_dir: str = REPO_DIR, filename: str = MAIN_REPO_FILENAME, max_workers: int | None = None):
+    def __init__(self, repo_path_override: Optional[str | Path] = None, repo_dir: str = REPO_DIR, filename: str = MAIN_REPO_FILENAME, max_workers: int | None = None):
         # --- Path Setup ---
-        self.repo_dir = Path(repo_dir)
-        self.repo_filepath = self.repo_dir / filename # Main repo (tracks source files)
-        # Define paths for separate repositories tracking processed/tokenized outputs
-        self.processed_repo_filepath = self.repo_dir / PROCESSED_REPO_FILENAME
-        self.tokenized_repo_filepath = self.repo_dir / TOKENIZED_REPO_FILENAME
-        self.repo_filepath.parent.mkdir(parents=True, exist_ok=True)
+        init_logger_name = __file__ # Define logger name
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::DataProcessor class initialized for {__name__}  --  repo_path_override: {repo_path_override}  --  repo_dir: {repo_dir}  --  filename: {filename} ", main_logger=init_logger_name)
+        # --- Determine Repository Path ---
+        if repo_path_override:
+            try:
+                self.repo_filepath = Path(repo_path_override).resolve()
+                self.repo_dir = self.repo_filepath.parent
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor using overridden repo path: {self.repo_filepath}", main_logger=init_logger_name)
+            except Exception as path_e:
+                log_statement(loglevel='critical', logstatement=f"{LOG_INS}::Invalid repo_path_override provided: {repo_path_override} - Error: {path_e}", main_logger=init_logger_name)
+                raise ValueError("Invalid repository override path provided.") from path_e
+        else:
+            try:
+                # Use Path(REPO_DIR) and MAIN_REPO_FILENAME constants directly
+                self.repo_dir = Path(REPO_DIR).resolve() # REPO_DIR from constants.py
+                self.repo_filepath = self.repo_dir / MAIN_REPO_FILENAME # MAIN_REPO_FILENAME from constants.py
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor using default repo path: {self.repo_filepath}", main_logger=init_logger_name)
+            except Exception as e:
+                log_statement(loglevel='critical', logstatement=f"{LOG_INS}::Invalid default repo_dir/filename: {self.repo_filepath}"
+                            f"{LOG_INS}::Error: {e}", main_logger=init_logger_name)
+                raise ValueError("Invalid default repository directory/filename.") from e
+        print(f"{LOG_INS} > DEBUG: repo_filepath == {self.repo_filepath}")
+        # Ensure the determined repository directory exists (using self.repo_dir)
+        try:
+             self.repo_dir.mkdir(parents=True, exist_ok=True)
+             log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Ensured repository directory exists: {self.repo_dir}", main_logger=init_logger_name)
+        except Exception as mkdir_e:
+            print(f"{LOG_INS}::DataProcessor CRITICAL - Failed to create repo dir: {self.repo_dir}")
+            raise
 
-        # Define base directory for processed output files
-        # Using the constant from config.py
-        self.output_dir = PROCESSED_DATA_DIR
+        # Define base directory for processed output files (using constants from config)
+        self.output_dir = Path(PROCESSED_DATA_DIR) # Ensure Path object
         self.output_dir.mkdir(parents=True, exist_ok=True)
         # Define base directory for tokenized output files
-        self.tokenized_output_dir = TOKENIZED_DATA_DIR
+        self.tokenized_output_dir = Path(TOKENIZED_DATA_DIR) # Ensure Path object
         self.tokenized_output_dir.mkdir(parents=True, exist_ok=True)
+        self.encoding = "utf-8"
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor Output Dirs: Processed='{self.output_dir}', Tokenized='{self.tokenized_output_dir}'", main_logger=__file__)
 
         # --- Repository Initialization ---
-        # Initialize the main repository interface (assuming DataRepository handles loading/saving)
-        # Pass the main repo file path to DataRepository
-        self.repo = DataRepository(repo_path=self.repo_filepath) # Pass main repo path
-
-        # Ensure repository files exist with headers (using internal DataRepository method or helper)
-        # Note: Ensure DataRepository or a helper handles Zstd compression correctly for init
-        self._ensure_repo_exists(self.repo_filepath, MAIN_REPO_HEADER)
-        # Optional: Initialize processed/tokenized repo files if needed by workflow
-        # These might track outputs with links back to the main Designation
-        # Define PROCESSED_REPO_HEADER and TOKENIZED_REPO_HEADER in constants.py if used
-        # self._ensure_repo_exists(self.processed_repo_filepath, PROCESSED_REPO_HEADER)
-        # self._ensure_repo_exists(self.tokenized_repo_filepath, TOKENIZED_REPO_HEADER)
-
-        # --- Instantiate a File Reader from src/data/readers.py class as a local class variable ---
-        self.text_reader = FileReader(error_handling='replace')
+        try:
+            self.repo = DataRepository(repo_path=self.repo_filepath)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor's internal DataRepository initialized with: {self.repo_filepath}", main_logger=init_logger_name)
+            df_len = len(self.repo.df) if self.repo.df is not None else 'None'
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor internal DataRepository load complete. DF length: {len(self.repo.df) if self.repo.df is not None else 'None'}", main_logger=__file__)
+            if self.repo.df is not None and not self.repo.df.empty:
+                if COL_STATUS in self.repo.df.columns:
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS} >>> MORE DEBUG: Status column values IN LOADED DF (Top 10): {self.repo.df[COL_STATUS].head(10).tolist()}"
+                                                                f"{LOG_INS} >>> MORE DEBUG: Status value counts IN LOADED DF:\n{self.repo.df[COL_STATUS].value_counts().to_string()}", main_logger=__file__)
+                else:
+                    log_statement(loglevel='critical', logstatement=f"{LOG_INS} >>> MORE DEBUG: CRITICAL - '{COL_STATUS}' column MISSING in loaded DataFrame!", main_logger=__file__, exc_info=True)
+            elif self.repo.df is not None:
+                log_statement(loglevel='error', logstatement=f"{LOG_INS} >>> MORE DEBUG: Loaded DataFrame is empty.", main_logger=__file__)
+        except ValueError as init_ve:
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS}::DataRepository initialization failed: {init_ve}", main_logger=init_logger_name)
+            raise
+        except Exception as init_e:
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS}::Unexpected error initializing DataRepository: {init_e}", main_logger=init_logger_name, exc_info=True)
+            raise
 
         # --- State Management ---
-        self._next_designation = self._get_next_designation()
-        self._data_hashes = self._load_existing_hashes() # For copy detection
-        self._file_hashes = {} # Potentially deprecated if _data_hashes covers content checks
-        self.lock = Lock() # For thread-safe operations on shared state if needed
+        self.lock = Lock()
 
         # --- Execution Setup ---
-        resolved_max_workers = max_workers if max_workers is not None else DataProcessingConfig.MAX_WORKERS
+        try: config_max_workers = DataProcessingConfig.MAX_WORKERS
+        except AttributeError: config_max_workers = 16
+        resolved_max_workers = max_workers if max_workers is not None else config_max_workers
         self.max_workers = max(1, resolved_max_workers)
-        log_statement(loglevel=str("info"), logstatement=str(f"Initializing DataProcessor with max_workers={self.max_workers}"), main_logger=str(__name__))
-        # Using ProcessPoolExecutor for CPU-bound tasks like reading/processing
-        self.executor = ProcessPoolExecutor(max_workers=self.max_workers)
+        print(f"{LOG_INS}::DataProcessor max_workers set to: {self.max_workers}")
+        log_statement(loglevel="info", logstatement=f"{LOG_INS}::Initializing DataProcessor internals with max_workers={self.max_workers}", main_logger=init_logger_name)
+        # Use ThreadPoolExecutor from previous fix
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix='DataProc_Thread')
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::DataProcessor executor initialized as ThreadPoolExecutor.", main_logger=init_logger_name)
 
-        # --- Processing Components ---
-        self.scaler = self._initialize_scaler() # For numerical data
-        # Compile regex for text cleaning (ensure TEXT_CLEANING_REGEX is in DataProcessingConfig)
+        # --- Processing Components (Scaler, Regex) ---
+        try:
+            self.scaler = CumlScaler()
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor Scaler initialized ({type(self.scaler).__name__}).", main_logger=__file__)
+        except Exception as scaler_init_e:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::DataProcessor Scaler initialization FAILED.  Cause: {scaler_init_e}.", main_logger=__file__, exc_info=True)
+            self.scaler = None
         self.cleaning_regex = None
         try:
-            regex_pattern = getattr(DataProcessingConfig, 'TEXT_CLEANING_REGEX', r'[^\w\s\-\.]') # Default
+            regex_pattern = getattr(DataProcessingConfig, 'TEXT_CLEANING_REGEX', r'[^\w\s\-\.]')
             if regex_pattern:
-                self.cleaning_regex = re.compile(regex_pattern)
-        except re.error as re_err:
-            log_statement(loglevel='error', logstatement=f"Invalid cleaning regex pattern: {regex_pattern}. Error: {re_err}", main_logger=str(__name__))
-        except AttributeError:
-             log_statement(loglevel='warning', logstatement="TEXT_CLEANING_REGEX not found in DataProcessingConfig. Using default.", main_logger=str(__name__))
-             self.cleaning_regex = re.compile(r'[^\w\s\-\.]') # Fallback default
+                 self.cleaning_regex = re.compile(regex_pattern)
+                 print(f"{LOG_INS}::DataProcessor Cleaning regex compiled: {regex_pattern}")
+            else:
+                 print(f"{LOG_INS}::DataProcessor No cleaning regex defined.")
+        except Exception as re_err:
+            log_statement(loglevel='error',
+            logstatement=f"{LOG_INS}::Invalid cleaning regex pattern: {regex_pattern}. Error: {re_err}"
+            f"{__name__}>>> DEBUG: {__file__}:{inspect.currentframe().f_lineno} DataProcessor ERROR compiling regex: {re_err}",
+            main_logger=__file__)
 
+        # --- Assign Helper Functions ---
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor initialized. Output dirs: Processed='{self.output_dir}', Tokenized='{self.tokenized_output_dir}'", main_logger=__file__)
 
-        # --- Assign Helper Functions (assuming they are imported standalone functions) ---
-        # Note: If these are methods of another class, instantiate that class here.
-        # If they are intended to be methods of *this* class, define them directly below.
-        # Assuming standalone functions imported from src.utils.helpers:
+    def save_dataframe_to_parquet_zst(self, df: pd.DataFrame, output_path: Path):
+        """Saves a pandas DataFrame to a Zstandard-compressed Parquet file."""
+        func_logger = __file__ # Use module name for logger
         try:
-            from src.utils.helpers import save_dataframe_to_parquet_zst as helper_save_parquet
-            from src.utils.helpers import compress_string_to_file as helper_compress_string
-            self.save_dataframe_to_parquet_zst = helper_save_parquet
-            self.compress_string_to_file = helper_compress_string
-            log_statement(loglevel='info', logstatement='Helper functions assigned successfully.', main_logger=str(__name__))
-        except ImportError:
-            log_statement(loglevel='error', logstatement='Failed to import helper functions (save_dataframe_to_parquet_zst, compress_string_to_file) from src.utils.helpers. Processing methods requiring them will fail.', main_logger=str(__name__))
-            # Define dummy fallbacks to prevent AttributeError, but log errors when called
-            def dummy_save_parquet(*args, **kwargs):
-                log_statement(loglevel='error', logstatement="Attempted to call missing helper 'save_dataframe_to_parquet_zst'", main_logger=str(__name__))
+            # Ensure parent directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Check if using cuDF DataFrame and convert if necessary before saving with pandas
+            # Ensure cudf is imported safely if GPU checks are used elsewhere
+            cudf = None
+            if 'cudf' in sys.modules:
+                try: cudf = sys.modules['cudf']
+                except ImportError: pass # cudf not actually available
+
+            if cudf is not None and isinstance(df, cudf.DataFrame):
+                log_statement(loglevel='debug', logstatement="Converting cuDF DataFrame to Pandas before Parquet save.", main_logger=func_logger)
+                df_pandas = df.to_pandas()
+            elif isinstance(df, pd.DataFrame):
+                df_pandas = df # Assume it's already a pandas DataFrame
+            else:
+                log_statement(loglevel='error', logstatement=f"Unsupported DataFrame type for Parquet saving: {type(df)}", main_logger=func_logger)
                 return False
-            def dummy_compress_string(*args, **kwargs):
-                 log_statement(loglevel='error', logstatement="Attempted to call missing helper 'compress_string_to_file'", main_logger=str(__name__))
-                 return False
-            self.save_dataframe_to_parquet_zst = dummy_save_parquet
-            self.compress_string_to_file = dummy_compress_string
 
-        log_statement(loglevel=str("info"), logstatement=str(f"DataProcessor initialized. Output dirs: Processed='{self.output_dir}', Tokenized='{self.tokenized_output_dir}'"), main_logger=str(__name__))
+            # Save using pandas to_parquet with zstd compression
+            # Requires 'pyarrow' (recommended) or 'fastparquet' engine
+            df_pandas.to_parquet(output_path, compression='zstd', engine='pyarrow', index=False)
 
-    def _classify_data(self, df: pd.DataFrame, file_path_hint: Path) -> str:
+            log_statement(loglevel='info', logstatement=f"DataFrame saved to compressed Parquet: {output_path}", main_logger=func_logger)
+            return True
+        except ImportError:
+            log_statement(loglevel='error', logstatement="Error saving to Parquet: 'pyarrow' or 'fastparquet' library not found. Please install one (e.g., pip install pyarrow).", main_logger=func_logger)
+            return False
+        except Exception as e:
+            log_statement(loglevel='error', logstatement=f"Failed to save DataFrame to compressed Parquet {output_path}: {e}", main_logger=func_logger, exc_info=True)
+            # Clean up potentially incomplete file
+            if output_path.exists():
+                try: output_path.unlink()
+                except OSError: pass
+            return False
+
+    def _classify_data(self, filepath: Path, content: str | bytes) -> str:
         """
-        Analyzes the content of a DataFrame to classify the data type.
-        Implements logic based on rules #1, #2, #3.
+        Classifies the data type based on file extension and content analysis.
 
         Args:
-            df (pd.DataFrame): The DataFrame read from the file.
-            file_path_hint (Path): Original file path, used for logging/context.
+            filepath (Path): The path to the file.
+            content (str | bytes): The content of the file (or a sample).
 
         Returns:
-            str: A classification constant (e.g., TYPE_TEXTUAL, TYPE_NUMERICAL).
+            str: The classified data type string (e.g., TYPE_TEXTUAL, TYPE_CODE).
         """
-        main_logger_name = str(__name__) # Logger name for this module
-        log_statement(loglevel="debug", logstatement=f"Starting data classification for {file_path_hint.name}", main_logger=main_logger_name)
+        log_statement('debug', f"{LOG_INS}:DEBUG>>_classify_data called for {filepath}", __file__)
+        extension = filepath.suffix.lower()
+        classified_type = TYPE_UNKNOWN # Default
 
-        if df is None or df.empty:
-            log_statement(loglevel="warning", logstatement=f"Cannot classify empty DataFrame from {file_path_hint.name}", main_logger=main_logger_name)
-            return TYPE_EMPTY
+        # --- Stage 1: Extension-based Classification (Common & Relatively Unambiguous) ---
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Classifying based on extension: {extension}", __file__)
+        if extension == '.pdf':
+            classified_type = TYPE_PDF
+        elif extension == '.html' or extension == '.htm':
+            classified_type = TYPE_HTML
+        elif extension == '.xml':
+            classified_type = TYPE_XML
+        elif extension == '.json':
+            classified_type = TYPE_JSON
+        elif extension == '.jsonl':
+            classified_type = TYPE_JSONL
+        elif extension == '.yaml' or extension == '.yml':
+            classified_type = TYPE_YAML
+        elif extension == '.md':
+            classified_type = TYPE_MARKDOWN
+        elif extension in ['.py', '.pyw', '.java', '.js', '.ts', '.c', '.cpp', '.h', '.hpp', '.cs', '.go', '.php', '.rb', '.pl', '.sh', '.ps1', '.lua', '.swift', '.kt', '.kts']:
+            classified_type = TYPE_CODE
+        elif extension in ['.csv', '.tsv']: # Often requires content check too
+            classified_type = TYPE_TABULAR
+        elif extension == '.txt':
+             classified_type = TYPE_TEXTUAL # Tentative, needs content check
+        elif extension == '.png':
+             classified_type = TYPE_IMAGE_PNG
+        elif extension in ['.jpg', '.jpeg']:
+             classified_type = TYPE_IMAGE_JPEG
+        elif extension == '.gif':
+             classified_type = TYPE_IMAGE_GIF
+        elif extension == '.bmp':
+             classified_type = TYPE_IMAGE_BMP
+        elif extension == '.wav':
+             classified_type = TYPE_AUDIO_WAV
+        elif extension == '.mp3':
+             classified_type = TYPE_AUDIO_MP3 # Tentative
+        elif extension == '.zip':
+             classified_type = TYPE_COMPRESSED_ZIP
+        elif extension == '.gz':
+             classified_type = TYPE_COMPRESSED_GZIP
+        elif extension == '.bz2':
+             classified_type = TYPE_COMPRESSED_BZ2
+        elif extension == '.7z':
+             classified_type = TYPE_COMPRESSED_7Z
+        elif extension == '.rar':
+             classified_type = TYPE_COMPRESSED_RAR
+        elif extension == '.zst':
+             classified_type = TYPE_COMPRESSED_ZSTD
+        # Add more extensions here if needed
 
-        num_rows, num_cols = df.shape
-        total_cells = num_rows * num_cols
-        if total_cells == 0:
-             log_statement(loglevel="warning", logstatement=f"Cannot classify zero-cell DataFrame from {file_path_hint.name}", main_logger=main_logger_name)
-             return TYPE_EMPTY
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Initial classification by extension: {classified_type}", __file__)
 
-        numeric_cells = 0
-        text_cells = 0
-        potential_tensor_cells = 0
-        potential_subword_cells = 0
-        # Heuristic thresholds (adjust as needed)
-        NUMERICAL_THRESHOLD = 0.7 # More than 70% of non-empty cells are numeric
-        TOKEN_THRESHOLD = 0.9     # More than 90% of cells look like tokens/numerics
-        AVG_SUBWORD_LEN_THRESHOLD = 10 # Average length for suspecting subwords
+        # --- Stage 2: Content-based Classification (Magic Numbers & Structure/Syntax Analysis) ---
+        if content is None or len(content) == 0:
+            log_statement('warning', f"{LOG_INS}:WARNING>>Content is empty for {filepath}. Cannot perform content-based classification. Relying on extension: {classified_type}", __file__)
+            return classified_type if classified_type != TYPE_UNKNOWN else TYPE_TEXTUAL # Default to TEXTUAL for empty files? Or keep UNKNOWN?
+
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Performing content-based classification for {filepath}. Content type: {type(content).__name__}, Length: {len(content)}", __file__)
+
+        try:
+            # --- Magic Number Checks (primarily for bytes content) ---
+            # Ensure we check bytes if possible, even if decoded str is available
+            content_bytes = None
+            if isinstance(content, bytes):
+                content_bytes = content
+            elif isinstance(content, str):
+                 try:
+                    # Attempt to get bytes if needed, be careful with encoding choice
+                    # Using utf-8 might fail for binary files, latin-1 is safer for byte preservation
+                    content_bytes = content.encode('latin-1') # Reversible encoding for byte checking
+                 except Exception as enc_err:
+                     log_statement('warning', f"{LOG_INS}:WARNING>>Could not encode string content to bytes for magic number check: {enc_err}", __file__)
+
+            if content_bytes:
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Checking magic numbers using bytes (first 16 bytes: {content_bytes[:16]!r})", __file__)
+                # PDF
+                if content_bytes.startswith(b'%PDF-'):
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: PDF", __file__)
+                    return TYPE_PDF
+                # Images
+                elif content_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: PNG", __file__)
+                    return TYPE_IMAGE_PNG
+                elif content_bytes.startswith(b'\xff\xd8\xff'): # JPEG
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: JPEG", __file__)
+                    return TYPE_IMAGE_JPEG
+                elif content_bytes.startswith(b'GIF87a') or content_bytes.startswith(b'GIF89a'):
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: GIF", __file__)
+                    return TYPE_IMAGE_GIF
+                elif content_bytes.startswith(b'BM'): # BMP
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: BMP", __file__)
+                    return TYPE_IMAGE_BMP
+                # Audio
+                elif content_bytes.startswith(b'RIFF') and content_bytes[8:12] == b'WAVE':
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: WAV", __file__)
+                    return TYPE_AUDIO_WAV
+                elif content_bytes.startswith(b'ID3'): # MP3 often starts with ID3 tag
+                     log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: MP3 (ID3 tag)", __file__)
+                     # Note: Lack of ID3 doesn't mean it's not MP3. More robust checks needed if critical.
+                     return TYPE_AUDIO_MP3
+                # Compressed
+                elif content_bytes.startswith(b'PK\x03\x04') or content_bytes.startswith(b'PK\x05\x06') or content_bytes.startswith(b'PK\x07\x08'):
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: ZIP", __file__)
+                    return TYPE_COMPRESSED_ZIP
+                elif content_bytes.startswith(b'\x1f\x8b'): # Gzip
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: GZIP", __file__)
+                    return TYPE_COMPRESSED_GZIP
+                elif content_bytes.startswith(b'BZh'): # Bzip2
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: BZIP2", __file__)
+                    return TYPE_COMPRESSED_BZ2
+                elif content_bytes.startswith(b'7z\xBC\xAF\x27\x1C'): # 7zip
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: 7ZIP", __file__)
+                    return TYPE_COMPRESSED_7Z
+                elif content_bytes.startswith(b'Rar!\x1a\x07\x00') or content_bytes.startswith(b'Rar!\x1a\x07\x01\x00'): # RAR
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: RAR", __file__)
+                    return TYPE_COMPRESSED_RAR
+                elif content_bytes[0:4] in [b'\x28\xB5\x2F\xFD', b'\xFD\x2F\xB5\x28']: # Zstandard (Little/Big Endian)
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Magic number match: ZSTD", __file__)
+                    return TYPE_COMPRESSED_ZSTD
+
+            # --- Content Analysis (primarily for string content) ---
+            content_str = None
+            if isinstance(content, str):
+                content_str = content
+            elif isinstance(content, bytes):
+                # Try decoding with common encodings if it wasn't identified by magic numbers
+                try:
+                    # Detect BOM first
+                    bom = codecs.BOM_UTF8
+                    if content.startswith(bom):
+                         content_str = content[len(bom):].decode('utf-8', errors='strict')
+                         log_statement('debug', f"{LOG_INS}:DEBUG>>Decoded content using UTF-8 (BOM detected)", __file__)
+                    else:
+                         # Try UTF-8 first (most common)
+                         content_str = content.decode('utf-8', errors='strict')
+                         log_statement('debug', f"{LOG_INS}:DEBUG>>Decoded content using UTF-8", __file__)
+                except UnicodeDecodeError:
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>UTF-8 decoding failed, trying latin-1", __file__)
+                    try:
+                        # Fallback to latin-1 (preserves bytes)
+                        content_str = content.decode('latin-1', errors='strict')
+                        log_statement('debug', f"{LOG_INS}:DEBUG>>Decoded content using latin-1", __file__)
+                    except Exception as dec_err:
+                         log_statement('warning', f"{LOG_INS}:WARNING>>Could not decode byte content to string for analysis: {dec_err}", __file__)
+                         # Stick with extension-based type or potentially classify as BINARY
+                         return classified_type if classified_type != TYPE_UNKNOWN else TYPE_BINARY
 
 
-        # --- Analyze DataFrame Content ---
-        all_data_numeric = True # Flag for Rule #2 check
-        all_non_numeric_short = True # Flag for Rule #3 check
-        total_analyzed_cells = 0
-        avg_str_len_sum = 0
-        str_cell_count = 0
+            if content_str is not None:
+                # Reduce analysis scope for performance on large files (e.g., first 1MB or 1000 lines)
+                analysis_sample = content_str[:1024*1024] # Analyze first 1MB
+                lines = analysis_sample.splitlines()
+                num_lines = len(lines)
+                sample_lines = lines[:1000] # Analyze first 1000 lines
 
-        for col in df.columns:
-            # Attempt numeric conversion (non-destructive)
-            numeric_series = pd.to_numeric(df[col], errors='coerce')
-            num_numeric_in_col = numeric_series.notna().sum()
-            num_non_numeric_in_col = df[col].notna().sum() - num_numeric_in_col
+                # JSON Check (override extension if content matches)
+                if extension != '.jsonl' and (classified_type == TYPE_JSON or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN):
+                     # Quick check for common JSON start/end characters
+                     if analysis_sample.strip().startswith(('{', '[')) and analysis_sample.strip().endswith(('}', ']')):
+                          try:
+                               json.loads(analysis_sample) # Try parsing the sample
+                               log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: JSON", __file__)
+                               return TYPE_JSON
+                          except json.JSONDecodeError:
+                               log_statement('debug', f"{LOG_INS}:DEBUG>>Content looks like JSON but failed parsing (might be truncated or invalid).", __file__)
+                               # Keep previous classification or mark as potentially textual?
+                          except Exception as json_err:
+                               log_statement('warning', f"{LOG_INS}:WARNING>>Error during JSON check: {json_err}", __file__, exc_info=True)
 
-            numeric_cells += num_numeric_in_col
-            text_cells += num_non_numeric_in_col # Count non-numeric as text initially
-            total_analyzed_cells += df[col].notna().sum()
+                # JSONL Check (override extension if content matches)
+                if classified_type == TYPE_JSONL or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                     is_jsonl = True
+                     if not sample_lines: is_jsonl = False # Cannot be JSONL if empty
+                     parsed_lines = 0
+                     for i, line in enumerate(sample_lines):
+                          line = line.strip()
+                          if not line: continue # Allow empty lines
+                          if not (line.startswith(('{', '[')) and line.endswith(('}', ']'))): # Quick check
+                               is_jsonl = False
+                               log_statement('debug', f"{LOG_INS}:DEBUG>>Line {i+1} doesn't look like JSON object/array, breaking JSONL check.", __file__)
+                               break
+                          try:
+                               json.loads(line)
+                               parsed_lines += 1
+                          except json.JSONDecodeError:
+                               log_statement('debug', f"{LOG_INS}:DEBUG>>JSONL check failed parsing line {i+1}", __file__)
+                               is_jsonl = False
+                               break
+                          except Exception as jsonl_err:
+                               log_statement('warning', f"{LOG_INS}:WARNING>>Error during JSONL check on line {i+1}: {jsonl_err}", __file__, exc_info=True)
+                               is_jsonl = False
+                               break
+                     # Require at least one successfully parsed line for confidence
+                     if is_jsonl and parsed_lines > 0:
+                          log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: JSONL", __file__)
+                          return TYPE_JSONL
 
-            # Check for numerical tokenized data
-            # If a column has *any* non-numeric data after coercion, the whole DataFrame isn't purely numerical tokens
-            if num_non_numeric_in_col > 0:
-                all_data_numeric = False
+                # XML Check
+                if classified_type == TYPE_XML or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                     # Simple regex checks for XML declaration and tags
+                     if re.search(r'<\?xml\s+version=', analysis_sample, re.IGNORECASE) or \
+                        re.search(r'<(\w+)\s*[^>]*>', analysis_sample): # Look for opening tags
+                          # More robust: try parsing with ElementTree if needed
+                          log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: XML", __file__)
+                          return TYPE_XML
 
-            # Check for subword tokens - Analyze non-numeric cells
-            for item in df[col][numeric_series.isna()]: # Iterate only over non-numeric items
-                 if isinstance(item, str):
-                     str_len = len(item)
-                     avg_str_len_sum += str_len
-                     str_cell_count += 1
-                     # Basic check: are non-numeric strings short and lack spaces?
-                     if str_len > AVG_SUBWORD_LEN_THRESHOLD or ' ' in item:
-                         all_non_numeric_short = False
-                 elif item is not None: # Handle non-string, non-numeric types if needed
-                     all_non_numeric_short = False
+                # HTML Check
+                if classified_type == TYPE_HTML or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                     # Look for common HTML tags, doctype
+                     if re.search(r'<!DOCTYPE html', analysis_sample, re.IGNORECASE) or \
+                        re.search(r'<html[^>]*>', analysis_sample, re.IGNORECASE) or \
+                        re.search(r'<head[^>]*>', analysis_sample, re.IGNORECASE) or \
+                        re.search(r'<body[^>]*>', analysis_sample, re.IGNORECASE) or \
+                        re.search(r'<div[^>]*>', analysis_sample, re.IGNORECASE):
+                           log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: HTML", __file__)
+                           return TYPE_HTML
 
-        # --- Classification Logic ---
-        classification = TYPE_UNKNOWN # Default
+                # Code Check (Refine based on Textual/Unknown)
+                if classified_type == TYPE_CODE or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                     # Heuristics: keywords, comments, syntax elements
+                     code_keywords = {'def ', 'class ', 'import ', 'function ', 'public ', 'private ', 'static ', 'void ', 'int ', 'float ', 'const ', 'let '}
+                     code_chars = {'{', '}', ';', '#', '//', '/*'}
+                     keyword_hits = sum(1 for keyword in code_keywords if keyword in analysis_sample)
+                     char_hits = sum(1 for char in code_chars if char in analysis_sample)
+                     # Simple thresholding (adjust as needed)
+                     if keyword_hits >= 2 or char_hits >= 3 or (keyword_hits >= 1 and char_hits >= 1):
+                          # Stronger check: Look for typical line patterns (indentation, assignments)
+                          assignments = re.search(r'\w+\s*=\s*', analysis_sample)
+                          indentation = any(line.startswith((' ', '\t')) for line in sample_lines if line.strip())
+                          if assignments or indentation or keyword_hits >=3:
+                              log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: CODE (Keywords: {keyword_hits}, Chars: {char_hits}, Assign/Indent: {bool(assignments or indentation)})", __file__)
+                              return TYPE_CODE
 
-        # Rule #2: Check for purely numerical tokenized data
-        if all_data_numeric and total_analyzed_cells > 0:
-            # Further checks could involve inspecting structure (e.g., nested lists)
-            # For now, assume if all convertible cells are numeric, it's tokenized.
-            log_statement(loglevel="info", logstatement=f"Classified {file_path_hint.name} as {TYPE_TOKENIZED_NUMERICAL} (all convertible cells are numeric)", main_logger=main_logger_name)
-            classification = TYPE_TOKENIZED_NUMERICAL
+                # Markdown Check
+                if classified_type == TYPE_MARKDOWN or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                    # Look for markdown syntax elements (more than a few occurrences)
+                    md_patterns = [
+                        r'^\s*#+\s+',  # Headers
+                        r'^\s*[\*\-\+]\s+',  # List items
+                        r'^\s*>',  # Blockquotes
+                        r'```',  # Code fences
+                        r'\*\*|__|\*|_', # Bold/Italics (can be noisy)
+                        r'\[.+?\]\(.+?\)' # Links
+                    ]
+                    md_hits = sum(1 for pattern in md_patterns if re.search(pattern, analysis_sample, re.MULTILINE))
+                    if md_hits >= 2: # Require at least 2 different MD features
+                         log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: MARKDOWN (Hits: {md_hits})", __file__)
+                         return TYPE_MARKDOWN
 
-        # Rule #3: Check for subword tokenized data (heuristic)
-        elif all_non_numeric_short and text_cells > 0 and str_cell_count > 0:
-            # If all non-numeric cells are short strings, suspect subwords
-            avg_len = avg_str_len_sum / str_cell_count if str_cell_count > 0 else 0
-            if avg_len < AVG_SUBWORD_LEN_THRESHOLD:
-                 # Consider if ratio of text_cells to total is high enough
-                 if (text_cells / total_analyzed_cells if total_analyzed_cells else 0) > TOKEN_THRESHOLD:
-                    log_statement(loglevel="info", logstatement=f"Classified {file_path_hint.name} as {TYPE_TOKENIZED_SUBWORD} (heuristic: high ratio of short non-numeric strings, avg len {avg_len:.2f})", main_logger=main_logger_name)
-                    classification = TYPE_TOKENIZED_SUBWORD
+                # Tabular Check (CSV/TSV)
+                if classified_type == TYPE_TABULAR or classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                     # Use CSV Sniffer for more robust detection
+                     try:
+                         # Sniffing requires a sample string
+                         sample_for_sniffing = "\n".join(sample_lines[:20]) # Use first 20 lines
+                         if len(sample_for_sniffing) > 10240: # Limit sample size for sniffer
+                              sample_for_sniffing = sample_for_sniffing[:10240]
 
-        # Rule #1 (partially): Check for predominantly numerical tabular data
-        if classification == TYPE_UNKNOWN and total_analyzed_cells > 0: # Check only if not already classified
-             numeric_ratio = numeric_cells / total_analyzed_cells
-             if numeric_ratio >= NUMERICAL_THRESHOLD:
-                  log_statement(loglevel="info", logstatement=f"Classified {file_path_hint.name} as {TYPE_NUMERICAL} (numeric ratio {numeric_ratio:.2f} >= {NUMERICAL_THRESHOLD})", main_logger=main_logger_name)
-                  classification = TYPE_NUMERICAL
+                         if sample_for_sniffing:
+                              dialect = csv.Sniffer().sniff(sample_for_sniffing, delimiters=',\t;|') # Common delimiters
+                              # Check if a delimiter was actually found and seems consistent
+                              if dialect.delimiter:
+                                   # Further check: does the delimiter appear consistently across lines?
+                                   delimiter_counts = [line.count(dialect.delimiter) for line in sample_lines[:10] if line.strip()]
+                                   if len(delimiter_counts) > 1 and len(set(delimiter_counts)) <= len(delimiter_counts) / 2: # Heuristic: allow some variation
+                                        log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis match: TABULAR (Delimiter: '{dialect.delimiter}')", __file__)
+                                        return TYPE_TABULAR
+                                   else:
+                                        log_statement('debug', f"{LOG_INS}:DEBUG>>Sniffer found delimiter '{dialect.delimiter}' but usage seems inconsistent.", __file__)
+                         else:
+                              log_statement('debug', f"{LOG_INS}:DEBUG>>Sample too short or empty for CSV sniffing.", __file__)
 
-        # Rule #1 (partially): Fallback to Textual
-        if classification == TYPE_UNKNOWN and text_cells > 0: # If still unknown and has text cells
-             # Assume it's textual if it passed the reader's content validation earlier
-             log_statement(loglevel="info", logstatement=f"Classified {file_path_hint.name} as {TYPE_TEXTUAL} (fallback, contains text cells)", main_logger=main_logger_name)
-             classification = TYPE_TEXTUAL
+                     except csv.Error as sniff_err:
+                          log_statement('debug', f"{LOG_INS}:DEBUG>>CSV Sniffer could not detect dialect: {sniff_err}", __file__)
+                     except Exception as csv_err:
+                          log_statement('warning', f"{LOG_INS}:WARNING>>Error during CSV/Tabular check: {csv_err}", __file__, exc_info=True)
 
-        if classification == TYPE_UNKNOWN:
-             log_statement(loglevel="warning", logstatement=f"Could not reliably classify data type for {file_path_hint.name}. Defaulting to {TYPE_UNKNOWN}.", main_logger=main_logger_name)
 
-        return classification        
+                # Final check for Textual if not matched above
+                if classified_type == TYPE_TEXTUAL or classified_type == TYPE_UNKNOWN:
+                     # If it survived all other checks, it's likely general text
+                     log_statement('debug', f"{LOG_INS}:DEBUG>>Content analysis: Classified as general TEXTUAL", __file__)
+                     return TYPE_TEXTUAL
+
+                # If extension was misleading and content analysis didn't match, fall back?
+                if classified_type != TYPE_UNKNOWN and classified_type not in [TYPE_TEXTUAL, TYPE_TABULAR, TYPE_CODE]:
+                     log_statement('warning', f"{LOG_INS}:WARNING>>Content analysis did not confirm extension-based type '{classified_type}' for {filepath}. Reverting to TEXTUAL or UNKNOWN.", __file__)
+                     # Decide: trust extension or mark as unknown/textual? Let's lean towards TEXTUAL if it's decodable.
+                     return TYPE_TEXTUAL
+
+
+            # --- Fallback: Binary or Unknown ---
+            if isinstance(content, bytes) and not content_str: # If it's bytes and couldn't be decoded
+                 log_statement('debug', f"{LOG_INS}:DEBUG>>Content is bytes and could not be decoded or matched by magic number. Classifying as BINARY.", __file__)
+                 return TYPE_BINARY
+            elif isinstance(content_str, str):
+                 # Optional: Check for high percentage of non-printable chars if needed
+                 printable_ratio = sum(c.isprintable() or c.isspace() for c in analysis_sample) / len(analysis_sample)
+                 if printable_ratio < 0.8: # Example threshold
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Low printable character ratio ({printable_ratio:.2f}). Classifying as BINARY.", __file__)
+                    return TYPE_BINARY
+                 pass # Already classified as Textual or other type above
+
+            # If we reach here, no classification was successful
+            log_statement('warning', f"{LOG_INS}:WARNING>>Classification failed for {filepath}. Returning TYPE_UNKNOWN.", __file__)
+            return TYPE_UNKNOWN
+
+        except Exception as e:
+            log_statement('error', f"{LOG_INS}:ERROR>>Error during data classification for {filepath}: {e}", __file__, exc_info=True)
+            return TYPE_UNKNOWN # Return UNKNOWN on error
 
     def _get_file_hash(self, filepath: Path) -> str:
         """Generates a SHA-256 hash for the file."""
@@ -407,12 +669,12 @@ class DataProcessor:
     def _get_file_size(self, filepath: Path) -> int:    
         """Returns the size of the file in bytes."""
         return filepath.stat().st_size
-    def _get_file_modification_time(self, filepath: Path) -> datetime:
+    def _get_file_modification_time(self, filepath: Path) -> dt:
         """Returns the last modification time of the file."""
-        return datetime.fromtimestamp(filepath.stat().st_mtime, tz=timezone.utc)
-    def _get_file_creation_time(self, filepath: Path) -> datetime:
+        return dt.fromtimestamp(filepath.stat().st_mtime, tz=timezone.utc)
+    def _get_file_creation_time(self, filepath: Path) -> dt:
         """Returns the creation time of the file."""
-        return datetime.fromtimestamp(filepath.stat().st_ctime, tz=timezone.utc)
+        return dt.fromtimestamp(filepath.stat().st_ctime, tz=timezone.utc)
     def _get_file_extension(self, filepath: Path) -> str:
         """Returns the file extension."""
         return filepath.suffix.lower().strip('.')
@@ -450,19 +712,19 @@ class DataProcessor:
     def scan_data_directory(self):
         """Initiates a recursive scan of the base data directory."""
         # Use the configured base directory path
-        log_statement(loglevel=str("info"), logstatement=str(f"Starting repository scan using base directory: {BASE_DATA_DIR}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Starting repository scan using base directory: {BASE_DATA_DIR}", main_logger=__file__)
         self.repo.scan_and_update(BASE_DATA_DIR)
         
     def __del__(self):
         """Ensures proper cleanup of the executor on object deletion."""
         if hasattr(self, 'executor') and self.executor:
             try:
-                log_statement(loglevel=str("info"), logstatement=str("Shutting down DataProcessor executor..."), main_logger=str(__name__)) 
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::Shutting down DataProcessor executor...", main_logger=__file__) 
                 self.executor.shutdown(wait=True)
                 # Wait for tasks on shutdown
-                log_statement(loglevel=str("info"), logstatement=str("DataProcessor executor shut down."), main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor executor shut down.", main_logger=__file__)
             except Exception as e: 
-                log_statement(loglevel=str("error"), logstatement=str(f"Error shutting down executor: {e}"), main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error shutting down executor: {e}", main_logger=__file__)
 
     def _label_text_semantically(self, text_content: str, file_path_hint: Path, model_name: str = "mistral:latest") -> Optional[Dict]:
         """
@@ -477,14 +739,14 @@ class DataProcessor:
             Optional[Dict]: A dictionary representing the structured/labeled text
                            (e.g., {"Section Title": ["Para1", "Para2"]}), or None on failure.
         """
-        main_logger_name = str(__name__)
+        main_logger_name = __file__
         log_statement(loglevel="info", logstatement=f"Attempting semantic labeling for {file_path_hint.name} using Ollama model '{model_name}'...", main_logger=main_logger_name)
 
         # --- Pre-check for Ollama Library ---
         try:
             import ollama
         except ImportError:
-            log_statement(loglevel="error", logstatement="Ollama library not installed. Cannot perform semantic labeling. Run 'pip install ollama'.", main_logger=main_logger_name)
+            log_statement(loglevel="error", logstatement=f"{LOG_INS}::Ollama library not installed. Cannot perform semantic labeling. Run 'pip install ollama'.", main_logger=main_logger_name)
             return None
 
         # --- Limit Input Size (Important!) ---
@@ -560,326 +822,843 @@ JSON Output:
             log_statement(loglevel="error", logstatement=f"Error during Ollama API call for {file_path_hint.name}: {e}", main_logger=main_logger_name, exc_info=True)
             return None
 
-    def process_all(self, base_dir_filter: Optional[Path] = None, statuses_to_process=('discovered', 'error')):
-        """Processes files matching status, optionally filtered by base_dir."""
-        files_to_process = self.repo.get_files_by_status(list(statuses_to_process), base_dir=base_dir_filter)
-        if not files_to_process:
-            log_statement(loglevel=str("info"), logstatement=str(f"No files matching status {statuses_to_process} [in base_dir: {base_dir_filter}] found to process."), main_logger=str(__name__))
-            return
-        log_statement(loglevel=str("info"), logstatement=str(f"Starting processing for {len(files_to_process)} files [base_dir: {base_dir_filter}]."), main_logger=str(__name__))
-        futures = [self.executor.submit(self._process_file, f_path) for f_path in files_to_process]
-        with tqdm(total=len(futures), desc=f"Processing Files [{base_dir_filter.name if base_dir_filter else 'All'}]") as pbar:
-            for future in as_completed(futures):
-                try: future.result()
-                except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Error retrieving result from future: {e}"), main_logger=str(__name__), exc_info=True)
-                finally: pbar.update(1)
-        self.repo.save()
-        log_statement(loglevel=str("info"), logstatement=str("File processing complete."), main_logger=str(__name__))
-        
-    def _process_file(self, file_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _save_processed_repository(self, processed_df: pd.DataFrame):
         """
-        Processes a single file based on metadata from the repository: reads content
-        using an appropriate reader, classifies the data, applies processing based
-        on classification, saves output, and updates repository metadata.
+        Saves the DataFrame containing successfully processed file information
+        to the dedicated processed repository file.
 
         Args:
-            file_info (Dict[str, Any]): Dictionary containing file metadata from the repo
-                                        (requires COL_FILEPATH, others like Designation).
-
-        Returns:
-            Optional[Dict[str, Any]]: An updated metadata dictionary reflecting the outcome.
-                                      Includes processing status (e.g., STATUS_PROCESSED, STATUS_ERROR),
-                                      error messages, classification, and output details (path, hash)
-                                      if successful. Returns the dict even on failure.
-                                      Returns None only on critical internal error before processing starts.
+            processed_df (pd.DataFrame): DataFrame containing entries with STATUS_PROCESSED.
         """
-        # --- 1. Pre-checks and Path Setup ---
-        main_logger_name = str(__name__) # Logger name
+        save_logger_name = __file__
+        output_path = self.processed_repo_filepath # Use the dedicated path attribute
 
-        # Retrieve essential info from the input dictionary
-        absolute_file_path_str = file_info.get(COL_FILEPATH, None)
-        designation = file_info.get(COL_DESIGNATION, 'N/A') # Get designation for logging
+        if processed_df is None:
+            log_statement(loglevel="error", logstatement=f"Cannot save processed repository, provided DataFrame is None.", main_logger=save_logger_name)
+            return False
+        if output_path is None:
+            log_statement(loglevel="error", logstatement=f"Cannot save processed repository, output path is not set.", main_logger=save_logger_name)
+            return False
 
-        # Prepare updated_info dict to track changes and status during processing
-        updated_info = file_info.copy()
-        updated_info[COL_STATUS] = STATUS_PROCESSING # Mark as attempting processing
-        updated_info[COL_ERROR] = '' # Clear any previous error message
+        # Use the header defined for processed repos
+        expected_columns = PROCESSED_REPO_COLUMNS # Use the correct constant header
+        df_copy = processed_df.copy()
 
-        if not absolute_file_path_str:
-            log_statement(loglevel='error', logstatement=f"Missing file path in file_info for Designation: {designation}", main_logger=main_logger_name)
-            updated_info[COL_STATUS] = STATUS_ERROR
-            updated_info[COL_ERROR] = "Missing file path in input metadata"
-            self.repo.update_entry(Path(absolute_file_path_str) if absolute_file_path_str else f"Designation_{designation}", **updated_info) # Update repo with error
-            return updated_info # Return info dict with error status
-
-        try:
-            # Convert string path to Path object for easier handling
-            absolute_file_path = Path(absolute_file_path_str)
-            file_ext = absolute_file_path.suffix.lower().strip('.') # Get clean extension
-
-            # Construct relative path for mirrored output structure
-            # Assumption: File paths in repo are absolute or consistently relative.
-            # If paths are consistently relative to a known base (e.g., self.repo.base_dir), use that.
-            # If paths are absolute, create a relative path suitable for the output structure.
-            # Example using PROJECT_ROOT as base (adjust if paths stored differently):
-            try:
-                # Try making path relative to PROJECT_ROOT
-                output_path_relative = absolute_file_path.relative_to(PROJECT_ROOT)
-            except ValueError:
-                # If not relative to project root (e.g., different drive), use full path parts
-                log_statement(loglevel='warning', logstatement=f"File path {absolute_file_path} not relative to PROJECT_ROOT {PROJECT_ROOT}. Using full path parts for output structure.", main_logger=main_logger_name)
-                # Remove drive/anchor for output structure
-                output_path_relative = Path(*absolute_file_path.parts[1:]) # Skip drive/anchor
-
-            # Construct base output path using the *processed* data directory (self.output_dir)
-            output_path = self.output_dir / output_path_relative # Base path (suffix added by processing func)
-            output_path.parent.mkdir(parents=True, exist_ok=True) # Ensure output dir exists
-
-            log_statement(loglevel='debug', logstatement=f"Starting processing Designation {designation}: {absolute_file_path}", main_logger=main_logger_name)
-
-        except Exception as path_err:
-             log_statement(loglevel='critical', logstatement=f"CRITICAL error setting up paths for {absolute_file_path_str} (Designation: {designation}): {path_err}", main_logger=main_logger_name, exc_info=True)
-             updated_info[COL_STATUS] = STATUS_ERROR
-             updated_info[COL_ERROR] = f"Path setup error: {path_err}"
-             # Attempt to update repo even with path error if possible
-             self.repo.update_entry(Path(absolute_file_path_str) if absolute_file_path_str else f"Designation_{designation}", **updated_info)
-             return updated_info
-
-
-        # --- 2. Reader Discovery & Instantiation ---
-        try:
-            # Get the appropriate reader class based on the file extension
-            ReaderClass = get_reader_class(file_ext) # Assumes readers.py provides this
-
-            if ReaderClass is None:
-                log_statement(loglevel='warning', logstatement=f"No reader found for file type '.{file_ext}'. Skipping {absolute_file_path.name} (Designation: {designation})", main_logger=main_logger_name)
-                updated_info[COL_STATUS] = STATUS_ERROR
-                updated_info[COL_ERROR] = f"Unsupported file type: .{file_ext}"
-                self.repo.update_entry(absolute_file_path, **updated_info) # Update repo
-                return updated_info # Return info with error status
-
-            # Instantiate the reader
-            reader = ReaderClass(absolute_file_path)
-            log_statement(loglevel='debug', logstatement=f"Using reader {type(reader).__name__} for {absolute_file_path.name} (Designation: {designation})", main_logger=main_logger_name)
-
-        except FileNotFoundError:
-             # This might happen if file disappears between repo scan and processing start
-             log_statement(loglevel='error', logstatement=f"File not found when creating reader for {absolute_file_path.name} (Designation: {designation})", main_logger=main_logger_name)
-             updated_info[COL_STATUS] = STATUS_ERROR
-             updated_info[COL_ERROR] = "File not found during processing start"
-             self.repo.update_entry(absolute_file_path, **updated_info)
-             return updated_info
-        except Exception as reader_init_err:
-             log_statement(loglevel='error', logstatement=f"Error initializing reader {ReaderClass.__name__ if 'ReaderClass' in locals() else 'Unknown'} for {absolute_file_path.name} (Designation: {designation}): {reader_init_err}", main_logger=main_logger_name, exc_info=True)
-             updated_info[COL_STATUS] = STATUS_ERROR
-             updated_info[COL_ERROR] = f"Reader init failed: {reader_init_err}"
-             self.repo.update_entry(absolute_file_path, **updated_info)
-             return updated_info
-
-        # --- 3. Read Data ---
-        read_data = None
-        try:
-            # Assume reader.read() returns data (e.g., DataFrame, text content)
-            # or None/raises Exception if reading fails.
-            read_data = reader.read()
-
-            # Check if reader returned valid data (can be empty DataFrame, but not None)
-            if read_data is None:
-                # Reader should log specifics internally if possible
-                log_statement(loglevel='warning', logstatement=f"Reader {type(reader).__name__} returned None for {absolute_file_path.name} (Designation: {designation}). Setting status to Error.", main_logger=main_logger_name)
-                updated_info[COL_STATUS] = STATUS_ERROR
-                updated_info[COL_ERROR] = "Reader returned None or content validation failed"
-                self.repo.update_entry(absolute_file_path, **updated_info)
-                return updated_info
-
-        except Exception as read_err:
-            log_statement(loglevel='error', logstatement=f"Reader {type(reader).__name__} failed for {absolute_file_path.name} (Designation: {designation}): {read_err}", main_logger=main_logger_name, exc_info=True)
-            updated_info[COL_STATUS] = STATUS_ERROR
-            updated_info[COL_ERROR] = f"Reader failed: {read_err}"
-            self.repo.update_entry(absolute_file_path, **updated_info)
-            return updated_info
-
-        # --- 4. Classify Data Content ---
-        data_classification = TYPE_UNKNOWN
-        try:
-            # Ensure _classify_data method exists
-            if not hasattr(self, '_classify_data'):
-                raise AttributeError("_classify_data method not found in DataProcessor.")
-
-            # Classify based on the actual data read from the file
-            # Pass read_data (which could be DataFrame, string, etc.)
-            data_classification = self._classify_data(read_data, absolute_file_path)
-            # Store classification result in the info dict
-            updated_info['data_classification'] = data_classification # Store intermediate classification
-
-            if data_classification == TYPE_EMPTY:
-                log_statement(loglevel="warning", logstatement=f"Data classified as EMPTY for {absolute_file_path.name} (Designation: {designation}). Skipping processing.", main_logger=main_logger_name)
-                updated_info[COL_STATUS] = STATUS_ERROR # Or a 'SKIPPED_EMPTY' status
-                updated_info[COL_ERROR] = "Empty or unclassifiable content after read"
-                self.repo.update_entry(absolute_file_path, **updated_info)
-                return updated_info # Stop processing for this file
-
-        except AttributeError as attr_err:
-             log_statement(loglevel='error', logstatement=str(attr_err), main_logger=main_logger_name)
-             updated_info[COL_STATUS] = STATUS_ERROR
-             updated_info[COL_ERROR] = f"Internal error: {attr_err}"
-             self.repo.update_entry(absolute_file_path, **updated_info)
-             return updated_info
-        except Exception as classify_err:
-             log_statement(loglevel='error', logstatement=f"Error during data classification for {absolute_file_path.name} (Designation: {designation}): {classify_err}", main_logger=main_logger_name, exc_info=True)
-             updated_info[COL_STATUS] = STATUS_ERROR
-             updated_info[COL_ERROR] = f"Classification failed: {classify_err}"
-             self.repo.update_entry(absolute_file_path, **updated_info)
-             return updated_info # Stop processing if classification fails critically
-
-        # --- 5. Process Data Based on Classification ---
-        result = None           # Stores metadata dict from successful processing func
-        processed_flag = False  # Track if a specific processing path was attempted
-
-        try:
-            # --- Check if the data type is TEXTUAL ---
-            if data_classification == TYPE_TEXTUAL:
-                log_statement(loglevel='debug', logstatement=f"Processing Designation {designation} ({absolute_file_path.name}) as TEXTUAL", main_logger=main_logger_name)
-                if hasattr(self, '_process_textual_data'):
-                    # Output structured JSON (semantic labeling if enabled)
-                    # Output suffix determined within _process_textual_data (.json.zst)
-                    result = self._process_textual_data(read_data, absolute_file_path, output_path)
-                    processed_flag = True
-                else: raise AttributeError("_process_textual_data method not found.")
-
-            # --- Check if the data type is NUMERICAL ---
-            elif data_classification == TYPE_NUMERICAL:
-                log_statement(loglevel='debug', logstatement=f"Processing Designation {designation} ({absolute_file_path.name}) as NUMERICAL", main_logger=main_logger_name)
-                if hasattr(self, '_process_numerical_data'):
-                     # Pass read_data (expected to be DataFrame by _process_numerical_data)
-                     # Output suffix determined within _process_numerical_data (.parquet.zst)
-                    result = self._process_numerical_data(read_data, absolute_file_path, output_path)
-                    processed_flag = True
-                else: raise AttributeError("_process_numerical_data method not found.")
-
-            # --- Check if data is already considered tokenized (subword) ---
-            elif data_classification == TYPE_TOKENIZED_SUBWORD:
-                log_statement(loglevel='info', logstatement=f"Data for Designation {designation} ({absolute_file_path.name}) classified as {TYPE_TOKENIZED_SUBWORD}. Applying passthrough/validation.", main_logger=main_logger_name)
-                if hasattr(self, 'save_dataframe_to_parquet_zst'):
-                    save_path = output_path.with_suffix('.parquet.zst') # Standardize output format
-                    # Ensure the 'read_data' variable holds the data to be saved
-                    if self.save_dataframe_to_parquet_zst(read_data, save_path): # Use read_data here
-                        output_hash = generate_data_hash(str(save_path))
-                        relative_output_path = save_path.relative_to(self.output_dir) # Use self.output_dir
-                        result = {"processed_path": str(relative_output_path), COL_DATA_HASH: output_hash}
-                        log_statement(loglevel='debug', logstatement=f"Saved pre-tokenized (subword) data to {save_path}", main_logger=main_logger_name)
-                    else:
-                        updated_info[COL_ERROR] = "Failed to save pre-tokenized (subword) data using helper"
-                        log_statement(loglevel='error', logstatement=f"Helper save_dataframe_to_parquet_zst failed for {save_path}", main_logger=main_logger_name)
-                        result = None # Indicate failure
-                else: raise AttributeError("save_dataframe_to_parquet_zst helper method not found.")
-                processed_flag = True # Mark classification type as handled
-
-            # --- Check if data is already considered tokenized numerically ---
-            elif data_classification == TYPE_TOKENIZED_NUMERICAL:
-                log_statement(loglevel='info', logstatement=f"Data for Designation {designation} ({absolute_file_path.name}) classified as {TYPE_TOKENIZED_NUMERICAL}. Applying passthrough/validation.", main_logger=main_logger_name)
-                if hasattr(self, 'save_dataframe_to_parquet_zst'):
-                    save_path = output_path.with_suffix('.parquet.zst') # Standardize output format
-                    # Ensure the 'read_data' variable holds the data to be saved
-                    if self.save_dataframe_to_parquet_zst(read_data, save_path): # Use read_data here
-                        output_hash = generate_data_hash(str(save_path))
-                        relative_output_path = save_path.relative_to(self.output_dir) # Use self.output_dir
-                        result = {"processed_path": str(relative_output_path), COL_DATA_HASH: output_hash}
-                        log_statement(loglevel='debug', logstatement=f"Saved pre-tokenized (numerical) data to {save_path}", main_logger=main_logger_name)
-                    else:
-                        updated_info[COL_ERROR] = "Failed to save pre-tokenized (numerical) data using helper"
-                        log_statement(loglevel='error', logstatement=f"Helper save_dataframe_to_parquet_zst failed for {save_path}", main_logger=main_logger_name)
-                        result = None # Indicate failure
-                else: raise AttributeError("save_dataframe_to_parquet_zst helper method not found.")
-                processed_flag = True # Mark classification type as handled
-
-            # --- Handle Already Processed/Tokenized Types (Metadata Update) ---
-            # Example: Update status if classification identifies it as already done
-            elif data_classification in [TYPE_PROCESSED_JSONL, TYPE_TOKENIZED_TEXT]: # Add other relevant types
-                 log_statement(loglevel='info', logstatement=f"File Designation {designation} ({absolute_file_path.name}) classified as already processed/tokenized ({data_classification}). Updating status.", main_logger=main_logger_name)
-                 # Determine appropriate final status based on classification
-                 new_status = STATUS_PROCESSED if data_classification == TYPE_PROCESSED_JSONL else STATUS_TOKENIZED
-                 if updated_info.get(COL_STATUS) != new_status:
-                     updated_info[COL_STATUS] = new_status
-                     log_statement(loglevel='debug', logstatement=f"Status updated to {new_status} based on classification.", main_logger=main_logger_name)
-                 else:
-                      log_statement(loglevel='debug', logstatement=f"Status already matches classification ({new_status}).", main_logger=main_logger_name)
-
-                 # No actual processing needed here, but set flags to indicate handled
-                 processed_flag = True
-                 result = {} # Indicate success (status update is the action)
-
-            # --- Fallback for UNKNOWN Classification ---
-            elif data_classification == TYPE_UNKNOWN:
-                log_statement(loglevel='warning', logstatement=f"Data classification UNKNOWN for Designation {designation} ({absolute_file_path.name}). Attempting text processing fallback.", main_logger=main_logger_name)
-                if hasattr(self, '_process_textual_data'):
-                    result = self._process_textual_data(read_data, absolute_file_path, output_path)
-                    processed_flag = True # Consider it handled via fallback
-                else: raise AttributeError("Fallback method _process_textual_data not found.")
-
-            # --- Handle other classifications (e.g., IMAGE, AUDIO) ---
-            # Add elif blocks here for other data types if processing logic exists
-            # elif data_classification == TYPE_IMAGE:
-            #    if hasattr(self, '_process_image_data'):
-            #        result = self._process_image_data(read_data, ...)
-            #        processed_flag = True
-            #    else: raise AttributeError("_process_image_data method not found.")
-
-            else:
-                # If classification is known but no processing block exists
-                log_statement(loglevel='error', logstatement=f"No processing logic defined for data classification '{data_classification}' for Designation {designation} ({absolute_file_path.name}).", main_logger=main_logger_name)
-                updated_info[COL_ERROR] = f"No processing logic for classification '{data_classification}'"
-                result = None # Indicate failure
-
-        except AttributeError as attr_err:
-            log_statement(loglevel='error', logstatement=f"Missing processing component for Designation {designation} ({absolute_file_path.name}): {attr_err}", main_logger=main_logger_name)
-            updated_info[COL_ERROR] = f"Internal error: {attr_err}"
-            result = None # Indicate failure
-            # processed_flag might be True or False depending on where the error occurred
-        except Exception as process_err:
-            log_statement(loglevel='error', logstatement=f"Error during '{data_classification}' processing for Designation {designation} ({absolute_file_path.name}): {process_err}", main_logger=main_logger_name, exc_info=True)
-            updated_info[COL_ERROR] = f"Processing error ({data_classification}): {process_err}"
-            result = None # Indicate failure
-            processed_flag = True # Mark as attempted if error happened within a block
-
-        # --- 6. Check Result and Finalize Status ---
-        if processed_flag and result is not None and isinstance(result, dict):
-            # Processing function succeeded and returned metadata
-            updated_info.update(result) # Merge results (e.g., processed_path, output_hash)
-            updated_info[COL_STATUS] = STATUS_PROCESSED # Set final status to Processed
-            updated_info[COL_ERROR] = '' # Clear error on success
-            # Store the final classification along with the successful status
-            updated_info['final_classification'] = data_classification
-            log_statement(loglevel='info', logstatement=f"Successfully processed Designation {designation} ({absolute_file_path.name}) as {data_classification} -> {result.get('processed_path', 'N/A')}", main_logger=main_logger_name)
+        if df_copy.empty:
+            log_statement(loglevel="info", logstatement=f"{LOG_INS}::Processed DataFrame is empty. Saving empty processed repo file to: {output_path}", main_logger=save_logger_name)
         else:
-            # Processing failed or no specific path was taken/found
-            if processed_flag: # An attempt was made but failed (result is None or not dict)
-                log_statement(loglevel='error', logstatement=f"Processing failed for Designation {designation} ({absolute_file_path.name}, Classification: {data_classification}). See previous logs.", main_logger=main_logger_name)
-                # Keep existing error message if already set by specific processing func
-                if not updated_info.get(COL_ERROR):
-                    updated_info[COL_ERROR] = f"Processing function ({data_classification}) failed or returned invalid result"
-            else: # No processing path was attempted or matched
-                log_statement(loglevel='error', logstatement=f"No processing attempted or suitable path found for Designation {designation} ({absolute_file_path.name}, Classification: {data_classification}).", main_logger=main_logger_name)
-                if not updated_info.get(COL_ERROR):
-                    updated_info[COL_ERROR] = f"No processing logic available or matched for classification '{data_classification}'"
+             log_statement(loglevel="info", logstatement=f"{LOG_INS}::Saving {len(df_copy)} processed entries to: {output_path}", main_logger=save_logger_name)
 
-            # Store classification even on error, set status to Error
-            updated_info['final_classification'] = data_classification
-            updated_info[COL_STATUS] = STATUS_ERROR
+        # --- Ensure Schema Alignment (similar to DataRepository.save) ---
+        current_cols = df_copy.columns.tolist()
+        added_cols_save = []
+        for col_const in expected_columns:
+            if col_const not in current_cols:
+                added_cols_save.append(col_const)
+                target_dtype = self.columns_schema.get(col_const, str) # Use schema from DataProcessor if needed, or assume main repo schema for now
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Save Processed Repo - Adding missing column '{col_const}' with type {target_dtype}", main_logger=save_logger_name)
+                # Add column with appropriate null type
+                if 'datetime' in str(target_dtype): df_copy[col_const] = pd.NaT
+                elif target_dtype == 'Int64': df_copy[col_const] = pd.NA
+                else: df_copy[col_const] = ''
+        if added_cols_save: log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Columns added during processed repo save: {added_cols_save}", main_logger=save_logger_name)
 
+        try: # Ensure correct column order
+            df_copy = df_copy[expected_columns]
+        except KeyError as ke:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Save Processed Repo Error: Column mismatch after adding defaults. Missing: {ke}. Expected: {expected_columns}. Available: {df_copy.columns.tolist()}", main_logger=save_logger_name)
+            return False # Cannot proceed if columns mismatch
 
-        # --- 7. Update Repository ---
-        # Always update the repository with the final status and metadata
+        # --- Type Prep and Saving Logic (Simplified from DataRepository.save) ---
+        temp_path = output_path.with_suffix(f'{output_path.suffix}.tmp_proc_{int(time.time())}')
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
         try:
-            # Use the absolute path of the source file as the key for updating
-            self.repo.update_entry(absolute_file_path, **updated_info)
-            log_statement(loglevel='debug', logstatement=f"Repository updated for Designation {designation} with status '{updated_info[COL_STATUS]}'.", main_logger=main_logger_name)
-        except Exception as repo_update_err:
-             log_statement(loglevel='critical', logstatement=f"CRITICAL: Failed to update repository for Designation {designation} ({absolute_file_path.name}) after processing attempt: {repo_update_err}", main_logger=main_logger_name, exc_info=True)
-             # The processing might have succeeded, but the status is not saved.
+            cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL)
+            with open(temp_path, 'wb') as f_out:
+                with cctx.stream_writer(f_out) as writer:
+                    # Convert DF to CSV in memory, handling types appropriately for CSV
+                    # NOTE: Reusing the simple string conversion from DataRepository.save for now
+                    df_stringified = df_copy.copy()
+                    for col_const in expected_columns:
+                        if col_const in df_stringified.columns:
+                             series = df_stringified[col_const]
+                             if col_const in self.timestamp_columns: # Check if it's a timestamp column
+                                 # Convert float timestamp back to ISO string or keep as numeric string
+                                 df_stringified[col_const] = series.apply(lambda x: '' if pd.isna(x) else f"{x:.6f}") # Save as float string
+                             elif self.columns_schema.get(col_const) == 'Int64':
+                                 df_stringified[col_const] = series.apply(lambda x: '' if pd.isna(x) else str(int(x))) # Explicit int string
+                             else: # Default to string for others
+                                 df_stringified[col_const] = series.fillna('').astype(str)
 
-        # Return the final metadata dictionary
-        return updated_info
+                    csv_buffer = io.StringIO()
+                    df_stringified.to_csv(csv_buffer, index=False, header=True, quoting=csv.QUOTE_MINIMAL, escapechar='\\')
+                    csv_buffer.seek(0)
+                    csv_data = csv_buffer.getvalue()
+                    csv_buffer.close()
+                    writer.write(csv_data.encode('utf-8'))
+
+            shutil.move(str(temp_path), str(output_path))
+            log_statement(loglevel="info", logstatement=f"{LOG_INS}::Successfully saved processed repository ({len(df_copy)} entries) to {output_path}", main_logger=save_logger_name)
+            return True
+        except Exception as e:
+            log_statement(loglevel="error", logstatement=f"{LOG_INS}::CRITICAL ERROR saving processed repository DataFrame to {output_path}: {e}", main_logger=save_logger_name, exc_info=True)
+            if temp_path.exists():
+                try: os.remove(temp_path)
+                except OSError: pass
+            return False
+        
+    def process_all(self, base_dir_filter: Optional[Path] = None, statuses_to_process=('discovered', 'error', STATUS_NEW)):
+        """Processes files matching status, optionally filtered by base_dir, with progress bar."""
+        main_logger_name = str(__file__)
+        print(f"{LOG_INS}::DataProcessor.process_all START - Filter: {base_dir_filter}, Statuses: {statuses_to_process}")
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Starting - Filter: {base_dir_filter}, Statuses: {statuses_to_process}", main_logger=main_logger_name)
+
+        # --- Get files to process (existing logic) ---
+        print(f"{LOG_INS}::PROCESS_ALL - Getting files by status...")
+        files_to_process_paths = self.repo.get_files_by_status(list(statuses_to_process), base_dir=base_dir_filter)
+        print(f"{LOG_INS}::PROCESS_ALL - Found {len(files_to_process_paths)} files matching status.")
+        if not files_to_process_paths:
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: No files matching status {statuses_to_process} [in base_dir: {base_dir_filter}] found to process.", main_logger=main_logger_name)
+            print(f"{LOG_INS}::DataProcessor.process_all END - No files found.")
+            return
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Found {len(files_to_process_paths)} files matching status. Retrieving full info...", main_logger=main_logger_name)
+        print(f"{LOG_INS}::PROCESS_ALL - Retrieving full file info...")
+        file_info_list = []
+        try:
+            with self.repo.lock:
+                files_to_process_str_set = {str(p.resolve()) for p in files_to_process_paths}
+                if COL_FILEPATH not in self.repo.df.columns:
+                    print(f"{LOG_INS}::PROCESS_ALL - CRITICAL ERROR - Column '{COL_FILEPATH}' not found.")
+                    log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_ALL: Critical error - Column '{COL_FILEPATH}' not found in repository DataFrame.", main_logger=main_logger_name)
+                    return
+
+                matching_rows_df = self.repo.df[self.repo.df[COL_FILEPATH].isin(files_to_process_str_set)].copy()
+                if not matching_rows_df.empty:
+                    file_info_list = matching_rows_df.to_dict('records')
+                    print(f"{LOG_INS}::PROCESS_ALL - Retrieved {len(file_info_list)} records.")
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Retrieved {len(file_info_list)} full records for processing.", main_logger=main_logger_name)
+                else:
+                    print(f"{LOG_INS}::PROCESS_ALL - WARNING: Found paths but failed to retrieve rows.")
+                    log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_ALL: Found matching paths but failed to retrieve corresponding rows from repo DataFrame.", main_logger=main_logger_name)
+        except Exception as e:
+             print(f"{LOG_INS}::PROCESS_ALL - ERROR retrieving file info: {e}")
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_ALL: Failed to retrieve full file info for processing: {e}", main_logger=main_logger_name, exc_info=True)
+             return
+        if not file_info_list:
+             print(f"{LOG_INS}::PROCESS_ALL - WARNING: Could not retrieve details for files.")
+             log_statement(loglevel="warning", logstatement=f"{LOG_INS}::PROCESS_ALL: Could not retrieve details for files matching status {statuses_to_process}. Cannot process.", main_logger=main_logger_name)
+             return
+
+        # --- Submit processing tasks (existing logic) ---
+        if not hasattr(self, 'executor') or self.executor is None:
+             print(f"{LOG_INS}::PROCESS_ALL - ERROR: Executor not initialized.")
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_ALL: DataProcessor executor not initialized. Cannot process.", main_logger=__file__)
+             return
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Submitting {len(file_info_list)} processing tasks to executor.", main_logger=main_logger_name)
+        print(f"{LOG_INS}::PROCESS_ALL - Submitting {len(file_info_list)} tasks...")
+        futures = [self.executor.submit(self._process_file, f_info) for f_info in file_info_list]
+
+        # # --- Process results (existing logic) ---
+        # pbar_desc = f"Processing [{base_dir_filter.name[:15] if base_dir_filter else 'All'}]"
+        # results_processed = 0
+        # results_error = 0
+        # successfully_processed_files_info = [] # Collect info for the processed repo
+
+        # print(f"{LOG_INS}::PROCESS_ALL - Waiting for futures...")
+        # for future in tqdm(as_completed(futures), total=len(futures), desc=pbar_desc, unit="file", leave=True):
+        #     try:
+        #         result_info = future.result() # result_info is the updated dict from _process_file
+        #         file_path_hint = result_info.get(COL_FILEPATH, "Unknown Path") if isinstance(result_info, dict) else "Invalid Result"
+        #         print(f"{LOG_INS}::PROCESS_ALL - Future completed for ~{Path(file_path_hint).name}. Result type: {type(result_info)}")
+        #         if result_info and isinstance(result_info, dict):
+        #             final_status = result_info.get(COL_STATUS, STATUS_ERROR)
+        #             print(f"{LOG_INS}::PROCESS_ALL - Future Result Status: {final_status} for {Path(file_path_hint).name}")
+        #             if final_status == STATUS_PROCESSED:
+        #                 results_processed += 1
+        #                 successfully_processed_files_info.append(result_info) # <<< Add successful info
+        #                 log_statement(loglevel='debug', logstatement=f"PROCESS_ALL: Future completed successfully for: {Path(file_path_hint).name} (Status: {final_status})", main_logger=main_logger_name)
+        #             else:
+        #                 results_error += 1
+        #                 error_msg = result_info.get(COL_ERROR, "Unknown error")
+        #                 print(f"{LOG_INS}::PROCESS_ALL - Future completed with Error/Other Status '{final_status}' for {Path(file_path_hint).name}. Error: {error_msg}")
+        #                 log_statement(loglevel='warning', logstatement=f"PROCESS_ALL: Future completed with status '{final_status}' for: {Path(file_path_hint).name}. Error: {error_msg}", main_logger=main_logger_name)
+        #         else:
+        #             results_error += 1
+        #             print(f"{LOG_INS}::PROCESS_ALL - Future returned None or invalid result.")
+        #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_ALL: Processing future returned None or invalid result (potential internal error in _process_file).", main_logger=main_logger_name)
+        #     except Exception as e:
+        #         results_error += 1
+        #         # Log error from the future result itself more clearly
+        #         print(f"{LOG_INS}::PROCESS_ALL - EXCEPTION retrieving future result: {e}")
+        #         log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_ALL: Error retrieving result from processing future: {e}", main_logger=main_logger_name, exc_info=True)
+
+        # # --- Save Main Repository (already handled by _process_file calling update_entry) ---
+        # self.repo.save()
+        log_statement(loglevel='info', logstatement=f"PROCESS_ALL: Submitting {len(file_info_list)} processing tasks to executor.", main_logger=main_logger_name)
+        futures = [self.executor.submit(self._process_file, f_info) for f_info in file_info_list]
+
+        # --- Process results ---
+        pbar_desc = f"Processing [{base_dir_filter.name[:15] if base_dir_filter else 'All'}]"
+        results_processed_count = 0
+        results_error_count = 0
+        successfully_processed_files_info = [] # <<< Collect successful results here
+
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_ALL: Waiting for futures...", main_logger=main_logger_name)
+        for future in tqdm(as_completed(futures), total=len(futures), desc=pbar_desc, unit="file", leave=True):
+            try:
+                result_info = future.result() # result_info is the updated dict from _process_file
+                file_path_hint = result_info.get(COL_FILEPATH, "Unknown Path") if isinstance(result_info, dict) else "Invalid Result"
+
+                if result_info and isinstance(result_info, dict):
+                    final_status = result_info.get(COL_STATUS, STATUS_ERROR)
+                    if final_status == STATUS_PROCESSED:
+                        results_processed_count += 1
+                        successfully_processed_files_info.append(result_info) # <<< Append successful info
+                        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_ALL: Future completed successfully for: {Path(file_path_hint).name} (Status: {final_status})", main_logger=main_logger_name)
+                    else:
+                        results_error_count += 1
+                        error_msg = result_info.get(COL_ERROR, "Unknown error")
+                        log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_ALL: Future completed with status '{final_status}' for: {Path(file_path_hint).name}. Error: {error_msg}", main_logger=main_logger_name)
+                else:
+                    results_error_count += 1
+                    log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_ALL: Processing future returned None or invalid result (potential internal error in _process_file).", main_logger=main_logger_name)
+            except Exception as e:
+                results_error_count += 1
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_ALL: Error retrieving result from processing future: {e}", main_logger=main_logger_name, exc_info=True)
+
+        # --- Save Main Repository (reflects status updates like 'processing' -> 'processed' or 'error') ---
+        # The update_entry calls within _process_file handle marking success/failure status
+        # Save the main repo once after all processing attempts are done
+        log_statement(loglevel="info", logstatement=f"{LOG_INS}::PROCESS_ALL: Saving updated main repository after processing attempts...", main_logger=main_logger_name)
+        self.repo.save()
+
+        # # --- *** NEW: Save Dedicated Processed Repository *** ---
+        # if successfully_processed_files_info:
+        #      log_statement(loglevel='info', logstatement=f"PROCESS_ALL: Creating DataFrame for {len(successfully_processed_files_info)} successfully processed files.", main_logger=main_logger_name)
+        #      processed_df = pd.DataFrame(successfully_processed_files_info)
+        #      # Ensure the DataFrame uses the correct schema before saving
+        #      processed_df = processed_df.reindex(columns=PROCESSED_REPO_COLUMNS) # Use correct columns
+        #      log_statement(loglevel='info', logstatement=f"PROCESS_ALL: Attempting to save dedicated processed repository file: {self.processed_repo_filepath}", main_logger=main_logger_name)
+        #      save_success = self._save_processed_repository(processed_df)
+        #      if save_success:
+        #          log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Successfully saved dedicated processed repository.", main_logger=main_logger_name)
+        #      else:
+        #          log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_ALL: Failed to save dedicated processed repository file.", main_logger=main_logger_name)
+        # else:
+        #      log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: No files were successfully processed in this run. Skipping processed repository save.", main_logger=main_logger_name)
+        #      # Optionally, create an empty processed repo file if none exists
+        #      if not self.processed_repo_filepath.exists():
+        #           log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Creating empty processed repository file.", main_logger=main_logger_name)
+        #           self._save_processed_repository(pd.DataFrame(columns=PROCESSED_REPO_COLUMNS))
+
+        # # --- Final Log ---
+        # print(f"{LOG_INS}::DataProcessor.process_all END - Success: {results_processed}, Errors: {results_error}")
+        # log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_ALL: Stage complete. Successful: {results_processed}, Errors/Skipped: {results_error}.", main_logger=main_logger_name)
+        # --- Save Main Repository (reflects status updates like 'processing' -> 'processed' or 'error') ---
+        # The update_entry calls within _process_file handle marking success/failure status
+        # Save the main repo once after all processing attempts are done
+
+        log_statement(loglevel="info", logstatement=f"{LOG_INS}::Saving updated main repository after processing attempts...", main_logger=main_logger_name)
+        self.repo.save()
+
+        # --- REMOVE Internal Processed Repo Saving Logic ---
+        # The logic previously here (_save_processed_repository call) is removed.
+        # Saving the processed list is now handled in m1.py.
+
+        # --- Final Log ---
+        log_statement(loglevel="info", logstatement=f"{LOG_INS}::PROCESS_ALL: Stage complete. Successful: {results_processed_count}, Errors/Skipped: {results_error_count}.", main_logger=main_logger_name)
+
+        # --- RETURN the list of successfully processed file info ---
+        return successfully_processed_files_info # <<< RETURN RESULTS
+
+    # def _process_file(self, file_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    #     """
+    #     Refactored: Processes a single file based on metadata from the repository.
+    #     Includes extensive debugging logs and corrected helper function calls.
+    #     Returns updated metadata dict on success or failure, None on critical setup error.
+    #     """
+    #     # --- Setup & Input Logging ---
+    #     main_logger_name = __file__ # Or define logger name appropriately
+    #     LOG_INS = f"{__name__}::{self.__class__.__name__}::{inspect.currentframe().f_code.co_name}::{inspect.currentframe().f_lineno}" # Dynamic LOG_INS
+    #     print(f"{LOG_INS}:DEBUG>>** Method START **")
+    #     print(f"{LOG_INS}:DEBUG>>Input file_info: {file_info}")
+
+    #     absolute_file_path_str = file_info.get(COL_FILEPATH)
+    #     file_name_hint = Path(absolute_file_path_str).name if absolute_file_path_str else "Unknown"
+    #     designation_hint = f" (Desig: {file_info.get(COL_DESIGNATION, 'N/A')})"
+    #     # Use standard logging for general flow
+    #     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE START for: {file_name_hint}{designation_hint}", main_logger=main_logger_name)
+
+    #     updated_info = file_info.copy()
+    #     updated_info[COL_STATUS] = STATUS_PROCESSING # Mark as attempting
+    #     updated_info[COL_ERROR] = ''
+    #     print(f"{LOG_INS}:DEBUG>>Initial updated_info (Status set to PROCESSING): {updated_info}")
+    #     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE - Initial status set to '{STATUS_PROCESSING}' for {file_name_hint}", main_logger=main_logger_name)
+
+    #     if not absolute_file_path_str:
+    #         print(f"{LOG_INS}:DEBUG>>** ERROR: Missing file path in input file_info. **")
+    #         log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_FILE: Missing file path for Designation: {file_info.get(COL_DESIGNATION, 'N/A')}", main_logger=main_logger_name)
+    #         updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = "Missing file path"
+    #         print(f"{LOG_INS}:DEBUG>>Attempting repo update for missing path...")
+    #         # Construct a unique placeholder if path is truly missing
+    #         placeholder_path = f"MISSING_PATH_{designation_hint.strip(' ()Desig:/NA')}_{int(time.time())}"
+    #         try:
+    #             # Update repo with error status using placeholder if necessary
+    #             self.repo.update_entry(Path(absolute_file_path_str) if absolute_file_path_str else Path(placeholder_path), **updated_info)
+    #             print(f"{LOG_INS}:DEBUG>>Repo update call successful for missing path.")
+    #         except Exception as missing_path_update_err:
+    #             print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo for missing path: {missing_path_update_err} **")
+    #             log_statement(loglevel='critical', logstatement=f"{LOG_INS}::PROCESS_FILE: CRITICAL - Failed repository update for missing path entry ({placeholder_path}): {missing_path_update_err}", main_logger=main_logger_name, exc_info=True)
+    #         print(f"{LOG_INS}:DEBUG>>Returning updated_info for missing path: {updated_info}")
+    #         return updated_info
+
+    #     # Define outside try block for use in final update
+    #     absolute_file_path = Path(absolute_file_path_str)
+
+    #     # --- Step 1: Path Setup ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 1: Path Setup START **")
+    #     output_path_base = None
+    #     # --- Step 1: Setup Output Paths ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 1: Path Setup START **")
+    #     output_path_base: Optional[Path] = None # Initialize for clarity
+
+    #     try:
+    #         # Ensure we have an absolute, resolved path for the input file
+    #         # The input absolute_file_path should already be resolved by the caller (e.g., repo_handler)
+    #         # but resolving again is safe and ensures consistency.
+    #         absolute_file_path = Path(absolute_file_path).resolve()
+    #         print(f"{LOG_INS}:DEBUG>>Resolved absolute_file_path: {absolute_file_path}")
+
+    #         # Get the parent directory of the input file
+    #         input_parent_dir = absolute_file_path.parent
+    #         print(f"{LOG_INS}:DEBUG>>Input parent directory: {input_parent_dir}")
+
+    #         # Create the relative directory structure by removing the drive/anchor
+    #         # Example: /mnt/aPrime/TestDir/Docs -> mnt/aPrime/TestDir/Docs
+    #         # Example: C:\Users\Test\Doc -> Users\Test\Doc
+    #         relative_dir_structure = Path(*input_parent_dir.parts[1:])
+    #         print(f"{LOG_INS}:DEBUG>>Calculated relative directory structure: {relative_dir_structure}")
+
+    #         # Combine the processor's base output directory with the relative structure
+    #         # self.output_dir should be set during DataProcessor initialization
+    #         # (e.g., Path(PROCESSED_DATA_DIR) or Path(TOKENIZED_DATA_DIR))
+    #         target_output_dir = self.output_dir / relative_dir_structure
+    #         print(f"{LOG_INS}:DEBUG>>Calculated target output directory: {target_output_dir}")
+
+    #         # Construct the base path for the output file within the target directory
+    #         # This includes the original filename stem, ready for adding suffixes later
+    #         output_path_base = target_output_dir / absolute_file_path.name
+    #         print(f"{LOG_INS}:DEBUG>>Calculated output_path_base (full path prefix): {output_path_base}")
+
+    #         # Ensure the target directory exists, creating parent directories as needed
+    #         target_output_dir.mkdir(parents=True, exist_ok=True)
+    #         print(f"{LOG_INS}:DEBUG>>Ensured target output directory exists: {target_output_dir}")
+
+    #         log_statement(loglevel='debug',
+    #                       logstatement=f"{LOG_INS}::PROCESS_FILE Paths OK for {file_name_hint}. Output target dir: {target_output_dir}",
+    #                       main_logger=main_logger_name)
+    #         print(f"{LOG_INS}:DEBUG>>** Step 1: Path Setup END (Success) **")
+
+    #     except Exception as path_err:
+    #         # Handle any unexpected errors during path manipulation or directory creation
+    #         print(f"{LOG_INS}:DEBUG>>** Step 1: Path Setup FAILED: {path_err} **")
+    #         log_statement(loglevel='error',
+    #                       logstatement=f"{LOG_INS}::PROCESS_FILE: CRITICAL error setting up paths for {file_name_hint}: {path_err}",
+    #                       main_logger=main_logger_name,
+    #                       exc_info=True)
+
+    #         # Update repo entry with error status
+    #         updated_info[COL_STATUS] = STATUS_ERROR
+    #         updated_info[COL_ERROR] = f"Path setup error: {path_err}"
+    #         print(f"{LOG_INS}:DEBUG>>Attempting repo update after path setup error...")
+    #         try:
+    #             # Use the original absolute_file_path as the key for updating the repo
+    #             self.repo.update_entry(absolute_file_path, **updated_info)
+    #             print(f"{LOG_INS}:DEBUG>>Repo update call successful after path error.")
+    #         except Exception as update_err:
+    #             print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after path setup error: {update_err} **")
+    #             # Log this critical failure as well
+    #             log_statement(loglevel='critical',
+    #                           logstatement=f"{LOG_INS}::PROCESS_FILE: Failed to update repo status for {absolute_file_path} after path error: {update_err}",
+    #                           main_logger=main_logger_name,
+    #                           exc_info=True)
+
+    #         print(f"{LOG_INS}:DEBUG>>Returning updated_info after path setup error: {updated_info}")
+    #         return updated_info # Return error info dictionary
+
+    #     # --- Step 2: Reader Instantiation ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 2: Reader Instantiation START **")
+    #     reader = None
+    #     ReaderClass = None
+    #     try:
+    #         file_suffix = absolute_file_path.suffix
+    #         print(f"{LOG_INS}:DEBUG>>Getting reader class for suffix: '{file_suffix}'")
+    #         ReaderClass = get_reader_class(file_suffix) # Pass suffix directly
+
+    #         if ReaderClass:
+    #             print(f"{LOG_INS}:DEBUG>>Found ReaderClass: {ReaderClass.__name__}")
+    #             # Check if it's a text reader needing encoding args
+    #             if issubclass(ReaderClass, RobustTextReader):
+    #                 print(f"{LOG_INS}:DEBUG>>Instantiating RobustTextReader with encoding args...")
+    #                 reader = ReaderClass(
+    #                     filepath=absolute_file_path,
+    #                     default_encoding='utf-8',
+    #                     error_handling='replace',
+    #                     detect_encoding=True # Explicitly enable detection attempt
+    #                 )
+    #                 print(f"{LOG_INS}:DEBUG>>RobustTextReader instantiated: {reader}")
+    #             else:
+    #                 print(f"{LOG_INS}:DEBUG>>Instantiating non-text reader...")
+    #                 # Instantiate non-text readers normally (like PDF, Excel)
+    #                 reader = ReaderClass(filepath=absolute_file_path)
+    #                 print(f"{LOG_INS}:DEBUG>>Non-text reader instantiated: {reader}")
+    #             log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Instantiated reader: {ReaderClass.__name__} for {file_name_hint}", main_logger=main_logger_name)
+    #             print(f"{LOG_INS}:DEBUG>>** Step 2: Reader Instantiation END (Success) **")
+
+    #         else: # ReaderClass is None (Unsupported type)
+    #             print(f"{LOG_INS}:DEBUG>>** Step 2: Reader Instantiation FAILED (Unsupported Type) **")
+    #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_FILE: No reader for {file_name_hint}. Skipping.", main_logger=main_logger_name)
+    #             updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = f"Unsupported file type: {file_suffix}"
+    #             print(f"{LOG_INS}:DEBUG>>Attempting repo update after unsupported type...")
+    #             try:
+    #                 self.repo.update_entry(absolute_file_path, **updated_info)
+    #                 print(f"{LOG_INS}:DEBUG>>Repo update call successful.")
+    #             except Exception as update_err:
+    #                 print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after unsupported type: {update_err} **")
+    #             print(f"{LOG_INS}:DEBUG>>Returning updated_info after unsupported type: {updated_info}")
+    #             return updated_info
+
+    #     except Exception as reader_init_err:
+    #         print(f"{LOG_INS}:DEBUG>>** Step 2: Reader Instantiation FAILED (Exception): {reader_init_err} **")
+    #         log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_FILE: Reader init failed for {file_name_hint}: {reader_init_err}", main_logger=main_logger_name, exc_info=True)
+    #         updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = f"Reader init failed: {reader_init_err}"
+    #         print(f"{LOG_INS}:DEBUG>>Attempting repo update after reader init error...")
+    #         try:
+    #             self.repo.update_entry(absolute_file_path, **updated_info)
+    #             print(f"{LOG_INS}:DEBUG>>Repo update call successful.")
+    #         except Exception as update_err:
+    #             print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after reader init error: {update_err} **")
+    #         print(f"{LOG_INS}:DEBUG>>Returning updated_info after reader init error: {updated_info}")
+    #         return updated_info
+
+    #     # --- Step 3: Read Data ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 3: Read Data START **")
+    #     read_data = None
+    #     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Attempting read for {file_name_hint} using {ReaderClass.__name__}", main_logger=main_logger_name)
+    #     try:
+    #         print(f"{LOG_INS}:DEBUG>>Calling reader.read() for {file_name_hint}...")
+    #         read_data = reader.read()
+    #         print(f"{LOG_INS}:DEBUG>>reader.read() returned type: {type(read_data)}")
+
+    #         if read_data is None:
+    #             print(f"{LOG_INS}:DEBUG>>** Step 3: Read Data FAILED (Reader returned None) **")
+    #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_FILE: Reader returned None for {file_name_hint}.", main_logger=main_logger_name)
+    #             updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = "Reader returned None"
+    #             print(f"{LOG_INS}:DEBUG>>Attempting repo update after read returned None...")
+    #             try:
+    #                 self.repo.update_entry(absolute_file_path, **updated_info)
+    #                 print(f"{LOG_INS}:DEBUG>>Repo update call successful.")
+    #             except Exception as update_err:
+    #                 print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after read returned None: {update_err} **")
+    #             print(f"{LOG_INS}:DEBUG>>Returning updated_info after read returned None: {updated_info}")
+    #             return updated_info
+    #         elif isinstance(read_data, pd.DataFrame) and read_data.empty:
+    #             log_statement(loglevel='info', logstatement=f"{LOG_INS}::PROCESS_FILE Read OK (Empty DataFrame) for {file_name_hint}.", main_logger=main_logger_name)
+    #             print(f"{LOG_INS}:DEBUG>>Read data is Empty DataFrame. Shape: {read_data.shape}")
+    #             # Proceed to classification, which should handle empty DF
+    #             print(f"{LOG_INS}:DEBUG>>** Step 3: Read Data END (Success - Empty DataFrame) **")
+    #         else:
+    #             data_preview = f"type: {type(read_data)}"
+    #             if isinstance(read_data, str): data_preview = str(read_data)[:100].replace('\n', '\\n') + "..."
+    #             elif isinstance(read_data, pd.DataFrame): data_preview += f", shape: {read_data.shape}"
+    #             print(f"{LOG_INS}:DEBUG>>Read data preview: {data_preview}")
+    #             log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Read OK for {file_name_hint}. Data {data_preview}", main_logger=main_logger_name)
+    #             print(f"{LOG_INS}:DEBUG>>** Step 3: Read Data END (Success) **")
+    #     except Exception as read_err:
+    #         print(f"{LOG_INS}:DEBUG>>** Step 3: Read Data FAILED (Exception): {read_err} **")
+    #         log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_FILE: Reader failed for {file_name_hint}: {read_err}", main_logger=main_logger_name, exc_info=True)
+    #         updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = f"Reader failed: {read_err}"
+    #         print(f"{LOG_INS}:DEBUG>>Attempting repo update after read error...")
+    #         try:
+    #             self.repo.update_entry(absolute_file_path, **updated_info)
+    #             print(f"{LOG_INS}:DEBUG>>Repo update call successful.")
+    #         except Exception as update_err:
+    #             print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after read error: {update_err} **")
+    #         print(f"{LOG_INS}:DEBUG>>Returning updated_info after read error: {updated_info}")
+    #         return updated_info
+
+    #     # --- Step 4: Classify Data ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 4: Classify Data START **")
+    #     data_classification = TYPE_UNKNOWN
+    #     print(f"{LOG_INS}:DEBUG>>Initial data_classification: {data_classification}")
+    #     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Attempting classification for {file_name_hint}", main_logger=main_logger_name)
+    #     try:
+    #         if not hasattr(self, '_classify_data'):
+    #             print(f"{LOG_INS}:DEBUG>>** Step 4: Classify Data FAILED (AttributeError: _classify_data missing) **")
+    #             raise AttributeError("_classify_data method missing from DataProcessor")
+
+    #         print(f"{LOG_INS}:DEBUG>>Input data type for classification: {type(read_data)}")
+    #         if isinstance(read_data, pd.DataFrame):
+    #             print(f"{LOG_INS}:DEBUG>>Calling self._classify_data for DataFrame...")
+    #             data_classification = self._classify_data(read_data, absolute_file_path)
+    #             print(f"{LOG_INS}:DEBUG>>Classification result: {data_classification}")
+    #         elif isinstance(read_data, str):
+    #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Reader returned raw string for {file_name_hint}. Expected DataFrame. Classifying as TEXTUAL.", main_logger=main_logger_name)
+    #             print(f"{LOG_INS}:DEBUG>>Reader returned string. Classifying as TEXTUAL. Converting to DataFrame.")
+    #             data_classification = TYPE_TEXTUAL
+    #             read_data = pd.DataFrame({'text': [read_data]}) # Convert string to DataFrame
+    #             print(f"{LOG_INS}:DEBUG>>Converted read_data to DataFrame. Shape: {read_data.shape}")
+    #         else:
+    #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Unsupported data type from reader for classification: {type(read_data)}. Classifying as UNKNOWN.", main_logger=main_logger_name)
+    #             print(f"{LOG_INS}:DEBUG>>Unsupported data type ({type(read_data)}). Classifying as UNKNOWN.")
+    #             data_classification = TYPE_UNKNOWN
+
+    #         updated_info[COL_DATA_CLASSIFICATION] = data_classification # Store classification result (Using Constant)
+    #         print(f"{LOG_INS}:DEBUG>>Stored data classification '{data_classification}' in updated_info.")
+    #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Classified {file_name_hint} as {data_classification}", main_logger=main_logger_name)
+
+    #         # Handle EMPTY classification immediately
+    #         if data_classification == TYPE_EMPTY or (isinstance(read_data, pd.DataFrame) and read_data.empty):
+    #             print(f"{LOG_INS}:DEBUG>>Data classified as EMPTY or DataFrame is empty. Skipping further processing.")
+    #             log_statement(loglevel="warning", logstatement=f"{LOG_INS}::PROCESS_FILE: Data classified as EMPTY for {file_name_hint}. Skipping processing.", main_logger=main_logger_name)
+    #             updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = "Empty or unclassifiable content"
+    #             print(f"{LOG_INS}:DEBUG>>Attempting repo update after EMPTY classification...")
+    #             try:
+    #                 self.repo.update_entry(absolute_file_path, **updated_info)
+    #                 print(f"{LOG_INS}:DEBUG>>Repo update call successful.")
+    #             except Exception as update_err:
+    #                 print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after EMPTY classification: {update_err} **")
+    #             print(f"{LOG_INS}:DEBUG>>Returning updated_info after EMPTY classification: {updated_info}")
+    #             return updated_info
+    #         print(f"{LOG_INS}:DEBUG>>** Step 4: Classify Data END (Success) **")
+    #     except Exception as classify_err:
+    #         print(f"{LOG_INS}:DEBUG>>** Step 4: Classify Data FAILED (Exception): {classify_err} **")
+    #         log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_FILE: Classification failed for {file_name_hint}: {classify_err}", main_logger=main_logger_name, exc_info=True)
+    #         updated_info[COL_STATUS] = STATUS_ERROR; updated_info[COL_ERROR] = f"Classification failed: {classify_err}"
+    #         # Store the attempted classification even if it failed
+    #         updated_info[COL_DATA_CLASSIFICATION] = data_classification if data_classification != TYPE_UNKNOWN else "CLASSIFICATION_FAILED"
+    #         print(f"{LOG_INS}:DEBUG>>Attempting repo update after classification error...")
+    #         try:
+    #             self.repo.update_entry(absolute_file_path, **updated_info)
+    #             print(f"{LOG_INS}:DEBUG>>Repo update call successful.")
+    #         except Exception as update_err:
+    #             print(f"{LOG_INS}:DEBUG>>** CRITICAL ERROR: Failed to update repo after classification error: {update_err} **")
+    #         print(f"{LOG_INS}:DEBUG>>Returning updated_info after classification error: {updated_info}")
+    #         return updated_info
+
+    #     # --- Step 5: Process Data Based on Classification ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 5: Process Data START (Classification: {data_classification}) **")
+    #     result = None
+    #     processed_flag = False
+    #     actual_output_path = None # Define before try block
+    #     specific_process_method_name = "None" # Track which method is called
+
+    #     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Entering processing block for {file_name_hint} (Type: {data_classification})", main_logger=main_logger_name)
+    #     try:
+    #         if data_classification == TYPE_TEXTUAL:
+    #             actual_output_path = output_path_base.with_suffix('.json.zst')
+    #             specific_process_method_name = '_process_textual_data'
+    #             print(f"{LOG_INS}:DEBUG>>Calling {specific_process_method_name} for {file_name_hint} -> {actual_output_path}")
+    #             if hasattr(self, specific_process_method_name):
+    #                 result = self._process_textual_data(read_data, absolute_file_path, actual_output_path)
+    #                 processed_flag = True
+    #                 print(f"{LOG_INS}:DEBUG>>{specific_process_method_name} returned: {type(result)}")
+    #             else:
+    #                 print(f"{LOG_INS}:DEBUG>>** ERROR: Method {specific_process_method_name} not found! **")
+    #                 raise AttributeError(f"{specific_process_method_name} method not found.")
+
+    #         elif data_classification == TYPE_NUMERICAL:
+    #             actual_output_path = output_path_base.with_suffix('.parquet.zst')
+    #             specific_process_method_name = '_process_numerical_data'
+    #             print(f"{LOG_INS}:DEBUG>>Calling {specific_process_method_name} for {file_name_hint} -> {actual_output_path}")
+    #             if hasattr(self, specific_process_method_name):
+    #                 result = self._process_numerical_data(read_data, absolute_file_path, actual_output_path)
+    #                 processed_flag = True
+    #                 print(f"{LOG_INS}:DEBUG>>{specific_process_method_name} returned: {type(result)}")
+    #             else:
+    #                 print(f"{LOG_INS}:DEBUG>>** ERROR: Method {specific_process_method_name} not found! **")
+    #                 raise AttributeError(f"{specific_process_method_name} method not found.")
+
+    #         elif data_classification in [TYPE_PDF, TYPE_DOC, TYPE_DOCX]: # Assume these were read into text DataFrame
+    #             actual_output_path = output_path_base.with_suffix('.json.zst')
+    #             specific_process_method_name = '_process_textual_data (from doc)'
+    #             print(f"{LOG_INS}:DEBUG>>Calling {specific_process_method_name} for {file_name_hint} -> {actual_output_path}")
+    #             if hasattr(self, '_process_textual_data'):
+    #                 result = self._process_textual_data(read_data, absolute_file_path, actual_output_path)
+    #                 processed_flag = True
+    #                 print(f"{LOG_INS}:DEBUG>>{specific_process_method_name} returned: {type(result)}")
+    #             else:
+    #                 print(f"{LOG_INS}:DEBUG>>** ERROR: Method _process_textual_data (fallback) not found! **")
+    #                 raise AttributeError(f"Fallback _process_textual_data missing.")
+
+    #         elif data_classification == TYPE_EXCEL: # Assume read into numerical DataFrame
+    #             actual_output_path = output_path_base.with_suffix('.parquet.zst')
+    #             specific_process_method_name = '_process_numerical_data (from excel)'
+    #             print(f"{LOG_INS}:DEBUG>>Calling {specific_process_method_name} for {file_name_hint} -> {actual_output_path}")
+    #             if hasattr(self, '_process_numerical_data'):
+    #                 result = self._process_numerical_data(read_data, absolute_file_path, actual_output_path)
+    #                 processed_flag = True
+    #                 print(f"{LOG_INS}:DEBUG>>{specific_process_method_name} returned: {type(result)}")
+    #             else:
+    #                 print(f"{LOG_INS}:DEBUG>>** ERROR: Method _process_numerical_data not found! **")
+    #                 raise AttributeError(f"_process_numerical_data method not found.")
+
+    #         elif data_classification in [TYPE_TOKENIZED_SUBWORD, TYPE_TOKENIZED_NUMERICAL, TYPE_TOKENIZED_JSONL, TYPE_TOKENIZED_CSV]: # Add other token types
+    #             actual_output_path = output_path_base.with_suffix('.parquet.zst')
+    #             specific_process_method_name = 'save_dataframe_to_parquet_zst (passthrough)'
+    #             print(f"{LOG_INS}:DEBUG>>Calling {specific_process_method_name} for pre-structured {file_name_hint} -> {actual_output_path}")
+    #             log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Passthrough save for pre-structured {file_name_hint} -> {actual_output_path}", main_logger=main_logger_name)
+    #             # --- FIX: Assume save_dataframe_to_parquet_zst is imported directly ---
+    #             try:
+    #                 # Check if the function exists in the current scope (requires direct import)
+    #                 if 'save_dataframe_to_parquet_zst' in globals() or 'save_dataframe_to_parquet_zst' in locals():
+    #                     save_success = save_dataframe_to_parquet_zst(read_data, actual_output_path)
+    #                     print(f"{LOG_INS}:DEBUG>>save_dataframe_to_parquet_zst returned: {save_success}")
+    #                     if save_success:
+    #                         print(f"{LOG_INS}:DEBUG>>Generating hash for saved file: {actual_output_path}")
+    #                         # --- FIX: Assume generate_data_hash is imported directly ---
+    #                         output_hash = generate_data_hash(actual_output_path)
+    #                         print(f"{LOG_INS}:DEBUG>>Generated hash: {output_hash}")
+    #                         if output_hash is None:
+    #                             print(f"{LOG_INS}:DEBUG>>** WARNING: Hash generation failed for passthrough save. **")
+    #                             updated_info[COL_ERROR] = f"Hash generation failed after saving pre-structured data"; result = None
+    #                         else:
+    #                             relative_output_path = actual_output_path.relative_to(self.output_dir)
+    #                             result = {COL_PROCESSED_PATH: str(relative_output_path), COL_DATA_HASH: output_hash or ""}
+    #                             print(f"{LOG_INS}:DEBUG>>Passthrough save result: {result}")
+    #                     else:
+    #                         updated_info[COL_ERROR] = f"Failed to save pre-structured data"; result = None
+    #                 else:
+    #                     print(f"{LOG_INS}:DEBUG>>** ERROR: Helper function save_dataframe_to_parquet_zst not found! **")
+    #                     raise NameError(f"Helper function save_dataframe_to_parquet_zst not found.")
+    #             except NameError as ne: # Catch if the function isn't imported
+    #                 raise AttributeError(f"Helper function {ne} not found/imported.") from ne
+    #             processed_flag = True
+
+    #         elif data_classification == TYPE_UNKNOWN:
+    #             actual_output_path = output_path_base.with_suffix('.json.zst')
+    #             specific_process_method_name = '_process_textual_data (fallback)'
+    #             print(f"{LOG_INS}:DEBUG>>Calling {specific_process_method_name} for {file_name_hint} -> {actual_output_path}")
+    #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_FILE Unknown classification, fallback to text processing for {file_name_hint} -> {actual_output_path}", main_logger=main_logger_name)
+    #             if hasattr(self, '_process_textual_data'):
+    #                 result = self._process_textual_data(read_data, absolute_file_path, actual_output_path)
+    #                 processed_flag = True
+    #                 print(f"{LOG_INS}:DEBUG>>{specific_process_method_name} returned: {type(result)}")
+    #             else:
+    #                 print(f"{LOG_INS}:DEBUG>>** ERROR: Method _process_textual_data (fallback) not found! **")
+    #                 raise AttributeError("Fallback _process_textual_data missing.")
+    #         else:
+    #             # Handle other specific types like IMAGE, AUDIO, BINARY etc. if needed
+    #             # For now, treat as unprocessable
+    #             print(f"{LOG_INS}:DEBUG>>No specific processing logic for classification '{data_classification}'. Skipping.")
+    #             log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_FILE No specific processing logic for classification '{data_classification}' ({file_name_hint}). Skipping processing step.", main_logger=main_logger_name)
+    #             updated_info[COL_ERROR] = f"No processing logic for '{data_classification}'"
+    #             result = None # Indicate no successful processing occurred
+    #             processed_flag = True # Mark as processed attempt failed
+
+    #         print(f"{LOG_INS}:DEBUG>>** Step 5: Process Data END (Method: {specific_process_method_name}) **")
+    #         print(f"{LOG_INS}:DEBUG>>Processing result type: {type(result)}, Processed flag: {processed_flag}")
+    #         if isinstance(result, dict):
+    #             print(f"{LOG_INS}:DEBUG>>Processing result dict: {result}")
+    #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Method '{specific_process_method_name or 'N/A'}' finished for {file_name_hint}. Result: {'Success (dict)' if isinstance(result, dict) else 'Fail/None'}", main_logger=main_logger_name)
+
+    #     except Exception as process_err:
+    #         print(f"{LOG_INS}:DEBUG>>** Step 5: Process Data FAILED (Exception during {specific_process_method_name}): {process_err} **")
+    #         log_statement(loglevel='error', logstatement=f"{LOG_INS}::PROCESS_FILE: Error during '{data_classification}' processing for {file_name_hint}: {process_err}", main_logger=main_logger_name, exc_info=True)
+    #         updated_info[COL_ERROR] = f"Processing error ({data_classification}): {process_err}"
+    #         result = None; processed_flag = True # Mark as processed even if exception occurred
+
+    #     # --- Step 6: Check Result and Finalize Status ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 6: Finalize Status START **")
+    #     # Check if processing was attempted, if result is a dict, and if processed_path is present and non-empty
+    #     if processed_flag and isinstance(result, dict) and result.get(COL_PROCESSED_PATH):
+    #         print(f"{LOG_INS}:DEBUG>>Processing SUCCEEDED. Updating status to PROCESSED.")
+    #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Processing SUCCEEDED for {file_name_hint}. Setting status to PROCESSED.", main_logger=main_logger_name)
+    #         updated_info.update(result) # Add processed_path and output_hash
+    #         updated_info[COL_STATUS] = STATUS_PROCESSED
+    #         updated_info[COL_ERROR] = '' # Clear previous error if reprocessing succeeded
+    #         updated_info[COL_FINAL_CLASSIFICATION] = data_classification # Store final classification (Using Constant)
+    #         print(f"{LOG_INS}:DEBUG>>updated_info after success: {updated_info}")
+    #     else:
+    #         print(f"{LOG_INS}:DEBUG>>Processing FAILED or no valid result returned. Setting status to ERROR.")
+    #         log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PROCESS_FILE: Processing FAILED or no result/path for {file_name_hint} (Classification: {data_classification}). Processed flag: {processed_flag}", main_logger=main_logger_name)
+    #         # Keep existing error if processing failed, otherwise set new one
+    #         if not updated_info.get(COL_ERROR): # Only set error if not already set by exception
+    #             updated_info[COL_ERROR] = f"Processing failed or no result/path for classification '{data_classification}'"
+    #             print(f"{LOG_INS}:DEBUG>>Setting error message: {updated_info[COL_ERROR]}")
+    #         else:
+    #             print(f"{LOG_INS}:DEBUG>>Keeping existing error message: {updated_info.get(COL_ERROR)}")
+    #         # Store final classification even on failure
+    #         updated_info[COL_FINAL_CLASSIFICATION] = data_classification # Using Constant
+    #         updated_info[COL_STATUS] = STATUS_ERROR
+    #         print(f"{LOG_INS}:DEBUG>>updated_info after failure: {updated_info}")
+    #     print(f"{LOG_INS}:DEBUG>>** Step 6: Finalize Status END **")
+
+    #     # --- Step 7: Update Repository ---
+    #     print(f"{LOG_INS}:DEBUG>>** Step 7: Update Repository START **")
+    #     try:
+    #         print(f"{LOG_INS}:DEBUG>>Calling update_entry for {file_name_hint}. Final Status: '{updated_info[COL_STATUS]}'.")
+    #         print(f"{LOG_INS}:DEBUG>>Data being sent to update_entry: {updated_info}")
+    #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Calling update_entry for {file_name_hint}. Final Status: '{updated_info[COL_STATUS]}'. Update Keys: {list(updated_info.keys())}", main_logger=main_logger_name)
+    #         # Use self.repo which should be the DataRepository instance for the MAIN repo
+    #         self.repo.update_entry(absolute_file_path, **updated_info)
+    #         print(f"{LOG_INS}:DEBUG>>update_entry call returned for {file_name_hint}.")
+    #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE update_entry call returned for {file_name_hint}.", main_logger=main_logger_name)
+    #         print(f"{LOG_INS}:DEBUG>>** Step 7: Update Repository END (Success) **")
+    #     except Exception as repo_update_err:
+    #         print(f"{LOG_INS}:DEBUG>>** Step 7: Update Repository FAILED (Exception): {repo_update_err} **")
+    #         log_statement(loglevel='critical', logstatement=f"{LOG_INS}::PROCESS_FILE: CRITICAL - Failed repository update for {file_name_hint}: {repo_update_err}", main_logger=main_logger_name, exc_info=True)
+    #         # Update failed, but we still need to return the info gathered so far
+    #         updated_info[COL_ERROR] = f"Final Status: {updated_info.get(COL_STATUS, 'Unknown')}; Repo Update Err: {repo_update_err}"
+    #         updated_info[COL_STATUS] = STATUS_ERROR # Mark as error if update failed
+    #         print(f"{LOG_INS}:DEBUG>>updated_info after repo update failure: {updated_info}")
+
+    #     # --- Return Final Result ---
+    #     print(f"{LOG_INS}:DEBUG>>** Method END **")
+    #     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE END for: {file_name_hint}. Returning status: {updated_info.get(COL_STATUS)}", main_logger=main_logger_name)
+    #     print(f"{LOG_INS}:DEBUG>>Final updated_info being returned: {updated_info}")
+    #     return updated_info
+
+    # Make sure filepath is Path object if type hints are used
+    def _process_file(self, filepath: Path, use_gpu: bool):
+        """Processes a single file: classify, clean/transform, save, update repo."""
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Starting processing for file: {filepath}", __file__)
+        # Get file hash - Assuming it's needed for naming or already in repo
+        # This might require reading the file or getting it from repo entry if available
+        file_hash = "temp_hash" # Placeholder: Need reliable way to get hash if needed for filename
+        # Better: Get hash from repository row if already scanned
+        try:
+             file_info = self.repository.get_file_info(str(filepath)) # Assumes method exists
+             if file_info is not None and COL_HASH in file_info:
+                 file_hash = file_info[COL_HASH]
+             else:
+                 log_statement('warning', f"{LOG_INS}:WARNING>>Could not retrieve hash for {filepath} from repo. Using placeholder.", __file__)
+                 # Optionally calculate hash here if needed: from src.utils.hashing import generate_data_hash
+        except Exception as e:
+            log_statement('warning', f"{LOG_INS}:WARNING>>Error getting file hash from repo for {filepath}: {e}. Using placeholder.", __file__, exc_info=True)
+
+
+        processed_content = None
+        processed_path = None
+        error_info = None
+        final_status = None
+        data_type = TYPE_UNKNOWN # Default
+        processed_filename_str = None # Initialize
+
+        # Use the string representation of the path for repository updates, matching storage format
+        filepath_str = str(filepath)
+
+        try:
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Updating status to PROCESSING for {filepath_str}", __file__)
+            self.repository.update_entry(filepath_str, {COL_STATUS: STATUS_PROCESSING})
+
+            # --- Read Content ---
+            # This assumes an internal method _read_file_content exists, otherwise use readers
+            content = self._read_file_content(filepath)
+            if content is None:
+                raise ValueError("Failed to read file content.")
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Read content successfully for {filepath_str}", __file__)
+
+            # --- Classify ---
+            data_type = self._classify_data(filepath, content)
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Classified {filepath_str} as {data_type}", __file__)
+
+            # --- Process based on type ---
+            if data_type == TYPE_TEXTUAL:
+                processed_content = self._process_textual_data(content)
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Processed textual data for {filepath_str}", __file__)
+            elif data_type == TYPE_NUMERICAL:
+                log_statement('warning', f"{LOG_INS}:WARNING>>Numerical processing not fully implemented for {filepath_str}. Saving raw.", __file__)
+                processed_content = content # Placeholder
+            # ... handle other types ...
+            else:
+                log_statement('warning', f"{LOG_INS}:WARNING>>Skipping processing for unsupported type {data_type}: {filepath_str}", __file__)
+                final_status = STATUS_SKIPPED
+                processed_content = None # Ensure we don't try to save if skipping
+
+            # --- Save Processed Data (if content exists) ---
+            if processed_content is not None:
+                # Use reliable hash if available, otherwise stem might suffice if unique enough
+                safe_hash_part = file_hash[:8] if file_hash and len(file_hash) >= 8 else filepath.stem[:8]
+                processed_filename_str = f"{filepath.stem}_{safe_hash_part}_processed.txt.zst" # Example naming
+                processed_path = self.output_directory / processed_filename_str
+                processed_path.parent.mkdir(parents=True, exist_ok=True)
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Attempting to save processed data to {processed_path}", __file__)
+
+                try:
+                    # Assuming saving compressed text
+                    compress_string_to_file(str(processed_content), processed_path) # Ensure content is string
+                    log_statement('info', f"{LOG_INS}:INFO>>Saved processed data to {processed_path}", __file__)
+                    final_status = STATUS_PROCESSED
+                except Exception as save_err:
+                     log_statement('error', f"{LOG_INS}:ERROR>>Failed to save processed data for {filepath_str} to {processed_path}: {save_err}", __file__, exc_info=True)
+                     final_status = STATUS_FAILED
+                     error_info = f"Failed to save processed file: {save_err}"
+                     processed_path = None # Ensure path isn't stored if saving failed
+                     processed_filename_str = None # Clear filename too
+
+            elif final_status != STATUS_SKIPPED:
+                 # If no content was processed AND it wasn't explicitly skipped
+                 log_statement('warning', f"{LOG_INS}:WARNING>>Processing resulted in empty content for {filepath_str}", __file__)
+                 final_status = STATUS_FAILED
+                 error_info = "Processing resulted in empty content."
+
+
+        except Exception as e:
+            log_statement('error', f"{LOG_INS}:ERROR>>Error processing file {filepath_str}: {e}", __file__, exc_info=True)
+            final_status = STATUS_FAILED
+            error_info = str(e)
+            data_type = data_type if data_type != TYPE_UNKNOWN else None # Keep classified type if available
+
+        finally:
+            # --- Update Repository Entry ---
+            update_data = {
+                COL_STATUS: final_status,
+                COL_ERROR_INFO: error_info,
+                COL_DATA_TYPE: data_type,
+                COL_PROCESSED_FILENAME: processed_filename_str, # Use the determined filename string
+            }
+            # Remove keys with None values to avoid overwriting existing repo data unnecessarily
+            update_data = {k: v for k, v in update_data.items() if v is not None}
+
+            if not update_data:
+                 log_statement('debug', f"{LOG_INS}:DEBUG>>No data to update in repository for {filepath_str}.", __file__)
+            else:
+                 try:
+                     log_statement('debug', f"{LOG_INS}:DEBUG>>Updating repository for {filepath_str} with data: {update_data}", __file__)
+                     self.repository.update_entry(filepath_str, update_data) # Use string path
+                     log_statement('debug', f"{LOG_INS}:DEBUG>>Repository updated for {filepath_str} with status: {final_status}", __file__)
+                 except Exception as repo_err:
+                      # Use logger formatting for critical errors
+                      log_statement('critical', f"{LOG_INS}:CRITICAL>>Failed to update repository for {filepath_str} after processing: {repo_err}", __file__, exc_info=True)
+
+    # --- Placeholder/Assumed internal methods ---
+    def _read_file_content(self, filepath: Path) -> str | bytes | None:
+         # Implementation depends on how reading is handled (e.g., using readers.py)
+         log_statement('debug', f"{LOG_INS}:DEBUG>>_read_file_content called for {filepath}", __file__)
+         try:
+              reader_cls = get_reader_class(filepath)
+              if reader_cls:
+                   reader = reader_cls(filepath)
+                   return reader.read()
+              else: # Basic fallback
+                   with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        return f.read()
+         except Exception as e:
+              log_statement('error', f"{LOG_INS}:ERROR>>_read_file_content failed for {filepath}: {e}", __file__, exc_info=True)
+              return None
+
+    def _classify_data(self, filepath: Path, content: str | bytes) -> str:
+         # Implementation for classifying data type
+         log_statement('debug', f"{LOG_INS}:DEBUG>>_classify_data called for {filepath}", __file__)
+         # Add logic here, e.g., check extension, content patterns
+         if isinstance(content, str): # Basic check
+              return TYPE_TEXTUAL
+         return TYPE_UNKNOWN # Default
+
 
     def _process_textual_data(self, df: pd.DataFrame, input_path: Path, output_path: Path) -> Optional[Dict]:
         """
@@ -895,8 +1674,8 @@ JSON Output:
         Returns:
             Optional[Dict]: Dictionary with 'processed_path' (relative) and 'output_hash' on success, else None.
         """
-        main_logger_name = str(__name__)
-        log_statement(loglevel="debug", logstatement=f"Starting _process_textual_data for: {input_path.name}", main_logger=main_logger_name)
+        main_logger_name = __file__
+        log_statement(loglevel="debug", logstatement=f"{LOG_INS}::Starting _process_textual_data for: {input_path.name}", main_logger=main_logger_name)
         try:
             # --- Consolidate Text from DataFrame ---
             # (Combine relevant text columns into a single string)
@@ -904,41 +1683,63 @@ JSON Output:
             # Example: combine all string columns, separated by newlines
             # Ensure only object/string dtypes are selected
             string_cols = df.select_dtypes(include=['object', 'string']).columns
+            print(f"{LOG_INS}:DEBUG::string_cols value {string_cols}")
             if not string_cols.empty:
-                 for col in string_cols:
-                     # Ensure proper handling of potential NaN/None before astype(str) and str.cat
-                     text_content += df[col].fillna('').astype(str).str.cat(sep='\n') + "\n"
-                 text_content = text_content.strip()
+                print(f"{LOG_INS}::string_cols not empty!")
+                for col in string_cols:
+                    # Ensure proper handling of potential NaN/None before astype(str) and str.cat
+                    text_content += df[col].fillna('').astype(str).str.cat(sep='\n') + "\n"
+                    print(f"{LOG_INS}:DEBUG>>Column value is '{col}'"
+                          f"{LOG_INS}:DEBUG>>text_content value is '{text_content}'")
+                print(f"{LOG_INS}:DEBUG>>Stripping text content for '{text_content}'...")
+                text_content = text_content.strip()
+                print(f"{LOG_INS}:DEBUG>>Stripped content:"
+                      f"{LOG_INS}:DEBUG>>{text_content}")
             else:
-                 # Handle case where DataFrame has no string columns
-                 log_statement(loglevel="warning", logstatement=f"No string columns found in DataFrame for {input_path.name} to consolidate text.", main_logger=main_logger_name)
-                 # Attempt to convert all columns to string as a fallback?
-                 # Or return None? Let's try converting all.
-                 for col in df.columns:
-                      text_content += df[col].fillna('').astype(str).str.cat(sep='\n') + "\n"
-                 text_content = text_content.strip()
-
+                # Handle case where DataFrame has no string columns
+                log_statement(loglevel="warning", logstatement=f"{LOG_INS}::No string columns found in DataFrame for {input_path.name} to consolidate text.", main_logger=main_logger_name)
+                # Attempt to convert all columns to string as a fallback?
+                # Or return None? Let's try converting all.
+                for col in df.columns:
+                    text_content += df[col].fillna('').astype(str).str.cat(sep='\n') + "\n"
+                    print(f"{LOG_INS}:DEBUG>>Column value is '{col}'"
+                          f"{LOG_INS}:DEBUG>>text_content value is '{text_content}'")
+                text_content = text_content.strip()
+                print(f"{LOG_INS}:DEBUG>>Stripped content:"
+                      f"{LOG_INS}:DEBUG>>{text_content}")
 
             if not text_content:
-                 log_statement(loglevel="warning", logstatement=f"No text content extracted from DataFrame for {input_path.name}", main_logger=main_logger_name)
-                 return None
+                log_statement(loglevel="warning", logstatement=f"{LOG_INS}::No text content extracted from DataFrame for {input_path.name}", main_logger=main_logger_name)
+                return None
 
             # --- Basic Cleaning (Apply before labeling) ---
             cleaned_text = text_content.lower()
+            print(f"{LOG_INS}:DEBUG>>Cleaned version of '{text_content}':"
+                  f"{LOG_INS}:DEBUG>>{cleaned_text}"
+                  f"{LOG_INS}:DEBUG>>Checking for 'cleaning_regex' attribute existence...")
             if hasattr(self, 'cleaning_regex') and self.cleaning_regex: # Check if regex exists
-                 # Ensure cleaning_regex is compiled, ideally in __init__
-                 if isinstance(self.cleaning_regex, str): # Compile if it's still a string
-                      try: self.cleaning_regex = re.compile(self.cleaning_regex)
-                      except re.error as re_err: log_statement(loglevel='error', logstatement=f"Invalid cleaning regex: {re_err}", main_logger=main_logger_name); self.cleaning_regex = None # Disable if invalid
+                # Ensure cleaning_regex is compiled, ideally in __init__
+                print(f"{LOG_INS}:DEBUG>>Existence of cleaning_regex confirmed!  Checking to see if instance is a string to compile...")
+                if isinstance(self.cleaning_regex, str): # Compile if it's still a string
+                    print(f"{LOG_INS}:DEBUG>>cleaning_regex instance still a string!  Attempting to compile...")
+                    try:
+                        self.cleaning_regex = re.compile(self.cleaning_regex)
+                        print(f"{LOG_INS}:DEBUG>>Successfully compiled string for cleaning_regex as '{self.cleaning_regex}' using the 're' python module!")
+                    except re.error as re_err:
+                        log_statement(loglevel='error',
+                                     logstatement=f"{LOG_INS}::Invalid cleaning regex: {re_err}"
+                                                  f"{LOG_INS}:DEBUG>>cleaning_regex setting to None...",
+                                     main_logger=main_logger_name)
+                        self.cleaning_regex = None # Disable if invalid
 
-                 if hasattr(self.cleaning_regex, 'sub'): # Check if valid compiled regex
-                      cleaned_text = self.cleaning_regex.sub('', cleaned_text)
+                if hasattr(self.cleaning_regex, 'sub'): # Check if valid compiled regex
+                    cleaned_text = self.cleaning_regex.sub('', cleaned_text)
 
-                 # General whitespace normalization
-                 cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+                # General whitespace normalization
+                cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
             # Optional: NLTK processing could go here too
 
-            # --- <<< Semantic Labeling (Instruction #12) >>> ---
+            # --- <<< Semantic Labeling >>> ---
             structured_data = None
             # Add a config flag to enable/disable this expensive step
             # Assume self.config exists and holds configuration
@@ -947,11 +1748,11 @@ JSON Output:
                 semantic_labeling_enabled = self.config.ENABLE_SEMANTIC_LABELING
 
             if semantic_labeling_enabled:
-                 # Ensure the labeling method exists
-                 if hasattr(self, '_label_text_semantically'):
-                     structured_data = self._label_text_semantically(cleaned_text, input_path)
-                 else:
-                     log_statement(loglevel="warning", logstatement=f"Semantic labeling enabled but _label_text_semantically method not found in DataProcessor.", main_logger=main_logger_name)
+                # Ensure the labeling method exists
+                if hasattr(self, '_label_text_semantically'):
+                    structured_data = self._label_text_semantically(cleaned_text, input_path)
+                else:
+                    log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Semantic labeling enabled but _label_text_semantically method not found in DataProcessor.", main_logger=main_logger_name)
 
 
             # --- Prepare Output Data ---
@@ -961,7 +1762,7 @@ JSON Output:
             else:
                 # Fallback: Output the cleaned text in a simple structure
                 # (or just the raw cleaned text if preferred, adjust saving method)
-                log_statement(loglevel="debug", logstatement=f"No structured data from labeling for {input_path.name}, saving cleaned text.", main_logger=main_logger_name)
+                log_statement(loglevel="debug", logstatement=f"{LOG_INS}::No structured data from labeling for {input_path.name}, saving cleaned text.", main_logger=main_logger_name)
                 # Adhere to Rule #11 (tabular/JSON output)
                 # Simple JSON structure containing the cleaned text
                 output_data_to_save = {"cleaned_text": cleaned_text} # Or split into lines: cleaned_text.split('\n')
@@ -970,25 +1771,21 @@ JSON Output:
             try:
                 json_string = json.dumps(output_data_to_save, indent=2) # Pretty print JSON
             except TypeError as te:
-                 log_statement(loglevel="error", logstatement=f"Failed to serialize processed data to JSON for {input_path.name}: {te}", main_logger=main_logger_name)
-                 return None
-
-            # Use the string compression helper
-            if not hasattr(self, '_compress_string_to_file'):
-                 log_statement(loglevel="error", logstatement="_compress_string_to_file helper method not found.", main_logger=main_logger_name)
-                 raise NotImplementedError("_compress_string_to_file helper method not found.")
+                log_statement(loglevel="error", logstatement=f"{LOG_INS}::Failed to serialize processed data to JSON for {input_path.name}: {te}", main_logger=main_logger_name)
+                return None
 
             # Ensure output path has the correct extension (.json.zst)
             output_path = output_path.with_suffix('.json.zst')
-            save_success = self._compress_string_to_file(json_string, output_path)
+            save_success = compress_string_to_file(json_string, output_path)
 
             if not save_success:
-                 return None # Error logged within helper
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Save failed!", main_logger=__file__)
+                return None # Error logged within helper
 
             # --- Calculate hash & Return metadata (as before) ---
             output_hash = generate_data_hash(output_path)
             if output_hash is None:
-                 log_statement(loglevel='error', logstatement=f"Failed to generate hash for output file: {output_path}", main_logger=str(__name__))
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to generate hash for output file: {output_path}", main_logger=__file__)
                  return None
 
             relative_output_path = output_path.relative_to(self.output_dir)
@@ -998,7 +1795,7 @@ JSON Output:
             }
 
         except Exception as e:
-            log_statement(loglevel='error', logstatement=f"Failed in _process_textual_data for {input_path}: {e}", main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed in _process_textual_data for {input_path}: {e}", main_logger=__file__, exc_info=True)
             # Ensure output_path variable is defined before attempting unlink
             if 'output_path' in locals() and output_path.exists():
                 try: output_path.unlink()
@@ -1018,13 +1815,13 @@ JSON Output:
         Returns:
             Optional[Dict]: Dictionary with 'output_path' (relative) and 'output_hash' on success, else None.
         """
-        log_statement(loglevel='debug', logstatement=f"Starting _process_numerical for: {input_path.name}", main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Starting _process_numerical for: {input_path.name}", main_logger=__file__)
         try:
             # Use the reader's read method - assumes it returns a DataFrame
             dataframe = reader.read() # reader initialized with input_path
 
             if dataframe is None or dataframe.empty:
-                log_statement(loglevel='warning', logstatement=f"Reader returned empty or None DataFrame for {input_path.name}. Skipping.", main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Reader returned empty or None DataFrame for {input_path.name}. Skipping.", main_logger=__file__)
                 return None
 
             # --- Numerical Processing Logic ---
@@ -1034,13 +1831,13 @@ JSON Output:
             numeric_df = numeric_df.dropna(axis=1, how='all')
 
             if numeric_df.empty:
-                log_statement(loglevel='warning', logstatement=f"No numeric data found after conversion in {input_path.name}. Skipping.", main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS}::No numeric data found after conversion in {input_path.name}. Skipping.", main_logger=__file__)
                 return None
 
             # Scaling (using the scaler initialized in DataProcessor __init__)
             processed_df = numeric_df
             if hasattr(self, 'scaler') and self.scaler:
-                log_statement(loglevel='debug', logstatement=f"Applying scaler to data from {input_path.name}", main_logger=str(__name__))
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Applying scaler to data from {input_path.name}", main_logger=__file__)
                 try:
                     # Scaler expects numpy/cupy array. Handle DataFrame conversion.
                     # Use .values for numpy array. For cuDF, .to_cupy()
@@ -1057,16 +1854,16 @@ JSON Output:
                         processed_df = self.scaler.fit_transform(numeric_df) # Assuming wrapper handles DataFrame
 
                 except Exception as scale_err:
-                    log_statement(loglevel='error', logstatement=f"Scaling failed for {input_path.name}: {scale_err}. Proceeding with unscaled data.", main_logger=str(__name__), exc_info=True)
+                    log_statement(loglevel='error', logstatement=f"{LOG_INS}::Scaling failed for {input_path.name}: {scale_err}. Proceeding with unscaled data.", main_logger=__file__, exc_info=True)
                     processed_df = numeric_df # Use original numeric data if scaling fails
             else:
-                log_statement(loglevel='debug', logstatement=f"No scaler available or configured. Skipping scaling for {input_path.name}", main_logger=str(__name__))
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}::No scaler available or configured. Skipping scaling for {input_path.name}", main_logger=__file__)
 
 
             # --- Save processed DataFrame to compressed Parquet ---
             # Use a helper function or implement logic here
             if not hasattr(self, 'save_dataframe_to_parquet_zst'):
-                log_statement(loglevel='error', logstatement="save_dataframe_to_parquet_zst helper method not found.", main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::save_dataframe_to_parquet_zst helper method not found.", main_logger=__file__)
                 raise NotImplementedError("save_dataframe_to_parquet_zst helper method not found.")
 
             save_success = self.save_dataframe_to_parquet_zst(processed_df, output_path)
@@ -1078,7 +1875,7 @@ JSON Output:
             # --- Calculate hash of the output file ---
             output_hash = generate_data_hash(output_path)
             if output_hash is None:
-                log_statement(loglevel='error', logstatement=f"Failed to generate hash for output file: {output_path}", main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to generate hash for output file: {output_path}", main_logger=__file__)
                 return None # Indicate failure
 
             # --- Return metadata ---
@@ -1089,7 +1886,7 @@ JSON Output:
             }
 
         except Exception as e:
-            log_statement(loglevel='error', logstatement=f"Failed in _process_numerical for {input_path}: {e}", main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed in _process_numerical for {input_path}: {e}", main_logger=__file__, exc_info=True)
             if output_path.exists():
                 try: output_path.unlink()
                 except OSError: pass
@@ -1108,13 +1905,13 @@ JSON Output:
         Returns:
             Optional[Dict]: Dictionary with 'output_path' (relative) and 'output_hash' on success, else None.
         """
-        log_statement(loglevel='debug', logstatement=f"Starting _process_pdf for: {input_path.name}", main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Starting _process_pdf for: {input_path.name}", main_logger=__file__)
         try:
             # PDFReader.read() returns a DataFrame with a 'text' column
             dataframe = reader.read()
 
             if dataframe is None or dataframe.empty or 'text' not in dataframe.columns or dataframe['text'].iloc[0] is None:
-                log_statement(loglevel='warning', logstatement=f"PDFReader returned no text content for {input_path.name}. Skipping.", main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS}::PDFReader returned no text content for {input_path.name}. Skipping.", main_logger=__file__)
                 return None
 
             # --- Text Processing Logic ---
@@ -1135,15 +1932,15 @@ JSON Output:
                 processed_text = lemmatize_and_filter(processed_text)
 
             if not processed_text:
-                log_statement(loglevel='warning', logstatement=f"No text content resulted after processing PDF {input_path.name}. Skipping save.", main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS}::No text content resulted after processing PDF {input_path.name}. Skipping save.", main_logger=__file__)
                 return None
 
             # --- Save processed text to output_path (compressed) ---
             if not hasattr(self, 'compress_string_to_file'):
-                log_statement(loglevel='error', logstatement="compress_string_to_file helper method not found.", main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::compress_string_to_file helper method not found.", main_logger=__file__)
                 raise NotImplementedError("compress_string_to_file helper method not found.")
 
-            save_success = self.compress_string_to_file(processed_text, output_path)
+            save_success = compress_string_to_file(processed_text, output_path)
 
             if not save_success:
                 return None # Error logged within helper
@@ -1151,7 +1948,7 @@ JSON Output:
             # --- Calculate hash of the output file ---
             output_hash = generate_data_hash(output_path)
             if output_hash is None:
-                log_statement(loglevel='error', logstatement=f"Failed to generate hash for output file: {output_path}", main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to generate hash for output file: {output_path}", main_logger=__file__)
                 return None
 
             # --- Return metadata ---
@@ -1162,10 +1959,10 @@ JSON Output:
             }
 
         except ImportError:
-            log_statement(loglevel='error', logstatement=f"PDF processing failed for {input_path}: Missing required library (e.g., pdfminer.six).", main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::PDF processing failed for {input_path}: Missing required library (e.g., pdfminer.six).", main_logger=__file__, exc_info=True)
             return None # Indicate failure due to missing dependency
         except Exception as e:
-            log_statement(loglevel='error', logstatement=f"Failed in _process_pdf for {input_path}: {e}", main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed in _process_pdf for {input_path}: {e}", main_logger=__file__, exc_info=True)
             if output_path.exists():
                 try: output_path.unlink()
                 except OSError: pass
@@ -1185,13 +1982,13 @@ JSON Output:
         Returns:
             Optional[Dict]: Dictionary with 'output_path' (relative) and 'output_hash' on success, else None.
         """
-        log_statement(loglevel='debug', logstatement=f"Starting _process_docx for: {input_path.name}", main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Starting _process_docx for: {input_path.name}", main_logger=__file__)
         try:
             # Assume reader.read() returns a DataFrame {'text': [content]}
             dataframe = reader.read()
 
             if dataframe is None or dataframe.empty or 'text' not in dataframe.columns or dataframe['text'].iloc[0] is None:
-                log_statement(loglevel='warning', logstatement=f"DocxReader returned no text content for {input_path.name}. Skipping.", main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS}::DocxReader returned no text content for {input_path.name}. Skipping.", main_logger=__file__)
                 return None
 
             # --- Text Processing Logic (similar to PDF) ---
@@ -1209,21 +2006,21 @@ JSON Output:
                 processed_text = lemmatize_and_filter(processed_text)
 
             if not processed_text:
-                log_statement(loglevel='warning', logstatement=f"No text content resulted after processing DOCX {input_path.name}. Skipping save.", main_logger=str(__name__))
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS}::No text content resulted after processing DOCX {input_path.name}. Skipping save.", main_logger=__file__)
                 return None
 
             # --- Save processed text to output_path (compressed) ---
             if not hasattr(self, 'compress_string_to_file'):
-                log_statement(loglevel='error', logstatement="compress_string_to_file helper method not found.", main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::compress_string_to_file helper method not found.", main_logger=__file__)
                 raise NotImplementedError("compress_string_to_file helper method not found.")
 
-            save_success = self.compress_string_to_file(processed_text, output_path)
+            save_success = compress_string_to_file(processed_text, output_path)
             if not save_success: return None
 
             # --- Calculate hash ---
             output_hash = generate_data_hash(output_path)
             if output_hash is None:
-                log_statement(loglevel='error', logstatement=f"Failed to generate hash for output file: {output_path}", main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to generate hash for output file: {output_path}", main_logger=__file__)
                 return None
 
             # --- Return metadata ---
@@ -1234,10 +2031,10 @@ JSON Output:
             }
 
         except ImportError:
-            log_statement(loglevel='error', logstatement=f"DOCX processing failed for {input_path}: Missing required library (e.g., python-docx).", main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::DOCX processing failed for {input_path}: Missing required library (e.g., python-docx).", main_logger=__file__, exc_info=True)
             return None
         except Exception as e:
-            log_statement(loglevel='error', logstatement=f"Failed in _process_docx for {input_path}: {e}", main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed in _process_docx for {input_path}: {e}", main_logger=__file__, exc_info=True)
             if output_path.exists():
                 try: output_path.unlink()
                 except OSError: pass
@@ -1257,7 +2054,7 @@ JSON Output:
         Returns:
             Optional[Dict]: Dictionary with 'output_path' (relative) and 'output_hash' on success, else None.
         """
-        log_statement(loglevel='debug', logstatement=f"Delegating Excel processing for {input_path.name} to _process_numerical.", main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Delegating Excel processing for {input_path.name} to _process_numerical.", main_logger=__file__)
         # Call the numerical processing function, passing the Excel reader and paths
         return self._process_numerical(reader, input_path, output_path)
 
@@ -1276,7 +2073,7 @@ JSON Output:
         Returns:
             Optional[Dict]: Dictionary with 'output_path' (relative) and 'output_hash' on success, else None.
         """
-        log_statement(loglevel='warning', logstatement=f"Audio processing (_process_audio) not implemented yet for: {input_path.name}", main_logger=str(__name__))
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Audio processing (_process_audio) not implemented yet for: {input_path.name}", main_logger=__file__)
         # Example Steps (pseudo-code):
         # try:
         #     # 1. Read audio data using reader
@@ -1325,7 +2122,7 @@ JSON Output:
         
     def _process_odt(self, filepath: Path):
         """Processes ODT files using odfpy."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Processing ODT file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processing ODT file: {filepath.name}", main_logger=__file__)
         try:
             import odfpy
             from odf.opendocument import OpenDocumentText
@@ -1335,13 +2132,13 @@ JSON Output:
                 text.append(elem.firstChild.data)
             return "\n".join(text)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"ODT processing failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::ODT processing failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"ODT processing failed: {e}")
             return None
         
     def _process_doc(self, filepath: Path):
         """Processes DOC files using python-docx."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Processing DOC file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processing DOC file: {filepath.name}", main_logger=__file__)
         try:
             import docx
             doc = docx.Document(filepath)
@@ -1350,13 +2147,13 @@ JSON Output:
                 text.append(para.text)
             return "\n".join(text)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"DOC processing failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::DOC processing failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"DOC processing failed: {e}")
             return None
         
     def _process_html_xml(self, filepath: Path):
         """Processes HTML/XML files using BeautifulSoup."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Processing HTML/XML file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processing HTML/XML file: {filepath.name}", main_logger=__file__)
         try:
             import bs4
             with open(filepath, 'r', encoding='utf-8') as f:
@@ -1364,26 +2161,26 @@ JSON Output:
             soup = bs4.BeautifulSoup(content, 'html.parser')
             return soup.get_text()
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"HTML/XML processing failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::HTML/XML processing failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"HTML/XML processing failed: {e}")
             return None
         
     def _process_rtf(self, filepath: Path):
         """Processes RTF files using striprtf."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Processing RTF file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processing RTF file: {filepath.name}", main_logger=__file__)
         try:
             import striprtf
             with open(filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
             return striprtf.strip(content)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"RTF processing failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::RTF processing failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"RTF processing failed: {e}")
             return None
         
     def _process_epub(self, filepath: Path):
         """Processes EPUB files using EbookLib."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Processing EPUB file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processing EPUB file: {filepath.name}", main_logger=__file__)
         try:
             import ebooklib
             from ebooklib import epub
@@ -1393,13 +2190,13 @@ JSON Output:
                 text.append(item.get_body_content_str())
             return "\n".join(text)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"EPUB processing failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::EPUB processing failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"EPUB processing failed: {e}")
             return None
         
     def _process_zip(self, filepath: Path):
         """Processes ZIP files using zipfile."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Processing ZIP file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processing ZIP file: {filepath.name}", main_logger=__file__)
         try:
             import zipfile
             with zipfile.ZipFile(filepath, 'r') as z:
@@ -1409,13 +2206,13 @@ JSON Output:
                         text.append(f.read().decode('utf-8'))
                 return "\n".join(text)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"ZIP processing failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::ZIP processing failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"ZIP processing failed: {e}")
             return None
 
     def _read_content(self, filepath: Path):
         """Reads the content of a file, handling different encodings."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Reading content from {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Reading content from {filepath.name}", main_logger=__file__)
         try:
             if filepath.suffix.lower() == '.zst':
                 dctx = zstd.ZstdDecompressor()
@@ -1440,41 +2237,42 @@ JSON Output:
                 with open(filepath, 'r', encoding='ISO-8859-1') as f:
                     return f.read()
             except Exception as e:
-                log_statement(loglevel=str("error"), logstatement=str(f"Failed to read file {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to read file {filepath}: {e}", main_logger=__file__, exc_info=True)
                 self.repo.update_entry(filepath, status='error', error_message=f"File read failed: {e}")
                 return None
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to read content from {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to read content from {filepath}: {e}", main_logger=__file__, exc_info=True)
             raise # Re-raise to be caught by _process_file
         except FileNotFoundError:
-            log_statement(loglevel=str("error"), logstatement=str(f"File not found during read: {filepath}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::File not found during read: {filepath}", main_logger=__file__, exc_info=True)
             return None
         except IsADirectoryError:
-            log_statement(loglevel=str("error"), logstatement=str(f"Expected file but found directory: {filepath}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Expected file but found directory: {filepath}", main_logger=__file__, exc_info=True)
             return None
         except zstd.ZstdError as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Zstandard decompression failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Zstandard decompression failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             return None
         except UnicodeDecodeError as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Unicode decoding failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unicode decoding failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             return None
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Unexpected error reading {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected error reading {filepath}: {e}", main_logger=__file__, exc_info=True)
             return None
 
-    def _ensure_repo_exists(self, filepath: Path, header: List[str]):
+    @staticmethod
+    def _ensure_repo_exists(filepath: Path, header: List[str]):
         """Creates the repository file with a header if it doesn't exist."""
         if not filepath.exists():
-            log_statement(loglevel=str("info"), logstatement=str(f"Repository file not found at '{filepath}'. Initializing..."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Repository file not found at '{filepath}'. Initializing...", main_logger=__file__)
             try:
                 # Write header to a new compressed file
                 def header_gen():
                     yield ','.join(header) # CSV header line
 
                 stream_compress_lines(str(filepath), header_gen())
-                log_statement(loglevel=str("info"), logstatement=str(f"Initialized repository file: {filepath}"), main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::Initialized repository file: {filepath}", main_logger=__file__)
             except Exception as e:
-                log_statement(loglevel=str("critical"), logstatement=str(f"Failed to initialize repository file '{filepath}': {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='critical', logstatement=f"{LOG_INS}::Failed to initialize repository file '{filepath}': {e}", main_logger=__file__, exc_info=True)
                 raise
 
     def _get_next_designation(self) -> int:
@@ -1494,16 +2292,16 @@ JSON Output:
                     if designation > max_designation:
                         max_designation = designation
                 except (ValueError, TypeError):
-                     log_statement(loglevel=str("warning"), logstatement=str(f"Skipping row {i+1}: Invalid designation number in row: {row}"), main_logger=str(__name__))
+                     log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Skipping row {i+1}: Invalid designation number in row: {row}", main_logger=__file__)
                      continue # Skip rows with invalid numbers
             return max_designation + 1
         except FileNotFoundError:
-            log_statement(loglevel=str("warning"), logstatement=str(f"Repository file '{self.repo_filepath}' not found while getting next designation. Starting from 1."), main_logger=str(__name__))
+            log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Repository file '{self.repo_filepath}' not found while getting next designation. Starting from 1.", main_logger=__file__)
             return 1
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Error reading repository to find next designation: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error reading repository to find next designation: {e}", main_logger=__file__, exc_info=True)
             # Fallback or re-raise depending on desired robustness
-            log_statement(loglevel=str("warning"), logstatement=str("Defaulting next designation to 1 due to error."), main_logger=str(__name__))
+            log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Defaulting next designation to 1 due to error.", main_logger=__file__)
             return 1
 
     def _load_existing_hashes(self) -> Dict[str, int]:
@@ -1521,10 +2319,10 @@ JSON Output:
                         if data_hash not in hashes:
                              hashes[data_hash] = int(designation)
                     except ValueError:
-                        log_statement(loglevel=str("warning"), logstatement=str(f"Invalid designation '{designation}' found for hash '{data_hash}'"), main_logger=str(__name__))
+                        log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Invalid designation '{designation}' found for hash '{data_hash}'", main_logger=__file__)
             return hashes
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Error loading existing hashes from repository: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error loading existing hashes from repository: {e}", main_logger=__file__, exc_info=True)
             return {} # Return empty on error
 
     def read_repo_stream(self, filepath: Optional[Path] = None) -> Generator[Dict[str, str], None, None]:
@@ -1534,7 +2332,7 @@ JSON Output:
         """
         target_filepath = filepath or self.repo_filepath
         if not target_filepath.exists():
-            log_statement(loglevel=str("warning"), logstatement=str(f"Attempted to read non-existent repository: {target_filepath}"), main_logger=str(__name__))
+            log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Attempted to read non-existent repository: {target_filepath}", main_logger=__file__)
             return # Yield nothing
 
         header = []
@@ -1545,7 +2343,7 @@ JSON Output:
                 header_line = next(line_generator)
                 header = [h.strip() for h in header_line.split(',')]
             except StopIteration:
-                 log_statement(loglevel=str("warning"), logstatement=str(f"Repository file is empty: {target_filepath}"), main_logger=str(__name__))
+                 log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Repository file is empty: {target_filepath}", main_logger=__file__)
                  return # Empty file
 
             # Use csv.DictReader on the remaining lines
@@ -1554,21 +2352,21 @@ JSON Output:
                                                                                        # restval handles rows with too few fields
             for row in reader:
                  if len(row) != len(header):
-                     log_statement(loglevel=str("warning"), logstatement=str(f"Malformed row in {target_filepath} (expected {len(header)} fields, got {len(row)}): {row}"), main_logger=str(__name__))
+                     log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Malformed row in {target_filepath} (expected {len(header)} fields, got {len(row)}): {row}", main_logger=__file__)
                      # Optionally yield a partial dict or skip
                      # yield row # Yields what was parsed
                      continue # Skip malformed row
                  yield row
 
         except FileNotFoundError:
-            log_statement(loglevel=str("error"), logstatement=str(f"Repository file not found during streaming read: {target_filepath}"), main_logger=str(__name__))
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Repository file not found during streaming read: {target_filepath}", main_logger=__file__)
             # Or re-raise depending on desired behavior
         except zstd.ZstdError as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Zstd decompression error reading {target_filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Zstd decompression error reading {target_filepath}: {e}", main_logger=__file__, exc_info=True)
         except csv.Error as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"CSV parsing error reading {target_filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::CSV parsing error reading {target_filepath}: {e}", main_logger=__file__, exc_info=True)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Unexpected error reading repository stream {target_filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected error reading repository stream {target_filepath}: {e}", main_logger=__file__, exc_info=True)
 
     def _append_repo_stream(self, filepath: Path, rows_generator: Generator[Dict[str, str], None, None], header: List[str]):
         """
@@ -1612,10 +2410,10 @@ JSON Output:
 
             # Replace original file with temp file
             shutil.move(str(temp_filepath), str(filepath))
-            log_statement(loglevel=str("info"), logstatement=str(f"Appended rows to repository: {filepath}"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Appended rows to repository: {filepath}", main_logger=__file__)
 
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to append rows to repository '{filepath}': {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to append rows to repository '{filepath}': {e}", main_logger=__file__, exc_info=True)
             # Clean up temp file if it exists
             if temp_filepath.exists():
                 try:
@@ -1639,15 +2437,15 @@ JSON Output:
             abs_folder_path = Path(folder_path).resolve()
             if not abs_folder_path.is_dir():
                 # Use custom log statement
-                log_statement(loglevel='error', logstatement=str(f"Folder not found or is not a directory: {abs_folder_path}"), main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Folder not found or is not a directory: {abs_folder_path}", main_logger=__file__)
                 return
         except Exception as e:
             # Use custom log statement
-            log_statement(loglevel='error', logstatement=str(f"Error resolving folder path '{folder_path}': {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error resolving folder path '{folder_path}': {e}", main_logger=__file__, exc_info=True)
             return
 
         # Use custom log statement
-        log_statement(loglevel='info', logstatement=str(f"Scanning folder: {abs_folder_path}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Scanning folder: {abs_folder_path}", main_logger=__file__)
         new_files_to_add = []
         processed_count = 0
         added_count = 0
@@ -1660,11 +2458,11 @@ JSON Output:
         try:
             existing_paths = {row.get(COL_FILEPATH) for row in self.read_repo_stream() if row.get(COL_FILEPATH)}
             # Use custom log statement
-            log_statement(loglevel='debug', logstatement=str(f"Loaded {len(existing_paths)} existing file paths from repository."), main_logger=str(__name__))
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Loaded {len(existing_paths)} existing file paths from repository.", main_logger=__file__)
         except Exception as e:
             # Use custom log statement
-            log_statement(loglevel='error', logstatement=str(f"Failed to load existing paths from repository: {e}"), main_logger=str(__name__), exc_info=True)
-            log_statement(loglevel='warning', logstatement=str("Proceeding without check for existing paths. Duplicates might be added."), main_logger=str(__name__))
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to load existing paths from repository: {e}", main_logger=__file__, exc_info=True)
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Proceeding without check for existing paths. Duplicates might be added.", main_logger=__file__)
             existing_paths = set() # Continue with an empty set
 
         # Use rglob for recursive iteration
@@ -1678,14 +2476,14 @@ JSON Output:
 
                     if file_path_str in existing_paths:
                         # Use custom log statement
-                        log_statement(loglevel='debug', logstatement=str(f"Skipping already tracked file path: {file_path_str}"), main_logger=str(__name__))
+                        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Skipping already tracked file path: {file_path_str}", main_logger=__file__)
                         skipped_count += 1
                         continue
 
                     # Check for supported file types
                     if file_ext not in ACCEPTED_FILE_TYPES:
                         # Use custom log statement
-                        log_statement(loglevel='debug', logstatement=str(f"Skipping unsupported file type '{file_ext}': {file_path_str}"), main_logger=str(__name__))
+                        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Skipping unsupported file type '{file_ext}': {file_path_str}", main_logger=__file__)
                         skipped_count += 1
                         continue
 
@@ -1693,7 +2491,7 @@ JSON Output:
                     # TODO: Implement robust archive handling (extraction) if needed.
                     if file_ext in ['.zip', '.zst', '.zstd']:
                         # Use custom log statement
-                        log_statement(loglevel='warning', logstatement=str(f"Archive file found: {file_path_str}. Treating as single compressed file. Extraction logic not implemented."), main_logger=str(__name__))
+                        log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Archive file found: {file_path_str}. Treating as single compressed file. Extraction logic not implemented.", main_logger=__file__)
                         is_compressed_original = 'Y' # The archive file itself
                     else:
                         # Simple assumption: non-archive files are not compressed unless logic added here
@@ -1707,8 +2505,8 @@ JSON Output:
                         mod_time_ts = stat.st_mtime
                         acc_time_ts = stat.st_atime
                         # Format timestamps as ISO UTC strings
-                        mod_time_iso = datetime.datetime.fromtimestamp(mod_time_ts, tz=timezone.utc).isoformat()
-                        acc_time_iso = datetime.datetime.fromtimestamp(acc_time_ts, tz=timezone.utc).isoformat()
+                        mod_time_iso = dt.fromtimestamp(mod_time_ts, tz=timezone.utc).isoformat()
+                        acc_time_iso = dt.fromtimestamp(acc_time_ts, tz=timezone.utc).isoformat()
 
                         # Generate hashes
                         # Ensure hash functions handle errors and return empty string or None on failure
@@ -1721,7 +2519,7 @@ JSON Output:
                         # Check hash generation results
                         if not hashed_path:
                             # Use custom log statement
-                            log_statement(loglevel='error', logstatement=str(f"Failed to generate required filepath hash for: {file_path_str}. Marking as Error."), main_logger=str(__name__))
+                            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to generate required filepath hash for: {file_path_str}. Marking as Error.", main_logger=__file__)
                             current_status = STATUS_ERROR
                             error_count += 1
                             # Skip adding? Or add with Error status? Let's add with Error status.
@@ -1729,7 +2527,7 @@ JSON Output:
 
                         if not data_hash and current_status != STATUS_ERROR:
                             # Use custom log statement
-                            log_statement(loglevel='error', logstatement=str(f"Failed to generate required data hash for: {file_path_str}. Marking as Error."), main_logger=str(__name__))
+                            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to generate required data hash for: {file_path_str}. Marking as Error.", main_logger=__file__)
                             current_status = STATUS_ERROR
                             error_count += 1
                             # No valid data hash means we cannot check for copies effectively
@@ -1739,7 +2537,7 @@ JSON Output:
                             is_copy = 'Y'
                             original_designation = self._data_hashes[data_hash]
                             # Use custom log statement
-                            log_statement(loglevel='info', logstatement=str(f"Detected content copy (Data Hash: {data_hash[:8]}...) for: {file_path_str} - Matches Designation: {original_designation}"), main_logger=str(__name__))
+                            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Detected content copy (Data Hash: {data_hash[:8]}...) for: {file_path_str} - Matches Designation: {original_designation}", main_logger=__file__)
                         elif data_hash and current_status != STATUS_ERROR:
                             # If not a copy and hash is valid, add hash to our in-memory dict for this session
                             # Associate it with the *next* designation number this file will get
@@ -1763,38 +2561,38 @@ JSON Output:
                         added_count += 1
                         existing_paths.add(file_path_str) # Track path as added in this run
                         # Use custom log statement
-                        log_statement(loglevel='debug', logstatement=str(f"Prepared file for repository addition (Status: {current_status}): {file_path_str}"), main_logger=str(__name__))
+                        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Prepared file for repository addition (Status: {current_status}): {file_path_str}", main_logger=__file__)
 
                     except OSError as e:
                         # Use custom log statement
-                        log_statement(loglevel='error', logstatement=str(f"OS Error accessing metadata/hashes for {file_path_str}: {e}"), main_logger=str(__name__))
+                        log_statement(loglevel='error', logstatement=f"{LOG_INS}::OS Error accessing metadata/hashes for {file_path_str}: {e}", main_logger=__file__)
                         error_count += 1
                         # Optionally add an entry with STATUS_ERROR here? For now, we skip.
                     except Exception as e:
                         # Use custom log statement (including exc_info for unexpected errors)
-                        log_statement(loglevel='error', logstatement=str(f"Unexpected error processing file {file_path_str}: {e}"), main_logger=str(__name__), exc_info=True)
+                        log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected error processing file {file_path_str}: {e}", main_logger=__file__, exc_info=True)
                         error_count += 1
                         # Optionally add an entry with STATUS_ERROR here? For now, we skip.
 
                     # Log progress periodically
                     if processed_count % 500 == 0:
                         # Use custom log statement
-                        log_statement(loglevel='info', logstatement=str(f"Scanned {processed_count} files so far..."), main_logger=str(__name__))
+                        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Scanned {processed_count} files so far...", main_logger=__file__)
 
         except PermissionError as e:
             # Use custom log statement
-            log_statement(loglevel='error', logstatement=str(f"Permission error scanning folder '{abs_folder_path}': {e}. Check read permissions."), main_logger=str(__name__))
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Permission error scanning folder '{abs_folder_path}': {e}. Check read permissions.", main_logger=__file__)
             error_count += 1 # Count this as an error for the summary
         except Exception as e:
             # Use custom log statement
-            log_statement(loglevel='error', logstatement=str(f"Unexpected error during folder scan of '{abs_folder_path}': {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected error during folder scan of '{abs_folder_path}': {e}", main_logger=__file__, exc_info=True)
             error_count += 1 # Count this as an error
 
 
         # --- Append all new files found in this run ---
         if new_files_to_add:
             # Use custom log statement
-            log_statement(loglevel='info', logstatement=str(f"Scan found {len(new_files_to_add)} new file entries to add to the repository."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Scan found {len(new_files_to_add)} new file entries to add to the repository.", main_logger=__file__)
             try:
                 # Define the generator function locally to pass to the append stream method
                 def row_generator():
@@ -1805,18 +2603,18 @@ JSON Output:
                 # Update the next designation number *after* successful append
                 self._next_designation += len(new_files_to_add)
                 # Use custom log statement
-                log_statement(loglevel='info', logstatement=str(f"Successfully appended {len(new_files_to_add)} entries to {self.repo_filepath.name}"), main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::Successfully appended {len(new_files_to_add)} entries to {self.repo_filepath.name}", main_logger=__file__)
             except Exception as e:
                 # Use custom log statement
-                log_statement(loglevel='error', logstatement=str(f"Failed to append batch of new files to repository: {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to append batch of new files to repository: {e}", main_logger=__file__, exc_info=True)
                 # Note: _next_designation and _data_hashes might be inconsistent if append fails here.
                 # Consider adding logic to handle this potential inconsistency if critical.
         else:
             # Use custom log statement
-            log_statement(loglevel='info', logstatement=str("No new files found in the specified folder to add to the repository."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::No new files found in the specified folder to add to the repository.", main_logger=__file__)
 
         # Use custom log statement for summary
-        log_statement(loglevel='info', logstatement=str(f"Folder scan complete. Files Processed: {processed_count}, Entries Added: {added_count}, Paths Skipped (already tracked/unsupported): {skipped_count}, Errors during scan/processing: {error_count}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Folder scan complete. Files Processed: {processed_count}, Entries Added: {added_count}, Paths Skipped (already tracked/unsupported): {skipped_count}, Errors during scan/processing: {error_count}", main_logger=__file__)
 
     def remove_folder(self, folder_path: str):
         """
@@ -1825,7 +2623,7 @@ JSON Output:
         Rule: 7.1.B
         """
         abs_folder_path = str(Path(folder_path).resolve())
-        log_statement(loglevel=str("warning"), logstatement=str(f"Removing entries for folder and subfolders: {abs_folder_path}"), main_logger=str(__name__))
+        log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Removing entries for folder and subfolders: {abs_folder_path}", main_logger=__file__)
 
         rows_to_keep = []
         removed_count = 0
@@ -1835,7 +2633,7 @@ JSON Output:
             for row in self.read_repo_stream():
                  file_path = row.get(COL_FILEPATH)
                  if file_path and file_path.startswith(abs_folder_path):
-                      log_statement(loglevel=str("debug"), logstatement=str(f"Marking for removal: {file_path} (Designation: {row.get(COL_DESIGNATION)})"), main_logger=str(__name__))
+                      log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Marking for removal: {file_path} (Designation: {row.get(COL_DESIGNATION)})", main_logger=__file__)
                       removed_count += 1
                  else:
                      # Keep header row and non-matching rows
@@ -1873,15 +2671,15 @@ JSON Output:
                 stream_compress_lines(str(temp_filepath), (line for line in keep_generator() if line))
                 shutil.move(str(temp_filepath), str(self.repo_filepath))
 
-                log_statement(loglevel=str("info"), logstatement=str(f"Removed {removed_count} entries associated with folder: {abs_folder_path}"), main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::Removed {removed_count} entries associated with folder: {abs_folder_path}", main_logger=__file__)
                 # Reload internal state as designations/hashes might have changed if we renumbered
                 self._next_designation = self._get_next_designation()
                 self._data_hashes = self._load_existing_hashes()
             else:
-                log_statement(loglevel=str("info"), logstatement=str(f"No entries found for folder: {abs_folder_path}"), main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::No entries found for folder: {abs_folder_path}", main_logger=__file__)
 
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to remove folder entries from repository: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to remove folder entries from repository: {e}", main_logger=__file__, exc_info=True)
             # State might be inconsistent, consider recovery or warning user
 
     def update_status(self, designation: int, new_status: str, target_repo_path: Optional[Path] = None):
@@ -1891,10 +2689,10 @@ JSON Output:
         """
         repo_path = target_repo_path or self.repo_filepath
         if not repo_path.exists():
-             log_statement(loglevel=str("error"), logstatement=str(f"Cannot update status. Repository file not found: {repo_path}"), main_logger=str(__name__))
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}::Cannot update status. Repository file not found: {repo_path}", main_logger=__file__)
              return False
 
-        log_statement(loglevel=str("debug"), logstatement=str(f"Attempting to update status to '{new_status}' for designation {designation} in {repo_path.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Attempting to update status to '{new_status}' for designation {designation} in {repo_path.name}", main_logger=__file__)
         updated = False
         rows_to_write = []
 
@@ -1904,17 +2702,17 @@ JSON Output:
                 try:
                     if current_designation_str and int(current_designation_str) == designation:
                         if row.get(COL_STATUS) != new_status:
-                            log_statement(loglevel=str("info"), logstatement=str(f"Updating status for Designation {designation} from '{row.get(COL_STATUS)}' to '{new_status}' in {repo_path.name}"), main_logger=str(__name__))
+                            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Updating status for Designation {designation} from '{row.get(COL_STATUS)}' to '{new_status}' in {repo_path.name}", main_logger=__file__)
                             row[COL_STATUS] = new_status
                             updated = True
                         else:
-                             log_statement(loglevel=str("debug"), logstatement=str(f"Status for Designation {designation} is already '{new_status}' in {repo_path.name}"), main_logger=str(__name__))
+                             log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Status for Designation {designation} is already '{new_status}' in {repo_path.name}", main_logger=__file__)
                              # Keep row as is, no change needed
                     # Keep all rows (modified or not) to rewrite the file
                     rows_to_write.append(row)
 
                 except (ValueError, TypeError):
-                     log_statement(loglevel=str("warning"), logstatement=str(f"Skipping row due to invalid designation: {row}"), main_logger=str(__name__))
+                     log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Skipping row due to invalid designation: {row}", main_logger=__file__)
                      rows_to_write.append(row) # Keep malformed row? Or discard?
 
             if updated:
@@ -1933,14 +2731,14 @@ JSON Output:
 
                 stream_compress_lines(str(temp_filepath), (line for line in rewrite_generator() if line))
                 shutil.move(str(temp_filepath), str(repo_path))
-                log_statement(loglevel=str("debug"), logstatement=str(f"Successfully updated status for designation {designation} in {repo_path.name}"), main_logger=str(__name__))
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Successfully updated status for designation {designation} in {repo_path.name}", main_logger=__file__)
                 return True
             else:
-                 log_statement(loglevel=str("debug"), logstatement=str(f"No status update needed or designation {designation} not found in {repo_path.name}"), main_logger=str(__name__))
+                 log_statement(loglevel='debug', logstatement=f"{LOG_INS}::No status update needed or designation {designation} not found in {repo_path.name}", main_logger=__file__)
                  return False # Return False if no update occurred
 
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to update status for designation {designation} in {repo_path.name}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to update status for designation {designation} in {repo_path.name}: {e}", main_logger=__file__, exc_info=True)
             return False
 
     def process_data_list(self):
@@ -1950,7 +2748,7 @@ JSON Output:
         and updates status to 'Processed' (P).
         Rule: 7.1.C
         """
-        log_statement(loglevel=str("info"), logstatement=str("Starting data processing pipeline..."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Starting data processing pipeline...", main_logger=__file__)
         processed_count = 0
         error_count = 0
         output_base = Path(OUTPUT_DIR_BASE)
@@ -1963,14 +2761,14 @@ JSON Output:
                  if row.get(COL_STATUS) == STATUS_LOADED:
                      files_to_process.append(row)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to read repository to find files for processing: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to read repository to find files for processing: {e}", main_logger=__file__, exc_info=True)
             return # Cannot proceed
 
         if not files_to_process:
-            log_statement(loglevel=str("info"), logstatement=str("No files found with status 'Loaded' to process."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::No files found with status 'Loaded' to process.", main_logger=__file__)
             return
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Found {len(files_to_process)} files to process."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Found {len(files_to_process)} files to process.", main_logger=__file__)
 
         for row in files_to_process:
             designation = int(row.get(COL_DESIGNATION, -1))
@@ -1978,12 +2776,12 @@ JSON Output:
             filetype = row.get(COL_FILETYPE)
 
             if designation == -1 or not filepath_str:
-                log_statement(loglevel=str("warning"), logstatement=str(f"Skipping invalid row during processing: {row}"), main_logger=str(__name__))
+                log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Skipping invalid row during processing: {row}", main_logger=__file__)
                 continue
 
             input_path = Path(filepath_str)
             if not input_path.exists():
-                 log_statement(loglevel=str("error"), logstatement=str(f"File listed in repository not found: {filepath_str}. Setting status to Error."), main_logger=str(__name__))
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}::File listed in repository not found: {filepath_str}. Setting status to Error.", main_logger=__file__)
                  self.update_status(designation, STATUS_ERROR)
                  error_count += 1
                  continue
@@ -1995,7 +2793,7 @@ JSON Output:
             output_filename = input_path.stem + PROCESSED_EXT + ".zst" # Add .proc and .zst extension
             output_filepath = output_subpath / output_filename
 
-            log_statement(loglevel=str("info"), logstatement=str(f"Processing Designation {designation}: {filepath_str} -> {output_filepath}"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Processing Designation {designation}: {filepath_str} -> {output_filepath}", main_logger=__file__)
 
             try:
                 # --- Actual Processing Logic ---
@@ -2035,11 +2833,11 @@ JSON Output:
                     #                     yield processed_line
                     #                     line_count += 1
                     else:
-                         log_statement(loglevel=str("warning"), logstatement=str(f"Processing logic for file type {filetype} not implemented yet. Skipping content processing."), main_logger=str(__name__))
+                         log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Processing logic for file type {filetype} not implemented yet. Skipping content processing.", main_logger=__file__)
                          # yield "" # Yield nothing or handle differently
                          raise NotImplementedError(f"Processing for {filetype} not implemented.")
 
-                    log_statement(loglevel=str("debug"), logstatement=str(f"Processed {line_count} lines/units from {filepath_str}"), main_logger=str(__name__))
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Processed {line_count} lines/units from {filepath_str}", main_logger=__file__)
 
 
                 # Stream compressed output
@@ -2048,23 +2846,23 @@ JSON Output:
                 # --- Update Status ---
                 if self.update_status(designation, STATUS_PROCESSED):
                     processed_count += 1
-                    log_statement(loglevel=str("info"), logstatement=str(f"Successfully processed and updated status for Designation {designation}"), main_logger=str(__name__))
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS}::Successfully processed and updated status for Designation {designation}", main_logger=__file__)
                     # TODO: Add entry to processed_repository.csv.zst (similar _append_repo_stream logic)
                 else:
-                    log_statement(loglevel=str("error"), logstatement=str(f"Processed Designation {designation} but FAILED to update status in repository."), main_logger=str(__name__))
+                    log_statement(loglevel='error', logstatement=f"{LOG_INS}::Processed Designation {designation} but FAILED to update status in repository.", main_logger=__file__)
                     error_count += 1
                     # Consider cleanup of the generated .proc.zst file?
 
             except NotImplementedError as e:
-                 log_statement(loglevel=str("error"), logstatement=str(f"Processing failed for Designation {designation} ({filepath_str}): {e}"), main_logger=str(__name__))
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}::Processing failed for Designation {designation} ({filepath_str}): {e}", main_logger=__file__)
                  self.update_status(designation, STATUS_ERROR)
                  error_count += 1
             except FileNotFoundError:
-                 log_statement(loglevel=str("error"), logstatement=str(f"Input file disappeared during processing: {filepath_str}. Setting status to Error."), main_logger=str(__name__))
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}::Input file disappeared during processing: {filepath_str}. Setting status to Error.", main_logger=__file__)
                  self.update_status(designation, STATUS_ERROR)
                  error_count += 1
             except Exception as e:
-                log_statement(loglevel=str("error"), logstatement=str(f"Error processing Designation {designation} ({filepath_str}): {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error processing Designation {designation} ({filepath_str}): {e}", main_logger=__file__, exc_info=True)
                 self.update_status(designation, STATUS_ERROR)
                 error_count += 1
                 # Clean up potentially corrupted output file
@@ -2072,7 +2870,7 @@ JSON Output:
                     try: output_filepath.unlink()
                     except OSError: pass
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Data processing finished. Processed successfully: {processed_count}, Errors: {error_count}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Data processing finished. Processed successfully: {processed_count}, Errors: {error_count}", main_logger=__file__)
 
     def tokenize_processed_data(self):
         """
@@ -2082,7 +2880,7 @@ JSON Output:
         and updates status to 'Tokenized' (T).
         Rule: 7.1.D
         """
-        log_statement(loglevel=str("info"), logstatement=str("Starting tokenization pipeline..."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Starting tokenization pipeline...", main_logger=__file__)
         tokenized_count = 0
         error_count = 0
         output_base = Path(OUTPUT_DIR_BASE) # Base for mirrored structure
@@ -2094,14 +2892,14 @@ JSON Output:
                  if row.get(COL_STATUS) == STATUS_PROCESSED:
                      files_to_tokenize.append(row)
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to read repository to find files for tokenization: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to read repository to find files for tokenization: {e}", main_logger=__file__, exc_info=True)
             return # Cannot proceed
 
         if not files_to_tokenize:
-            log_statement(loglevel=str("info"), logstatement=str("No files found with status 'Processed' to tokenize."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::No files found with status 'Processed' to tokenize.", main_logger=__file__)
             return
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Found {len(files_to_tokenize)} processed files to tokenize."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Found {len(files_to_tokenize)} processed files to tokenize.", main_logger=__file__)
 
         # Placeholder: Initialize your tokenizer here
         # tokenizer = YourTokenizerClass() or load_tokenizer_function()
@@ -2114,7 +2912,7 @@ JSON Output:
             original_filepath_str = row.get(COL_FILEPATH)
 
             if designation == -1 or not original_filepath_str:
-                log_statement(loglevel=str("warning"), logstatement=str(f"Skipping invalid row during tokenization: {row}"), main_logger=str(__name__))
+                log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Skipping invalid row during tokenization: {row}", main_logger=__file__)
                 continue
 
             original_path = Path(original_filepath_str)
@@ -2130,12 +2928,12 @@ JSON Output:
             tokenized_filepath = processed_subpath / tokenized_filename # Save in same mirrored dir
 
             if not processed_filepath.exists():
-                log_statement(loglevel=str("error"), logstatement=str(f"Processed file not found for Designation {designation}: {processed_filepath}. Setting status to Error."), main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Processed file not found for Designation {designation}: {processed_filepath}. Setting status to Error.", main_logger=__file__)
                 self.update_status(designation, STATUS_ERROR)
                 error_count += 1
                 continue
 
-            log_statement(loglevel=str("info"), logstatement=str(f"Tokenizing Designation {designation}: {processed_filepath} -> {tokenized_filepath}"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Tokenizing Designation {designation}: {processed_filepath} -> {tokenized_filepath}", main_logger=__file__)
 
             try:
                 # --- Tokenization Logic ---
@@ -2149,7 +2947,7 @@ JSON Output:
                          if tokenized_output: # Only yield if tokenization produced output
                              yield tokenized_output
                              line_count +=1
-                    log_statement(loglevel=str("debug"), logstatement=str(f"Tokenized {line_count} lines/units from {processed_filepath}"), main_logger=str(__name__))
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Tokenized {line_count} lines/units from {processed_filepath}", main_logger=__file__)
 
                 # Stream compressed output for tokenized data
                 stream_compress_lines(str(tokenized_filepath), tokenized_lines_generator())
@@ -2157,19 +2955,19 @@ JSON Output:
                 # --- Update Status ---
                 if self.update_status(designation, STATUS_TOKENIZED):
                     tokenized_count += 1
-                    log_statement(loglevel=str("info"), logstatement=str(f"Successfully tokenized and updated status for Designation {designation}"), main_logger=str(__name__))
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS}::Successfully tokenized and updated status for Designation {designation}", main_logger=__file__)
                     # TODO: Add entry to tokenized_repository.csv.zst
                 else:
-                    log_statement(loglevel=str("error"), logstatement=str(f"Tokenized Designation {designation} but FAILED to update status in repository."), main_logger=str(__name__))
+                    log_statement(loglevel='error', logstatement=f"{LOG_INS}::Tokenized Designation {designation} but FAILED to update status in repository.", main_logger=__file__)
                     error_count += 1
                     # Consider cleanup?
 
             except FileNotFoundError: # Should be caught earlier, but just in case
-                 log_statement(loglevel=str("error"), logstatement=str(f"Processed file disappeared during tokenization: {processed_filepath}. Setting status to Error."), main_logger=str(__name__))
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}::Processed file disappeared during tokenization: {processed_filepath}. Setting status to Error.", main_logger=__file__)
                  self.update_status(designation, STATUS_ERROR)
                  error_count += 1
             except Exception as e:
-                log_statement(loglevel=str("error"), logstatement=str(f"Error tokenizing Designation {designation} ({processed_filepath}): {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error tokenizing Designation {designation} ({processed_filepath}): {e}", main_logger=__file__, exc_info=True)
                 self.update_status(designation, STATUS_ERROR)
                 error_count += 1
                 # Clean up potentially corrupted output file
@@ -2177,7 +2975,7 @@ JSON Output:
                     try: tokenized_filepath.unlink()
                     except OSError: pass
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Tokenization finished. Tokenized successfully: {tokenized_count}, Errors: {error_count}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Tokenization finished. Tokenized successfully: {tokenized_count}, Errors: {error_count}", main_logger=__file__)
 
     # Placeholder for other methods like creating the DataLoader file (Rule 7.1.E)
     def create_dataloader_file(self, output_filename: str = "dataloader_package.zst"):
@@ -2186,7 +2984,7 @@ JSON Output:
         tokenized files into a single compressed file for DataLoader usage.
         Rule: 7.1.E
         """
-        log_statement(loglevel=str("info"), logstatement=str("Starting DataLoader file creation..."), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Starting DataLoader file creation...", main_logger=__file__)
         tokenized_files_info = []
         try:
             # Read the main repo to find tokenized files and their original paths
@@ -2195,11 +2993,11 @@ JSON Output:
                     tokenized_files_info.append(row)
             # Or, preferably, read from a dedicated tokenized_repository.csv.zst if created
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to read repository to find tokenized files: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to read repository to find tokenized files: {e}", main_logger=__file__, exc_info=True)
             return
 
         if not tokenized_files_info:
-             log_statement(loglevel=str("warning"), logstatement=str("No tokenized files found to create DataLoader package."), main_logger=str(__name__))
+             log_statement(loglevel="warning", logstatement=f"{LOG_INS}::No tokenized files found to create DataLoader package.", main_logger=__file__)
              return
 
         output_filepath = self.repo_dir / output_filename
@@ -2235,10 +3033,10 @@ JSON Output:
                      # Add any other relevant metadata from the row
                  })
              else:
-                 log_statement(loglevel=str("warning"), logstatement=str(f"Tokenized file not found for Designation {designation}: {tokenized_full_path}"), main_logger=str(__name__))
+                 log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Tokenized file not found for Designation {designation}: {tokenized_full_path}", main_logger=__file__)
 
         if not metadata:
-             log_statement(loglevel=str("warning"), logstatement=str("No valid tokenized file paths found for metadata."), main_logger=str(__name__))
+             log_statement(loglevel="warning", logstatement=f"{LOG_INS}::No valid tokenized file paths found for metadata.", main_logger=__file__)
              return
 
         try:
@@ -2250,20 +3048,20 @@ JSON Output:
                        # Write JSON incrementally or all at once depending on size
                        json_str = json.dumps(metadata, indent=2)
                        compressor.write(json_str.encode('utf-8'))
-             log_statement(loglevel=str("info"), logstatement=str(f"Created DataLoader metadata file: {output_filepath}"), main_logger=str(__name__))
-             log_statement(loglevel=str("info"), logstatement=str(f"Contained metadata for {len(metadata)} tokenized files."), main_logger=str(__name__))
+             log_statement(loglevel='info', logstatement=f"{LOG_INS}::Created DataLoader metadata file: {output_filepath}", main_logger=__file__)
+             log_statement(loglevel='info', logstatement=f"{LOG_INS}::Contained metadata for {len(metadata)} tokenized files.", main_logger=__file__)
 
         except ImportError:
-             log_statement(loglevel=str("error"), logstatement=str("json module not found. Cannot create JSON metadata file."), main_logger=str(__name__))
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}::json module not found. Cannot create JSON metadata file.", main_logger=__file__)
         except Exception as e:
-             log_statement(loglevel=str("error"), logstatement=str(f"Failed to create DataLoader metadata file '{output_filepath}': {e}"), main_logger=str(__name__), exc_info=True)
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to create DataLoader metadata file '{output_filepath}': {e}", main_logger=__file__, exc_info=True)
              if output_filepath.exists():
                  try: output_filepath.unlink()
                  except OSError: pass
 
     def _compress_file(self, filepath: Path) -> Path:
         """Compresses the file using zstandard."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Compressing file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Compressing file: {filepath.name}", main_logger=__file__)
         try:
             compressed_path = filepath.with_suffix('.zst')
             with open(filepath, 'rb') as f_in:
@@ -2272,16 +3070,16 @@ JSON Output:
                     dctx.copy_stream(f_in, f_out)
             return compressed_path
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to compress file {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to compress file {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"Compression failed: {e}")
             return None
         except FileNotFoundError:
-            log_statement(loglevel=str("error"), logstatement=str(f"File not found during compression: {filepath}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::File not found during compression: {filepath}", main_logger=__file__, exc_info=True)
             return None
     
     def _decompress_file(self, filepath: Path) -> Path:
         """Decompresses the file using zstandard."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Decompressing file: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Decompressing file: {filepath.name}", main_logger=__file__)
         try:
             decompressed_path = filepath.with_suffix('')
             with open(filepath, 'rb') as f_in:
@@ -2290,16 +3088,16 @@ JSON Output:
                     dctx.copy_stream(f_in, f_out)
             return decompressed_path
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to decompress file {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to decompress file {filepath}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(filepath, status='error', error_message=f"Decompression failed: {e}")
             return None
         except FileNotFoundError:
-            log_statement(loglevel=str("error"), logstatement=str(f"File not found during decompression: {filepath}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::File not found during decompression: {filepath}", main_logger=__file__, exc_info=True)
             return None
 
     def _save_processed(self, data, original_path: Path) -> Path | None:
         """Saves processed data to a file, compressing if necessary."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Saving processed data for {original_path.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Saving processed data for {original_path.name}", main_logger=__file__)
         try:
             # Generate a unique filename based on the source file
             original_path = original_path.resolve()
@@ -2321,26 +3119,26 @@ JSON Output:
             save_stem = original_path.stem; suffix = ""; is_numpy = False
             if isinstance(data, (pd.Series, pd.DataFrame)): suffix = ".csv"
             elif isinstance(data, (np.ndarray, cp.ndarray)): suffix = ".npy"; is_numpy = True
-            else: log_statement(loglevel=str("error"), logstatement=str(f"Unsupported save type: {type(data)}"), main_logger=str(__name__)); return None
+            else: log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unsupported save type: {type(data)}", main_logger=__file__); return None
             if COMPRESSION_ENABLED: suffix += ".zst"
             save_path = PROCESSED_DATA_DIR / f"{save_stem}_processed{suffix}"
             if save_path.exists():
-                log_statement(loglevel=str("warning"), logstatement=str(f"Processed file already exists: {save_path}. Overwriting."), main_logger=str(__name__))
+                log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Processed file already exists: {save_path}. Overwriting.", main_logger=__file__)
                 try: save_path.unlink()
-                except OSError: log_statement(loglevel=str("error"), logstatement=str(f"Failed to remove existing processed file: {save_path}"), main_logger=str(__name__), exc_info=True)
+                except OSError: log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to remove existing processed file: {save_path}", main_logger=__file__, exc_info=True)
             # Ensure the directory exists
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             # Prepare data for saving (convert CuPy to NumPy if needed)
             data_to_save = data
             if cp is not np and isinstance(data, cp.ndarray):
-                log_statement(loglevel=str("debug"), logstatement=str("Converting CuPy array to NumPy for saving."), main_logger=str(__name__))
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Converting CuPy array to NumPy for saving.", main_logger=__file__)
                 data_to_save = cp.asnumpy(data)
             elif isinstance(data, (pd.Series, pd.DataFrame)):
                 # Ensure pandas data is ready (no specific conversion needed here unless GPU involved earlier)
                 pass
             elif not isinstance(data, np.ndarray):
-                log_statement(loglevel=str("error"), logstatement=str(f"Unexpected data type for saving: {type(data)}. Cannot save."), main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unexpected data type for saving: {type(data)}. Cannot save.", main_logger=__file__)
                 return None
 
             # Save the processed data
@@ -2360,501 +3158,32 @@ JSON Output:
                     else: # pandas Series or DataFrame
                         data_to_save.to_csv(save_path, index=False, header=isinstance(data_to_save, pd.DataFrame))
 
-                log_statement(loglevel=str("info"), logstatement=str(f"Saved processed file: {save_path}"), main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}::Saved processed file: {save_path}", main_logger=__file__)
                 return save_path
             except Exception as e:
-                log_statement(loglevel=str("error"), logstatement=str(f"Save failed: {save_path}: {e}"), main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Save failed: {save_path}: {e}", main_logger=__file__, exc_info=True)
                 if save_path.exists(): 
                     try: 
                         os.remove(save_path)
                     except OSError: pass
                 return None
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to save processed data for {original_path}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to save processed data for {original_path}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(original_path, status='error', error_message=f"Failed to save processed data: {e}")
             return None
 
     def _save_processed(self, processed_data, source_filepath: Path):
         """Saves processed data to a file, compressing if necessary."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Saving processed data for {source_filepath.name}"), main_logger=str(__name__))
-
-# --- Data Repository ---
-class DataRepository:
-    # Manages a state repository tracking dataset files and their processing status.
-    # Uses Zstandard compression for the repository file.
-    def __init__(self, repo_path: str | Path = None):
-        self.repo_path = Path(repo_path or DataProcessingConfig.REPO_FILE)
-        self.repo_path.parent.mkdir(parents=True, exist_ok=True)
-        self.columns = { # Defined schema
-            'source_filepath': 'str', 'base_dir': 'str', 'status': 'str',
-            'processed_path': 'str', 'tokenized_path': 'str', 'file_size': 'int64',
-            'file_hash': 'str', 'last_modified_scan': 'datetime64[ns, UTC]', # Store UTC
-            'last_updated_repo': 'datetime64[ns, UTC]', 'error_message': 'str'
-        }
-        self.df = self._load_repo()
-        self.lock = Lock()
-        log_statement(loglevel=str("info"), logstatement=str(f"DataRepository initialized. Repo: {self.repo_path}"), main_logger=str(__name__))
-
-    def _load_repo(self) -> pd.DataFrame:
-        # (Load logic similar to previous, ensures UTC for datetimes)
-        if self.repo_path.exists():
-            log_statement(loglevel=str("info"), logstatement=str(f"Loading data repository: {self.repo_path}"), main_logger=str(__name__))
-            try:
-                dctx = zstd.ZstdDecompressor()
-                with open(self.repo_path, 'rb') as ifh:
-                    decompressed_data = dctx.decompress(ifh.read())
-                pdf = pd.read_csv(io.BytesIO(decompressed_data), keep_default_na=False, dtype=str)
-                for col in self.columns:
-                    if col not in pdf.columns: pdf[col] = ''
-                for col, dtype in self.columns.items():
-                    try:
-                        if 'datetime' in dtype:
-                            # Convert columns after loading
-                            df[COL_SIZE] = df[COL_SIZE].astype(np.int64)
-                            # Convert mtime from float/int timestamp to datetime
-                            df[COL_MTIME] = pd.to_datetime(df[COL_MTIME], unit='s')
-                            # Attempt timezone localization, handling potential errors
-                            if compute_backend == 'cudf':
-                                # cuDF approach (if needed and different from pandas)
-                                try:
-                                    # Assuming cuDF requires similar handling or specific methods
-                                    # Example: df[COL_MTIME] = df[COL_MTIME].dt.tz_localize('UTC') # Adjust if cuDF API differs
-                                    # If cuDF handles naive timestamps differently or if errors occur, adapt this block
-                                    log_statement(loglevel='debug', logstatement=f"Attempting timezone handling for cuDF mtime column in {repo_path}", main_logger=str(__name__))
-                                    # If cuDF doesn't have tz_localize or it behaves differently, adjust logic here.
-                                    # For now, assume pandas logic might apply or skip if problematic for cuDF.
-                                    # df[COL_MTIME] = df[COL_MTIME].dt.tz_localize('UTC') # Example
-                                except Exception as e: # Catch broader errors for cuDF if API is uncertain
-                                    log_statement(loglevel='warning',
-                                                logstatement=f"Could not handle timezone for {COL_MTIME} using cuDF in {repo_path}: {e}",
-                                                main_logger=str(__name__))
-
-                            else: # Pandas approach
-                                if pd.__version__ >= '2.0.0':
-                                    # Handle potential already-aware datetime columns (e.g., from older saves)
-                                    if df[COL_MTIME].dt.tz is None:
-                                        try:
-                                            df[COL_MTIME] = df[COL_MTIME].dt.tz_localize('UTC')
-                                        except TypeError as te: # Specifically catch errors like "Already tz-aware"
-                                            log_statement(loglevel='warning',
-                                                        logstatement=f"Could not localize timezone (possibly already aware) for {COL_MTIME} in {repo_path}: {te}",
-                                                        main_logger=str(__name__))
-                                        except Exception as e: # Catch other unexpected localization errors
-                                            log_statement(loglevel='error',
-                                                        logstatement=f"Unexpected error localizing timezone for {COL_MTIME} in {repo_path}: {e}",
-                                                        main_logger=str(__name__))
-                                    else:
-                                        # If already timezone-aware, ensure it's UTC or convert
-                                        try:
-                                            df[COL_MTIME] = df[COL_MTIME].dt.tz_convert('UTC')
-                                        except Exception as e:
-                                            log_statement(loglevel='error',
-                                                        logstatement=f"Error converting existing timezone to UTC for {COL_MTIME} in {repo_path}: {e}",
-                                                        main_logger=str(__name__))
-
-                                else:
-                                    # Older pandas versions might handle this differently
-                                    try:
-                                        df[COL_MTIME] = df[COL_MTIME].dt.tz_localize('UTC')
-                                    except TypeError as te:
-                                        log_statement(loglevel='warning',
-                                                        logstatement=f"Could not localize timezone (possibly already aware) for {COL_MTIME} in {repo_path} (Pandas < 2.0): {te}",
-                                                        main_logger=str(__name__))
-                                    except Exception as e:
-                                        log_statement(loglevel='error',
-                                                        logstatement=f"Unexpected error localizing timezone for {COL_MTIME} in {repo_path} (Pandas < 2.0): {e}",
-                                                        main_logger=str(__name__))
-                            # Ensure required columns exist, add if missing
-                            for col in self.repo_columns:
-                                if col not in df.columns:
-                                    log_statement(loglevel='warning', logstatement=f"Column '{col}' missing in {repo_path}. Adding with default values.", main_logger=str(__name__))
-                                    if col == COL_ERROR:
-                                        df[col] = '' # Or None
-                                    elif col == COL_STATUS:
-                                        df[col] = STATUS_LOADED # Default status for newly added column
-                                    else:
-                                        df[col] = pd.NA # Use appropriate null representation
-
-                            # Select and order columns
-                            df = df[self.repo_columns]
-
-                            log_statement(loglevel='info', logstatement=f"Loaded repository: {repo_path} with {len(df)} entries.", main_logger=str(__name__))
-                            self.df = df
-                        elif dtype == 'str': pdf[col] = pdf[col].fillna('').astype(str)
-                        else: pdf[col] = pdf[col].astype(dtype) # Try direct conversion*
-                    except Exception as e:
-                        log_statement(loglevel=str("error"), logstatement=str(f"Error converting repo column '{col}' to '{dtype}': {e}. Keeping string."), main_logger=str(__name__), exc_info=False)
-                        pdf[col] = pdf[col].astype(str).fillna('')
-                log_statement(loglevel=str("info"), logstatement=str(f"Repository loaded ({len(pdf)} entries)."), main_logger=str(__name__))
-                return pdf
-            except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Repo load failed: {e}. Initializing empty."), main_logger=str(__name__), exc_info=True)
-        else: log_statement(loglevel=str("info"), logstatement=str("No repo found. Initializing empty."), main_logger=str(__name__), exc_info=False)
-        # Return empty DataFrame matching the schema
-        pdf = pd.DataFrame({col: pd.Series(dtype=dtype) for col, dtype in self.columns.items()})
-        # Ensure datetime columns are explicitly UTC
-        for col, dtype in self.columns.items():
-            if 'datetime' in dtype:
-                # Check if the column is timezone-naive
-                if pdf[col].dt.tz is None:
-                    pdf[col] = pdf[col].dt.tz_localize(timezone.utc)
-                elif pdf[col].dt.tz != timezone.utc:
-                    pdf[col] = pdf[col].dt.tz_convert(timezone.utc)
-                else: # Already aware and already UTC, do nothing
-                    pass
-            return pdf
-
-    def save(self):
-        """Saves the repository DataFrame to a compressed CSV file atomically."""
-        if not self.lock: return
-        temp_path = self.repo_path.with_suffix(f'.tmp_{int(time.time())}')
-        log_statement(loglevel=str("debug"), logstatement=str(f"Attempting to save repository to temporary file: {temp_path}"), main_logger=str(__name__))
-        try:
-            with self.lock: # Acquire lock
-                pdf = self.df.copy() # Work on a copy within the lock
-                # Ensure string columns don't contain NaN/NaT before saving
-                for col, dtype in self.columns.items():
-                    if dtype == 'str' and col in pdf.columns: pdf[col] = pdf[col].fillna('').astype(str)
-                    # Handle NaT for datetime if needed (pandas handles it for CSV)
-                    if 'datetime' in dtype and col in pdf.columns: pass # pdf[col] = pdf[col].fillna(pd.NaT) # Ensure NaT, not None
-
-                    # Compress and write using configured level
-                    repo_path = Path(self.repo_file_path)
-                    repo_path.parent.mkdir(parents=True, exist_ok=True)
-                    log_statement(loglevel='info', logstatement=f"Attempting to save repository to {repo_path}...", main_logger=str(__name__))
-
-                    # ---> MODIFICATION START <---
-                    try:
-                        # Use stream compression for potentially large files
-                        cctx = zstd.ZstdCompressor(level=self.compression_level)
-                        with repo_path.open("wb") as f_out:
-                            with cctx.stream_writer(f_out) as writer:
-                                # Ensure mtime is converted back to timestamp float/int for saving if needed
-                                # Or ensure the reader handles datetime objects correctly
-                                # df_to_save = self.df.copy() # Avoid modifying self.df directly if needed
-                                # if pd.api.types.is_datetime64_any_dtype(df_to_save[COL_MTIME]):
-                                #    df_to_save[COL_MTIME] = df_to_save[COL_MTIME].astype(np.int64) // 10**9
-                                # else: handle cases where it might already be int/float
-
-                                # Write directly to the compressed stream
-                                csv_buffer = io.StringIO()
-                                self.df.to_csv(csv_buffer, index=False, encoding='utf-8')
-                                csv_buffer.seek(0)
-                                # Use stream_compress_lines or write buffer directly if appropriate
-                                # writer.write(csv_buffer.getvalue().encode('utf-8')) # Simpler approach
-                                # For line-by-line compression (if stream_compress_lines is designed for it):
-                                for line in csv_buffer:
-                                    writer.write(line.encode('utf-8'))
-
-
-                        log_statement(loglevel='info', logstatement=f"Successfully saved repository ({len(self.df)} entries) to {repo_path}", main_logger=str(__name__))
-
-                    except Exception as e:
-                        log_statement(loglevel='critical', # Use critical as saving repo is vital
-                                    logstatement=f"CRITICAL ERROR saving repository to {repo_path}: {e}",
-                                    main_logger=str(__name__), exc_info=True)
-
-            # Atomic replace (outside lock)
-            os.replace(temp_path, self.repo_path)
-            log_statement(loglevel=str("info"), logstatement=str(f"Repository saved successfully ({len(pdf)} entries) to: {self.repo_path}"), main_logger=str(__name__))
-        except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Repository save failed: {e}"), main_logger=str(__name__), exc_info=True)
-            if temp_path.exists():
-                try: os.remove(temp_path)
-                except OSError: pass
-            log_statement(loglevel=str("error"), logstatement=str(f"Temporary file {temp_path} removed after save failure."), main_logger=str(__name__))
-        finally:
-            # Ensure lock is released even if save fails
-            if self.lock.locked():
-                self.lock.release()
-                log_statement(loglevel=str("debug"), logstatement=str("Repository lock released after save attempt."), main_logger=str(__name__))
-
-    def scan_and_update(self, base_dir: Path):
-        """Recursively scans base_dir, updates repo with new/modified files."""
-        # (Scan logic similar, ensures base_dir is stored, uses UTC timestamps)
-        if not self.lock: return
-        base_dir = base_dir.resolve() # Use absolute path
-        log_statement(loglevel=str("info"), logstatement=str(f"Scanning for files in: {base_dir}"), main_logger=str(__name__))
-        found, processed, skipped, new_files, updated_files = 0, 0, 0, 0, 0
-        base_dir_str = str(base_dir)
-
-        with self.lock: # Lock for reading existing files
-            existing_files = {row['source_filepath']: {'hash': row['file_hash'], 'mtime': row['last_modified_scan']}
-                              for idx, row in self.df.iterrows() if row['source_filepath']}
-
-        files_to_update = {} # Store updates to apply after scan
-    
-        for root, _, files in os.walk(base_dir):
-            current_dir = Path(root)
-            for filename in files:
-                 file_path = current_dir / filename
-                 abs_file_path_str = str(file_path.resolve())
-                 file_ext = file_path.suffix.lower()
-                 if not file_ext or file_ext not in DataProcessingConfig.SCAN_FILE_EXTENSIONS:
-                      if file_ext != '.zst' and not filename.endswith('.tmp'): skipped_count += 1 # Ignore repo/temp files
-                      continue
-                 found += 1
-                 try:
-                     current_stat = file_path.stat()
-                     # Get mtime, make it timezone-aware (use UTC for consistency)
-                     current_mtime = pd.Timestamp(datetime.fromtimestamp(current_stat.st_mtime, tz=timezone.utc))
-                     current_size = current_stat.st_size
-                     existing_info = existing_files.get(abs_file_path_str)
-                     needs_processing = False
-
-                     if existing_info: # Check if modified
-                         # Compare UTC timestamps
-                         if current_mtime > existing_info.get('mtime', pd.Timestamp(0, tz='UTC')):
-                             current_hash = self._calculate_hash(file_path)
-                             if current_hash != existing_info.get('hash'):
-                                 log_statement(loglevel=str("info"), logstatement=str(f"Modified file detected: {file_path.name}"), main_logger=str(__name__))
-                                 needs_processing = True; updated_files += 1
-                             else: # Only mtime changed, update repo mtime but don't re-process
-                                 files_to_update[abs_file_path_str] = {'last_modified_scan': current_mtime}
-                         # else: file is unchanged
-                     else: # New file
-                         log_statement(loglevel=str("info"), logstatement=str(f"New file discovered: {file_path.name}"), main_logger=str(__name__))
-                         needs_processing = True; new_files += 1; needs_update = True
-
-                     if needs_processing:
-                         current_hash = self._calculate_hash(file_path) # Ensure hash is calculated
-                         files_to_update[abs_file_path_str] = {
-                             'base_dir': base_dir_str, # Store the base dir for this scan
-                             'status': 'discovered',
-                             'file_size': current_size,
-                             'file_hash': current_hash,
-                             'last_modified_scan': current_mtime,
-                             'processed_path': '', 'tokenized_path': '', 'error_message': ''
-                         }
-                         processed += 1
-
-                     else:
-                         # File is new
-                         log_statement(loglevel=str("info"), logstatement=str(f"Discovered new file: {file_path.name}"), main_logger=str(__name__))
-                         new_files_count += 1
-
-                     # If new or modified, add/update entry with 'discovered' status
-                     if needs_update:
-                         current_hash = self._calculate_hash(file_path) # Calculate hash if needed
-                         update_data = {
-                             'status': 'discovered',
-                             'file_size': current_size,
-                             'file_hash': current_hash,
-                             'last_modified_scan': current_mtime, # Store file's modification time
-                             'processed_path': '', # Clear old paths on update
-                             'tokenized_path': '',
-                             'error_message': ''
-                         }
-                         self.update_entry(file_path, **update_data)
-                         if existing_info: updated_files_count +=1 # Count as update if it existed before
-                         processed_count += 1
-
-                 except FileNotFoundError:
-                      log_statement(loglevel=str("warning"), logstatement=str(f"File disappeared during scan: {file_path}"), main_logger=str(__name__))
-                      # Optionally remove from repo if needed: self.remove_entry(file_path)
-                      skipped_count += 1
-                 except Exception as e:
-                      log_statement(loglevel=str("error"), logstatement=str(f"Error scanning file {file_path}: {e}"), main_logger=str(__name__), exc_info=True)
-                      # Add/update with error status? Or just skip? Let's skip for scan.
-                      skipped_count += 1
-        # Apply updates to the repository (thread-safe via update_entry)
-        if files_to_update:
-             log_statement(loglevel=str("info"), logstatement=str(f"Applying {len(files_to_update)} repository updates..."), main_logger=str(__name__))
-             # Potential optimization: Batch updates if performance becomes an issue
-             for file_path_str, update_data in files_to_update.items():
-                 self.update_entry(Path(file_path_str), **update_data)
-             self.save() # Save after applying all updates
-
-        log_statement(loglevel=str("info"), logstatement=str(f"Scan complete. Found: {found}, Processed (New/Updated): {processed}, Skipped: {skipped}. (New: {new_files}, Updated: {updated_files})"), main_logger=str(__name__))
-        # Save changes after scan completes
-        self.save()
-        log_statement(loglevel=str("info"), logstatement=str(f"Repository updated with {processed_count} new/modified files."), main_logger=str(__name__))
-
-    def update_entry(self, source_filepath: Path, **kwargs):
-        """Adds or updates an entry using absolute paths. Thread-safe."""
-        if not self.lock: return
-
-        source_filepath_abs_str = str(source_filepath.resolve())
-        update_data = kwargs.copy()
-        update_data['last_updated_repo'] = pd.Timestamp.now(tz=timezone.utc) # Use UTC
-
-        # Ensure paths are absolute strings or empty
-        for key in ['base_dir', 'processed_path', 'tokenized_path']:
-             if key in update_data:
-                 val = update_data[key]
-                 update_data[key] = str(val.resolve()) if isinstance(val, Path) else (str(val) if val else '')
-
-        if 'error_message' in update_data: update_data['error_message'] = str(update_data.get('error_message', ''))[:1024]
-
-        # Ensure timestamp consistency (UTC)
-        for key in ['last_modified_scan', 'last_updated_repo']:
-             if key in update_data:
-                 ts = pd.to_datetime(update_data[key], errors='coerce')
-                 if pd.notna(ts):
-                      if ts.tzinfo is None: update_data[key] = ts.tz_localize(timezone.utc)
-                      elif ts.tzinfo != timezone.utc: update_data[key] = ts.tz_convert(timezone.utc)
-                      else: update_data[key] = ts # Already correct
-                 else: update_data[key] = pd.NaT # Store NaT if conversion fails
-        # Ensure file size is an integer
-        if 'file_size' in update_data:
-             try: update_data['file_size'] = int(update_data['file_size'])
-             except (ValueError, TypeError): update_data['file_size'] = 0
-        # Ensure file hash is a string
-        if 'file_hash' in update_data:
-             update_data['file_hash'] = str(update_data['file_hash'])[:1024]
-        # Ensure status is a string
-        if 'status' in update_data:
-             update_data['status'] = str(update_data['status'])[:1024]
-        # Ensure error message is a string
-        if 'error_message' in update_data:
-             update_data['error_message'] = str(update_data['error_message'])[:1024]
-        # Ensure processed_path and tokenized_path are strings
-        if 'processed_path' in update_data:
-             update_data['processed_path'] = str(update_data['processed_path'])[:1024]
-        if 'tokenized_path' in update_data:
-             update_data['tokenized_path'] = str(update_data['tokenized_path'])[:1024]
-        # Ensure source_filepath is a string
-        if 'source_filepath' in update_data:
-             update_data['source_filepath'] = str(update_data['source_filepath'])[:1024]
-        # Ensure base_dir is a string
-        if 'base_dir' in update_data:
-             update_data['base_dir'] = str(update_data['base_dir'])[:1024]
-        # Ensure all columns are present in the DataFrame
-        for col in self.columns:
-             if col not in self.df.columns:
-                 self.df[col] = pd.Series(dtype=self.columns[col])
-
-        with self.lock:
-            mask = self.df['source_filepath'] == source_filepath_abs_str
-            indices = self.df.index[mask].tolist()
-
-            if indices: # Entry exists, update it
-                idx = indices[0] # Assume unique paths, take first if multiple somehow
-                log_statement(loglevel=str("debug"), logstatement=str(f"Updating repo entry for: {source_filepath.name}"), main_logger=str(__name__))
-                for col, value in update_data.items():
-                    if col in self.df.columns:
-                        try:
-                            target_dtype = self.df[col].dtype
-                            self.df.loc[idx, col] = value # Assign directly (assumes type conversion handled above)
-                            if pd.isna(value):
-                                # Assign appropriate NA based on dtype
-                                value_to_assign = pd.NaT if 'datetime' in str(target_dtype) else (0 if 'int' in str(target_dtype) else '' if target_dtype == object else None)
-                            elif 'datetime' in str(target_dtype) and not isinstance(value, pd.Timestamp):
-                                value_to_assign = pd.Timestamp(value)
-                            elif 'int' in str(target_dtype) and not isinstance(value, (int, np.integer)):
-                                value_to_assign = int(float(value)) # Allow float conversion
-                            elif target_dtype == object or target_dtype == 'string': # Handle string types
-                                value_to_assign = str(value) if value is not None else ''
-                            else:
-                                value_to_assign = value # Assume compatible type
-
-                            self.df.loc[idx, col] = value_to_assign
-                        except Exception as e:
-                            log_statement(loglevel=str("error"), logstatement=str(f"Failed to assign value '{value}' (type {type(value)}) to column '{col}' (dtype {target_dtype}) at index {idx}: {e}. Assigning as string."), main_logger=str(__name__))
-                            self.df.loc[idx, col] = str(value) # Fallback assign as string
-                    else:
-                        log_statement(loglevel=str("warning"), logstatement=str(f"Attempted to update non-existent repo column '{col}'"), main_logger=str(__name__))
-            else: # New entry
-                log_statement(loglevel=str("debug"), logstatement=str(f"Adding new repo entry for: {source_filepath.name}"), main_logger=str(__name__))
-                # Prepare data for new row, ensuring all columns are present
-                new_data = {col: None for col in self.columns} # Start with None for all columns
-                # Fill basic info calculated during scan (should be in kwargs if called from scan)
-                new_data.update({
-                    'source_filepath': source_filepath_abs_str,
-                    'status': 'discovered', # Default status
-                    'file_size': kwargs.get('file_size', 0),
-                    'file_hash': kwargs.get('file_hash', ''),
-                    'last_modified_scan': kwargs.get('last_modified_scan', pd.NaT),
-                    'error_message': ''
-                })
-                # Override with any other provided kwargs
-                new_data.update(kwargs)
-
-                # Create DataFrame for the new row and ensure types before concat
-                new_row_pdf = pd.DataFrame([new_data])
-                for col in self.df.columns:
-                    target_dtype = self.df[col].dtype
-                    try:
-                        if pd.isna(new_row_pdf.loc[0, col]): # Check if value is NaN/NaT/None
-                            if 'datetime' in str(target_dtype): new_row_pdf.loc[0, col] = pd.NaT
-                            elif 'int' in str(target_dtype): new_row_pdf.loc[0, col] = 0
-                            else: new_row_pdf.loc[0, col] = '' # Default NA for strings
-                        elif 'datetime' in target_dtype: new_row_pdf[col] = pd.to_datetime(new_row_pdf[col], errors='coerce').dt.tz_localize(timezone.utc)
-                        elif 'int' in target_dtype: new_row_pdf[col] = pd.to_numeric(new_row_pdf[col], errors='coerce').fillna(0).astype('int64')
-                        elif target_dtype == 'str': new_row_pdf[col] = new_row_pdf[col].astype(str).fillna('')
-                        # Add other specific type handling if necessary
-                        elif target_dtype == object or target_dtype == 'string': new_row_pdf[col] = new_row_pdf[col].astype(str).fillna('')
-                        elif self.df[col].dtype != new_row_pdf[col].dtype: # General type conversion if needed
-                            new_row_pdf[col] = new_row_pdf[col].astype(target_dtype)
-                    except Exception as e:
-                        log_statement(loglevel=str("error"), logstatement=str(f"Error ensuring type for new row column '{col}' (target: {target_dtype}): {e}. Converting to string."), main_logger=str(__name__))
-                        new_row_pdf[col] = new_row_pdf[col].astype(str).fillna('')
-                        # Ensure target column is also string for concat
-                        if self.df[col].dtype != object and self.df[col].dtype != 'string':
-                            self.df[col] = self.df[col].astype(str).fillna('')
-
-                # Concatenate new row
-                self.df = pd.concat([self.df, new_row_pdf[self.df.columns]], ignore_index=True)
-                log_statement(loglevel=str("info"), logstatement=str(f"New entry (' {self.df} ') added for: {source_filepath.name}"), main_logger=str(__name__))
-
-    def get_status(self, source_filepath: Path) -> str | None:
-        """Gets the current status of a file."""
-        if not self.lock:
-             log_statement(loglevel=str("error"), logstatement=str("Repository lock not initialized. Cannot get status."), main_logger=str(__name__))
-             return None
-
-        source_filepath_str = str(source_filepath.resolve())
-        with self.lock:
-             is_cudf = GPU_AVAILABLE and cudf is not None and hasattr(self.df, 'to_pandas')
-             if is_cudf:
-                 entry = self.df[self.df['source_filepath'] == source_filepath_str]
-                 return entry['status'].iloc[0] if not entry.empty else None
-             else: # pandas
-                 entry = self.df[self.df['source_filepath'] == source_filepath_str]
-                 return entry['status'].iloc[0] if not entry.empty else None
-
-    def get_files_by_status(self, status: Union[str, List[str]], base_dir: Optional[Path] = None) -> List[Path]:
-        """Gets absolute source file paths by status, optionally filtered by base_dir."""
-        if not self.lock: return []
-        with self.lock:
-            statuses = [status] if isinstance(status, str) else status
-            mask = self.df['status'].isin(statuses)
-            if base_dir:
-                 base_dir_str = str(base_dir.resolve())
-                 # Filter where source_filepath starts with the base_dir path string
-                 # Assumes base_dir is stored consistently (e.g., always resolved)
-                 mask &= self.df['source_filepath'].str.startswith(base_dir_str)
-            paths = [Path(p) for p in self.df.loc[mask, 'source_filepath'].tolist() if p]
-            return paths
-
-    def get_processed_path(self, source_filepath: Path) -> Path | None:
-        """Gets the absolute processed path for a given absolute source path."""
-        if not self.lock: return None
-        source_filepath_abs_str = str(source_filepath.resolve())
-        with self.lock:
-            entry = self.df[self.df['source_filepath'] == source_filepath_abs_str]
-            processed_path_str = entry['processed_path'].iloc[0] if not entry.empty else None
-            return Path(processed_path_str) if processed_path_str else None
-
-    def _calculate_hash(self, filepath: Path, chunk_size=8192) -> str:
-        """Calculates BLAKE2b hash."""
-        if not filepath.is_file(): return ''
-        h = hashlib.blake2b()
-        try:
-            with open(filepath, 'rb') as f:
-                while chunk := f.read(chunk_size): h.update(chunk)
-            return h.hexdigest()
-        except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Hash calculation failed for {filepath}: {str(e)}"), main_logger=str(__name__), exc_info=False)
-            return ''
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Saving processed data for {source_filepath.name}", main_logger=__file__)
 
 # --- Tokenizer ---
 class Tokenizer:
     """ Loads processed, tokenizes, saves compressed tensors. """
     def __init__(self, max_workers: int | None = None):
-        self.repo = DataRepository()
+        self.repo = DataRepository(repo_path=TOKENIZED_REPO_FILENAME)
         resolved_max_workers = max_workers if max_workers is not None else DataProcessingConfig.MAX_WORKERS
         self.max_workers = max(1, resolved_max_workers)
-        log_statement(loglevel=str("info"), logstatement=str(f"Initializing Tokenizer with max_workers={self.max_workers}"), main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Initializing Tokenizer with max_workers={self.max_workers}", main_logger=__file__)
         self.executor = ProcessPoolExecutor(max_workers=self.max_workers)
         self.device = DEFAULT_DEVICE
         TOKENIZED_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -2864,44 +3193,81 @@ class Tokenizer:
             try: self.executor.shutdown(wait=True);
             except Exception: pass
 
-    def tokenize_all(self, base_dir_filter: Optional[Path] = None, statuses_to_process=('processed',)):
-        """Tokenizes files matching status, optionally filtered by base_dir."""
+    def tokenize_all(self, base_dir_filter: Optional[Path] = None, statuses_to_process=(STATUS_PROCESSED,)): # Use constant STATUS_PROCESSED
+        """Tokenizes files matching status, optionally filtered by base_dir, with progress bar."""
         files_to_tokenize_info = []
-        with self.repo.lock:
-             # Use get_files_by_status which already handles filtering
-             source_paths = self.repo.get_files_by_status(list(statuses_to_process), base_dir=base_dir_filter)
-             # Get corresponding processed paths
-             for src_path in source_paths:
-                 proc_path = self.repo.get_processed_path(src_path)
-                 if proc_path and proc_path.exists(): # Ensure processed file exists
-                     files_to_tokenize_info.append((src_path, proc_path))
-                 elif proc_path:
-                     log_statement(loglevel=str("warning"), logstatement=str(f"Processed path found in repo but file missing: {proc_path}. Skipping tokenization for {src_path.name}."), main_logger=str(__name__))
-                 else:
-                     log_statement(loglevel=str("warning"), logstatement=str(f"No valid processed path found in repo for source: {src_path.name}. Skipping tokenization."), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::tokenize_all called with filter: {base_dir_filter}, statuses: {statuses_to_process}", main_logger=__file__)
 
+        with self.repo.lock:
+             # Get source file paths matching status and optional base_dir filter
+             source_paths = self.repo.get_files_by_status(list(statuses_to_process), base_dir=base_dir_filter)
+
+             if not source_paths:
+                 log_statement(loglevel='info', logstatement=f"{LOG_INS}::No files matching status {statuses_to_process} [in base_dir: {base_dir_filter}] found to tokenize.", main_logger=__file__)
+                 return
+
+             log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Found {len(source_paths)} source files with status {statuses_to_process}. Checking for processed paths...", main_logger=__file__)
+
+             # Get corresponding processed paths efficiently
+             source_paths_str_set = {str(p.resolve()) for p in source_paths}
+             relevant_rows = self.repo.df[self.repo.df[COL_FILEPATH].isin(source_paths_str_set)].copy() # Use .copy()
+
+             for index, row in relevant_rows.iterrows():
+                 src_path_str = row[COL_FILEPATH]
+                 proc_path_str_relative = row['processed_path'] # Path relative to PROCESSED_DATA_DIR
+
+                 if proc_path_str_relative:
+                      # Construct full absolute path to processed file
+                      proc_path = PROCESSED_DATA_DIR / proc_path_str_relative
+                      if proc_path.exists():
+                           files_to_tokenize_info.append((Path(src_path_str), proc_path))
+                      else:
+                           log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Processed path found in repo ({proc_path_str_relative}) but file missing: {proc_path}. Skipping tokenization for {src_path_str}.", main_logger=__file__)
+                           # Optionally set status back to error? self.repo.update_entry(Path(src_path_str), status=STATUS_ERROR, error_message="Processed file missing")
+                 else:
+                      log_statement(loglevel="warning", logstatement=f"{LOG_INS}::No valid processed path found in repo for source: {src_path_str}. Skipping tokenization.", main_logger=__file__)
 
         if not files_to_tokenize_info:
-            log_statement(loglevel=str("info"), logstatement=str(f"No files matching status {statuses_to_process} [in base_dir: {base_dir_filter}] with existing processed files found to tokenize."), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::No existing processed files found for the files matching status {statuses_to_process}.", main_logger=__file__)
             return
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Starting tokenization for {len(files_to_tokenize_info)} files [base_dir: {base_dir_filter}]."), main_logger=str(__name__))
-        # (Executor logic remains the same)
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::Starting tokenization for {len(files_to_tokenize_info)} files [base_dir: {base_dir_filter}].", main_logger=__file__)
+
+        # Use the instance's ProcessPoolExecutor
+        if not hasattr(self, 'executor') or self.executor is None:
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}::Tokenizer executor not initialized. Cannot tokenize.", main_logger=__file__)
+             return
+
         futures = [self.executor.submit(self._tokenize_file, src_path, proc_path)
                    for src_path, proc_path in files_to_tokenize_info]
-        with tqdm(total=len(futures), desc=f"Tokenizing Files [{base_dir_filter.name if base_dir_filter else 'All'}]") as pbar:
-            for future in as_completed(futures):
-                try: future.result()
-                except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Error retrieving result from tokenizer future: {e}"), main_logger=str(__name__), exc_info=True)
-                finally: pbar.update(1)
-        self.repo.save()
-        log_statement(loglevel=str("info"), logstatement=str("File tokenization complete."), main_logger=str(__name__))
 
+        # --- Add tqdm Progress Bar ---
+        pbar_desc = f"Tokenizing [{base_dir_filter.name[:15] if base_dir_filter else 'All'}]" # Shorten name
+        results_tokenized = 0
+        results_error = 0
+        # Iterate over completed futures with tqdm
+        for future in tqdm(as_completed(futures), total=len(futures), desc=pbar_desc, unit="file", leave=True):
+            try:
+                result_path = future.result() # _tokenize_file returns source path on success, None on failure
+                if result_path:
+                    results_tokenized += 1
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Tokenization future completed successfully for: {result_path.name}", main_logger=__file__)
+                else:
+                    results_error += 1
+                    log_statement(loglevel='warning', logstatement=f"{LOG_INS}::Tokenization future returned None (likely failed).", main_logger=__file__)
+            except Exception as e:
+                results_error += 1
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Error retrieving result from tokenizer future: {e}", main_logger=__file__, exc_info=True)
+            # No pbar.update() needed here
+
+        # Optional: Save repository after all tokenization if status updates need saving
+        self.repo.save()
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}::File tokenization stage complete. Successful: {results_tokenized}, Errors: {results_error}.", main_logger=__file__)
 
     def _tokenize_file(self, source_filepath: Path, processed_filepath: Path):
         """Loads processed, converts to tensor, saves compressed."""
         # (Implementation remains same - uses modified load/save)
-        log_statement(loglevel=str("debug"), logstatement=str(f"Tokenizing file: {processed_filepath.name}..."), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Tokenizing file: {processed_filepath.name}...", main_logger=__file__)
         save_path = None
         try:
             self.repo.update_entry(source_filepath, status='tokenizing', error_message='', tokenized_path='')
@@ -2912,10 +3278,10 @@ class Tokenizer:
             save_path = self._save_tokenized(tokenized_tensor, processed_filepath) # Handles compression
             if save_path is None: raise IOError("Save tokenized failed.")
             self.repo.update_entry(source_filepath, status='tokenized', tokenized_path=save_path, error_message='')
-            log_statement(loglevel=str("info"), logstatement=str(f"Tokenized: {processed_filepath.name} -> {save_path.name}"), main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Tokenized: {processed_filepath.name} -> {save_path.name}", main_logger=__file__)
             return source_filepath
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Tokenization failed for {processed_filepath.name}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Tokenization failed for {processed_filepath.name}: {e}", main_logger=__file__, exc_info=True)
             self.repo.update_entry(source_filepath, status='error', error_message=f"{e}")
             if save_path and save_path.exists():
                 try: save_path.unlink()
@@ -2924,9 +3290,9 @@ class Tokenizer:
 
     def _load_processed(self, filepath: Path):
         """Loads compressed or uncompressed processed data (CSV or NPY)."""
-        log_statement(loglevel=str("debug"), logstatement=str(f"Loading processed: {filepath.name}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Loading processed: {filepath.name}", main_logger=__file__)
         if not filepath.exists():
-            log_statement(loglevel=str("error"), logstatement=str(f"Not found: {filepath}"), main_logger=str(__name__))
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Not found: {filepath}", main_logger=__file__)
             return None
         try:
             data = None
@@ -2956,42 +3322,41 @@ class Tokenizer:
                 df = pd.read_csv(file_to_open, header=0, keep_default_na=False)
                 data = df.iloc[:, 0] if df.shape[1] == 1 else df
             else:
-                log_statement(loglevel=str("error"), logstatement=str(f"Cannot load processed: Unknown suffix '{actual_suffix}' for file {filepath.name}"), main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Cannot load processed: Unknown suffix '{actual_suffix}' for file {filepath.name}", main_logger=__file__)
                 return None
 
             # Close the buffer if it was used
             if buffer: buffer.close()
             return data
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Load failed for {filepath}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Load failed for {filepath}: {e}", main_logger=__file__, exc_info=True)
             # Ensure buffer is closed on error too
             if buffer and not buffer.closed: buffer.close()
             return None
 
     def _vectorize(self, data) -> torch.Tensor | None:
         """Converts loaded processed data into a tensor."""
-        # (Implementation remains same - placeholder for text)
-        log_statement(loglevel=str("debug"), logstatement=str(f"Vectorizing data type: {type(data)}"), main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Vectorizing data type: {type(data)}", main_logger=__file__)
         try:
             if isinstance(data, torch.Tensor):
                 return data.to(dtype=torch.float32, device=self.device)
             elif isinstance(data, (np.ndarray, cp.ndarray)):
                 # Convert CuPy array to NumPy before converting to Torch tensor if necessary
                 if cp is not np and isinstance(data, cp.ndarray):
-                    log_statement(loglevel=str("debug"), logstatement=str("Converting CuPy array to NumPy before Torch tensor conversion."), main_logger=str(__name__))
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Converting CuPy array to NumPy before Torch tensor conversion.", main_logger=__file__)
                     data = cp.asnumpy(data)
                 # Ensure data is C-contiguous before creating tensor
                 if not data.flags['C_CONTIGUOUS']:
-                    log_statement(loglevel=str("debug"), logstatement=str("Data is not C-contiguous, making a copy."), main_logger=str(__name__))
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Data is not C-contiguous, making a copy.", main_logger=__file__)
                     data = np.ascontiguousarray(data)
                 return torch.tensor(data, dtype=torch.float32, device=self.device)
             elif isinstance(data, (pd.Series, pd.DataFrame)):
-                log_statement(loglevel=str("warning"), logstatement=str("Vectorizing pandas data - using DUMMY implementation."), main_logger=str(__name__))
+                log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Vectorizing pandas data - using DUMMY implementation.", main_logger=__file__)
                 # Convert pandas data to NumPy first
                 numpy_data = data.to_numpy(dtype=np.float32)
                 # Ensure data is C-contiguous before creating tensor
                 if not numpy_data.flags['C_CONTIGUOUS']:
-                     log_statement(loglevel=str("debug"), logstatement=str("Pandas data (as NumPy) is not C-contiguous, making a copy."), main_logger=str(__name__))
+                     log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Pandas data (as NumPy) is not C-contiguous, making a copy.", main_logger=__file__)
                      numpy_data = np.ascontiguousarray(numpy_data)
                 # Dummy implementation: create zeros based on rows, fixed columns
                 num_rows = numpy_data.shape[0]
@@ -2999,13 +3364,13 @@ class Tokenizer:
                 # If 1D (Series), create (num_rows, 1). If 2D (DataFrame), use original cols or dummy.
                 num_cols = numpy_data.shape[1] if numpy_data.ndim > 1 else 1
                 dummy_cols = 10 # Keep the dummy dimension for now
-                log_statement(loglevel=str("debug"), logstatement=str(f"Creating dummy tensor of shape ({num_rows}, {dummy_cols})"), main_logger=str(__name__))
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Creating dummy tensor of shape ({num_rows}, {dummy_cols})", main_logger=__file__)
                 return torch.zeros((num_rows, dummy_cols), dtype=torch.float32, device=self.device) # Dummy
             else:
-                log_statement(loglevel=str("error"), logstatement=str(f"Unsupported type for vectorization: {type(data)}"), main_logger=str(__name__))
+                log_statement(loglevel='error', logstatement=f"{LOG_INS}::Unsupported type for vectorization: {type(data)}", main_logger=__file__)
                 return None
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Vectorization failed: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Vectorization failed: {e}", main_logger=__file__, exc_info=True)
             return None
 
     def _save_tokenized(self, tensor: torch.Tensor, original_processed_path: Path) -> Path | None:
@@ -3023,13 +3388,13 @@ class Tokenizer:
         else:
              # Fallback if the naming convention isn't strictly followed
              save_stem = original_processed_path.stem.replace('_processed', '')
-             log_statement(loglevel=str("warning"), logstatement=str(f"Processed path '{original_processed_path.name}' did not strictly follow '_processed.npy/csv' pattern. Using stem '{save_stem}'."), main_logger=str(__name__))
+             log_statement(loglevel="warning", logstatement=f"{LOG_INS}::Processed path '{original_processed_path.name}' did not strictly follow '_processed.npy/csv' pattern. Using stem '{save_stem}'.", main_logger=__file__)
 
 
         suffix = ".pt.zst" if COMPRESSION_ENABLED else ".pt"
         save_path = TOKENIZED_DATA_DIR / f"{save_stem}_tokenized{suffix}"
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        log_statement(loglevel=str("debug"), logstatement=str(f"Saving tokenized tensor to: {save_path.name}"), main_logger=str(__name__), exc_info=False)
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Saving tokenized tensor to: {save_path.name}", main_logger=__file__, exc_info=False)
         try:
             # Ensure tensor is on CPU before saving
             tensor_cpu = tensor.cpu()
@@ -3046,14 +3411,14 @@ class Tokenizer:
             else:
                 torch.save(tensor_cpu, save_path)
 
-            log_statement(loglevel=str("info"), logstatement=str(f"Saved tokenized tensor: {save_path}"), main_logger=str(__name__), exc_info=False)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::Saved tokenized tensor: {save_path}", main_logger=__file__, exc_info=False)
             return save_path
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Save tokenized failed for {save_path}: {e}"), main_logger=str(__name__), exc_info=True)
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}::Save tokenized failed for {save_path}: {e}", main_logger=__file__, exc_info=True)
             if save_path.exists():
                 try:
                     save_path.unlink()
-                    log_statement(loglevel=str("debug"), logstatement=str(f"Removed partially saved file: {save_path}"), main_logger=str(__name__), exc_info=False)
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}::Removed partially saved file: {save_path}", main_logger=__file__, exc_info=False)
                 except OSError as unlink_e:
-                     log_statement(loglevel=str("error"), logstatement=str(f"Failed to remove partially saved file {save_path}: {unlink_e}"), main_logger=str(__name__), exc_info=False)
+                     log_statement(loglevel='error', logstatement=f"{LOG_INS}::Failed to remove partially saved file {save_path}: {unlink_e}", main_logger=__file__, exc_info=False)
             return None

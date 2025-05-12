@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 
 # --- Configuration ---
-LOG_LEVEL = logging.DEBUG  # Default root log level (change as needed)
-CONSOLE_LOG_LEVEL = logging.INFO # Level for console output
+LOG_LEVEL = logging.INFO  # Default root log level (change as needed)
+CONSOLE_LOG_LEVEL = logging.DEBUG # Level for console output
 FILE_LOG_LEVEL = logging.DEBUG    # Level for file output
 
 # Define default log directory relative to this file's location
@@ -35,8 +35,8 @@ DEFAULT_LOG_FILE_APP = DEFAULT_LOG_DIR / 'app.log'
 DEFAULT_LOG_FILE_ERR = DEFAULT_LOG_DIR / 'errors.log'
 
 # Log Rotation Settings
-MAX_BYTES = 10 * 1024 * 1024  # 10 MB
-BACKUP_COUNT = 5
+MAX_BYTES = 100 * 1024 * 1024  # 10 MB
+BACKUP_COUNT = 50
 
 # Log Format
 # LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)-8s - [%(filename)s:%(lineno)d] - %(message)s'
@@ -80,7 +80,7 @@ def configure_logging(
     """
     global _logging_configured
     if _logging_configured:
-        # logging.warning("Logger already configured. Skipping reconfiguration.")
+        logging.warning("Logger already configured. Skipping reconfiguration.")
         return # Avoid reconfiguring
 
     try:

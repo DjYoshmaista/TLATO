@@ -20,9 +20,11 @@ import logging
 import numpy as np
 from pathlib import Path
 import json # For logging config
+from typing import Union, Dict, Any, Tuple
 
 # Import project configuration and utilities
 try:
+    from src.data.constants import *
     from src.utils.config import TrainingConfig, DEFAULT_DEVICE, CHECKPOINT_DIR, LOG_DIR
     from src.utils.logger import configure_logging, log_statement
     from src.utils.helpers import save_state, load_state # Use helper functions
@@ -84,225 +86,7 @@ except ImportError:
 #         except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Failed metrics save to {filepath}: {e}", exc_info=True)
 #     def clear(self): self.metrics_data=[]; log_statement(loglevel=str("info"), logstatement=str("Cleared training metrics."), main_logger=str(__name__))
 
-# --- Enhanced Trainer Class ---
-class EnhancedTrainer:
-    """
-    Comprehensive training loop with configurable hyperparameters, pruning,
-    checkpointing, and metrics.
-    """
-    def __init__(self,
-                 model: nn.Module,
-                 data_loader, # Expects EnhancedDataLoader instance or similar
-                 criterion, # Expects torch loss function instance
-                 device: Optional[str | torch.device] = None,
-                 training_config_override: Optional[dict] = None): # Accept overrides
-        """
-        Initializes the EnhancedTrainer.
 
-        Args:
-            model (nn.Module): The neural network model to train.
-            data_loader: Iterable data loader providing (inputs, targets) batches.
-            criterion: Loss function instance (e.g., nn.MSELoss()).
-            device (str | torch.device, optional): Device ('cuda', 'cpu'). Defaults to config.
-            training_config_override (dict, optional): Dictionary to override TrainingConfig
-                                                       defaults (e.g., {'MAX_EPOCHS': 10, 'INITIAL_LR': 1e-3}).
-        """
-        # Load base config and apply overrides
-        self.config = self._create_runtime_config(training_config_override)
-
-        self.device = device or DEFAULT_DEVICE
-        self.model = model.to(self.device)
-        self.data_loader = data_loader
-        self.criterion = criterion.to(self.device)
-        self.metrics = TrainingMetrics()
-
-        self.current_epoch = 0
-        self.total_pruned_count = 0
-
-        self.optimizer, self.scheduler = self._init_optimizer_scheduler()
-
-        # Log the final configuration being used for this training run
-        self._log_training_config()
-
-        log_statement(loglevel=str("info"), logstatement=str(f"EnhancedTrainer initialized for {type(model).__name__} on {self.device}"), main_logger=str(__name__))
-
-    def _create_runtime_config(self, overrides: Optional[dict]) -> TrainingConfig:
-        """ Creates a TrainingConfig instance applying overrides. """
-        config_instance = TrainingConfig() # Get defaults
-        if overrides:
-            log_statement(loglevel=str("info"), logstatement=str(f"Applying training config overrides: {overrides}"), main_logger=str(__name__))
-            for key, value in overrides.items():
-                if hasattr(config_instance, key):
-                    # Optionally add type checking/conversion here
-                    try:
-                        setattr(config_instance, key, value)
-                        log_statement(loglevel=str("debug"), logstatement=str(f"Override applied: {key} = {value}"), main_logger=str(__name__))
-                    except TypeError as e:
-                        log_statement(loglevel=str("error"), logstatement=str(f"Type error setting config override {key}={value}: {e}"), main_logger=str(__name__))
-                else:
-                    log_statement(loglevel=str("warning"), logstatement=str(f"Ignoring unknown config override key: {key}"), main_logger=str(__name__))
-        return config_instance
-
-    def _log_training_config(self):
-        """ Logs the runtime training configuration. """
-        config_dict = {attr: getattr(self.config, attr)
-                       for attr in dir(self.config)
-                       if not attr.startswith('_') and not callable(getattr(self.config, attr))}
-        # Add relevant non-config params like device, model type, criterion type
-        config_dict['DEVICE'] = str(self.device)
-        config_dict['MODEL_CLASS'] = type(self.model).__name__
-        config_dict['CRITERION_CLASS'] = type(self.criterion).__name__
-        # Log as pretty JSON
-        try:
-            config_str = json.dumps(config_dict, indent=2, default=str) # Use default=str for non-serializable
-            log_statement(loglevel=str("info"), logstatement=str(f"--- Training Configuration Used ---"), main_logger=str(__name__))
-            for line in config_str.splitlines(): # Log each line for better readability in file
-                log_statement(loglevel=str("info"), logstatement=str(line), main_logger=str(__name__))
-            log_statement(loglevel=str("info"), logstatement=str(f"---------------------------------"), main_logger=str(__name__))
-            # Also save to a dedicated config log file
-            config_log_path = LOG_DIR / f"training_config_{datetime.now():%Y%m%d%H%M%S}.log"
-            with open(config_log_path, 'w') as f:
-                f.write(config_str)
-            log_statement(loglevel=str("info"), logstatement=str(f"Training config saved to: {config_log_path}"), main_logger=str(__name__))
-        except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to log training configuration: {e}"), main_logger=str(__name__))
-
-    def _init_optimizer_scheduler(self):
-        """Configures optimizer/scheduler based on runtime config."""
-        # Example: AdamW optimizer using config values
-        optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.INITIAL_LR,
-            weight_decay=self.config.WEIGHT_DECAY
-        )
-        log_statement(loglevel=str("info"), logstatement=str(f"Using AdamW optimizer: LR={self.config.INITIAL_LR}, WD={self.config.WEIGHT_DECAY}"), main_logger=str(__name__))
-
-        # Example: Cosine Annealing scheduler using config values
-        scheduler = None
-        try:
-            batches_per_epoch = len(self.data_loader)
-            if batches_per_epoch > 0: # Ensure batches_per_epoch is valid
-                t_max = self.config.MAX_EPOCHS * batches_per_epoch
-                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=0)
-                log_statement(loglevel=str("info"), logstatement=str(f"Using CosineAnnealingLR scheduler: T_max={t_max}"), main_logger=str(__name__))
-            else:
-                log_statement(loglevel=str("warning"), logstatement=str("DataLoader length is 0. Cannot initialize CosineAnnealingLR scheduler."), main_logger=str(__name__))
-        except TypeError:
-            t_max_estimate = self.config.MAX_EPOCHS * 1000 # Fallback T_max
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max_estimate, eta_min=0)
-            log_statement(loglevel=str("warning"), logstatement=str(f"DataLoader has no length. Using estimated T_max={t_max_estimate} for scheduler."), main_logger=str(__name__))
-        except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to initialize scheduler: {e}. Proceeding without scheduler.", exc_info=True), main_logger=str(__name__))
-            scheduler = None
-
-        return optimizer, scheduler
-
-    def _apply_pruning(self):
-        """ Applies pruning based on runtime config. """
-        # (Implementation remains the same - uses self.config)
-        if not hasattr(self.config, 'PRUNE_AMOUNT') or self.config.PRUNE_AMOUNT <= 0:
-            log_statement(loglevel=str("info"), logstatement=str("Pruning skipped."), main_logger=str(__name__))
-            return
-        params_to_prune = [(m, 'weight') for m in self.model.modules() if isinstance(m, (nn.Linear, nn.Conv2d)) and hasattr(m, 'weight')]
-        if not params_to_prune:
-            log_statement(loglevel=str("warning"), logstatement=str("No prunable layers found."), main_logger=str(__name__))
-            return
-        try:
-            prune.global_unstructured(params_to_prune, pruning_method=prune.L1Unstructured, amount=self.config.PRUNE_AMOUNT)
-            log_statement(loglevel=str("info"), logstatement=str(f"Applied pruning: Amount={self.config.PRUNE_AMOUNT:.2f}"), main_logger=str(__name__))
-            pruned_count, total_params = 0, 0
-            for module, name in params_to_prune:
-                if prune.is_pruned(module):
-                    prune.remove(module, name) # Make permanent
-                param = getattr(module, name); pruned_count += torch.sum(param == 0).item(); total_params += param.nelement()
-            self.total_pruned_count = pruned_count; perc = (pruned_count/total_params)*100 if total_params else 0
-            log_statement(loglevel=str("info"), logstatement=str(f"Pruning made permanent. Total pruned: {pruned_count} ({perc:.2f}%)"), main_logger=str(__name__))
-        except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Pruning failed: {e}", exc_info=True), main_logger=str(__name__))
-
-    def train_epoch(self):
-        """ Runs training for one epoch. """
-        # (Implementation mostly the same - uses self.config, logs progress)
-        self.model.train(); total_loss = 0.0; batch_count = 0; epoch_start_time = datetime.now()
-        try:
-            total_batches = len(self.data_loader); has_len = True
-        except TypeError:
-            total_batches = None; has_len = False
-        pbar_desc = f"Epoch {self.current_epoch}/{self.config.MAX_EPOCHS}"; pbar = tqdm(self.data_loader, desc=pbar_desc, total=total_batches, unit="batch", leave=True) # leave=True to keep after loop
-        last_chkpt_batch=-1; batches_btwn_chkpts = int(total_batches * self.config.CHECKPOINT_INTERVAL_BATCH_PERCENT) if has_len and self.config.CHECKPOINT_INTERVAL_BATCH_PERCENT > 0 else -1
-
-        for batch_idx, batch_data in enumerate(pbar):
-            batch_start_time = datetime.now()
-            try:
-                inputs, targets = batch_data; inputs, targets = inputs.to(self.device), targets.to(self.device)
-                self.optimizer.zero_grad(); outputs = self.model(inputs); loss = self.criterion(outputs, targets)
-                loss.backward(); self.optimizer.step()
-                if self.scheduler: self.scheduler.step() # Step scheduler per batch
-                batch_dur = (datetime.now() - batch_start_time).total_seconds(); cur_lr = self.optimizer.param_groups[0]['lr']; batch_loss = loss.item()
-                total_loss += batch_loss; batch_count += 1
-                self.metrics.record(epoch=self.current_epoch, batch=batch_idx, loss=batch_loss, lr=cur_lr, pruned_count=self.total_pruned_count, duration=batch_dur, batch_size=inputs.size(0))
-                pbar.set_postfix({'Loss': f"{batch_loss:.4f}", 'LR': f"{cur_lr:.6f}"})
-                # Intra-epoch checkpointing
-                if has_len and batches_btwn_chkpts > 0 and (batch_idx + 1) % batches_btwn_chkpts == 0 and batch_idx != last_chkpt_batch:
-                     self._save_checkpoint(reason=f"epoch_{self.current_epoch}_batch_{batch_idx+1}"); last_chkpt_batch=batch_idx
-            except Exception as e:
-                log_statement(loglevel=str("error"), logstatement=str(f"Error batch {batch_idx} epoch {self.current_epoch}: {e}", exc_info=True), main_logger=str(__name__))
-                continue # Skip batch on error
-
-        pbar.close(); avg_loss = total_loss / batch_count if batch_count > 0 else 0.0; epoch_dur = (datetime.now() - epoch_start_time).total_seconds()
-        log_statement(loglevel=str("info"), logstatement=str(f"Epoch {self.current_epoch} finished. Avg Loss: {avg_loss:.4f}, Duration: {epoch_dur:.2f}s"), main_logger=str(__name__))
-        return avg_loss
-    
-    def train(self):
-        """ Runs the full training loop. """
-        # (Uses self.config for MAX_EPOCHS, PRUNE_INTERVAL_EPOCHS)
-        log_statement(loglevel=str("info"), logstatement=str(f"Starting training loop for {self.config.MAX_EPOCHS} epochs..."), main_logger=str(__name__))
-        start_time = datetime.now()
-        for epoch in range(self.current_epoch, self.config.MAX_EPOCHS):
-            with tqdm(total=len(self.data_loader), desc=f"Epoch {epoch+1}/{self.config.MAX_EPOCHS}", unit="batch", leave=True) as pbar:
-                pbar.set_postfix({'Loss': 0.0, 'LR': self.optimizer.param_groups[0]['lr']})
-                log_statement(loglevel=str("info"), logstatement=str(f"Epoch {epoch+1}/{self.config.MAX_EPOCHS} started."), main_logger=str(__name__))
-                # Optionally load checkpoint here if needed
-                # self.load_checkpoint("ZoneClassifier_epoch_X_end.pt")
-                pbar.set_postfix({'Loss': 'N/A', 'LR': 'N/A'})
-                pbar.refresh()
-                self.model.train(); self.optimizer.zero_grad() # Reset optimizer state
-                self.scheduler.step()
-            self.current_epoch = epoch; avg_loss = self.train_epoch()
-            if hasattr(self.config, 'PRUNE_INTERVAL_EPOCHS') and self.config.PRUNE_INTERVAL_EPOCHS > 0 and (epoch + 1) % self.config.PRUNE_INTERVAL_EPOCHS == 0:
-                log_statement(loglevel=str("info"), logstatement=str(f"Applying pruning after epoch {epoch}."), main_logger=str(__name__)); self._apply_pruning()
-            self._save_checkpoint(reason=f"epoch_{epoch}_end") # End of epoch checkpoint
-            self.metrics.save() # Save metrics each epoch (or less often if configured)
-            # Add validation loop call here if implemented
-        end_time = datetime.now(); total_duration = (end_time - start_time).total_seconds()
-        log_statement(loglevel=str("info"), logstatement=str(f"Training finished. Total duration: {total_duration:.2f}s"), main_logger=str(__name__))
-        self.metrics.save(filename=f"{TrainingConfig.METRICS_FILENAME_PREFIX}_final.csv") # Save final metrics
-
-    def _save_checkpoint(self, reason: str = "checkpoint"):
-        """ Saves state using helpers.save_state. """
-        # (Implementation remains the same)
-        filename = f"{type(self.model).__name__}_{reason}.pt"
-        log_statement(loglevel=str("info"), logstatement=str(f"Saving checkpoint: {filename}"), main_logger=str(__name__))
-        try: save_state(model=self.model, filename=filename, optimizer=self.optimizer, scheduler=self.scheduler, epoch=self.current_epoch, total_pruned_count=self.total_pruned_count)
-        except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Checkpoint save failed for '{reason}'. Error logged in save_state."), main_logger=str(__name__)) # Error should be logged in save_state
-
-    def load_checkpoint(self, filepath: str | Path, load_optimizer: bool = True, load_scheduler: bool = True, strict: bool = True):
-        """ Loads state using helpers.load_state. """
-        # (Implementation remains the same)
-        log_statement(loglevel=str("info"), logstatement=str(f"Attempting load checkpoint: {filepath}"), main_logger=str(__name__))
-        try:
-            checkpoint_data = load_state(model=self.model, filename=filepath, optimizer=self.optimizer if load_optimizer else None, scheduler=self.scheduler if load_scheduler else None, device=self.device, strict=strict)
-            if checkpoint_data:
-                if 'epoch' in checkpoint_data: self.current_epoch = checkpoint_data['epoch'] + 1; log_statement(loglevel=str("info"), logstatement=str(f"Resuming from epoch {self.current_epoch}"), main_logger=str(__name__))
-                if 'total_pruned_count' in checkpoint_data: self.total_pruned_count = checkpoint_data['total_pruned_count']; log_statement(loglevel=str("info"), logstatement=str(f"Restored pruned count: {self.total_pruned_count}"), main_logger=str(__name__))
-                log_statement(loglevel=str("info"), logstatement=str(f"Checkpoint '{filepath}' loaded."), main_logger=str(__name__))
-                return True
-            else: 
-                log_statement(loglevel=str("error"), logstatement=str(f"Load failed for '{filepath}'. File not found or load_state is None."), main_logger=str(__name__))
-                return False
-        except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Error loading checkpoint {filepath}: {e}", exc_info=True), main_logger=str(__name__))
-            return False
 
 # --- Training Configuration ---
 
@@ -400,265 +184,534 @@ class TrainingMetrics:
 
 class EnhancedTrainer:
     """
-    Provides a comprehensive training loop with optimization, scheduling,
-    pruning, checkpointing, and metrics tracking.
+    Provides a comprehensive and configurable training loop for PyTorch models,
+    incorporating optimization, learning rate scheduling, optional weight pruning,
+    robust checkpointing (intra-epoch and end-of-epoch), configuration overrides,
+    detailed logging, and metrics tracking.
+
+    Merges functionalities from two previous versions.
     """
-    def __init__(self, model: nn.Module, data_loader, criterion, device: str | torch.device = None):
+    def __init__(self,
+                 model: nn.Module,
+                 data_loader, # Expects an iterable (e.g., DataLoader) -> (inputs, targets)
+                 criterion, # Expects torch loss function instance (e.g., nn.MSELoss())
+                 device: Optional[Union[str, torch.device]] = None,
+                 training_config_override: Optional[Dict[str, Any]] = None): # Accept overrides
         """
         Initializes the EnhancedTrainer.
 
         Args:
             model (nn.Module): The neural network model to train.
-            data_loader: An iterable data loader providing batches of (inputs, targets).
-            criterion: The loss function (e.g., nn.MSELoss(), nn.CrossEntropyLoss()).
-            device (str | torch.device, optional): The device to run training on.
-                                                   Defaults to config.DEFAULT_DEVICE.
+            data_loader: Iterable data loader providing (inputs, targets) batches.
+            criterion: Loss function instance (e.g., nn.MSELoss()).
+            device (str | torch.device, optional): Device ('cuda', 'cpu').
+                                                   Defaults to project's DEFAULT_DEVICE.
+            training_config_override (dict, optional): Dictionary to override TrainingConfig
+                                                       defaults (e.g., {'MAX_EPOCHS': 10}).
         """
-        self.config = TrainingConfig() # Load training config
+        log_statement('info', f'{LOG_INS}::Initializing EnhancedTrainer...', __name__)
+
+        # --- Configuration Setup ---
+        log_statement('debug', f'{LOG_INS}::Creating runtime training configuration.', __name__)
+        self.config = self._create_runtime_config(training_config_override)
+        log_statement('debug', f'{LOG_INS}::Runtime configuration created.', __name__)
+
+        # --- Device Setup ---
         self.device = device or DEFAULT_DEVICE
+        log_statement('info', f'{LOG_INS}::Using device: {self.device}', __name__)
+
+        # --- Model Setup ---
         self.model = model.to(self.device)
-        self.data_loader = data_loader # Assume loader yields (inputs, targets)
-        self.criterion = criterion.to(self.device) # Move loss function to device
-        self.metrics = TrainingMetrics() # Initialize metrics tracker
+        log_statement('info', f'{LOG_INS}::Model {type(model).__name__} moved to device {self.device}.', __name__)
 
+        # --- Data Loader ---
+        self.data_loader = data_loader
+        log_statement('debug', f'{LOG_INS}::Data loader assigned: {type(data_loader)}', __name__)
+
+        # --- Criterion (Loss Function) ---
+        self.criterion = criterion.to(self.device)
+        log_statement('info', f'{LOG_INS}::Criterion {type(criterion).__name__} moved to device {self.device}.', __name__)
+
+        # --- Metrics ---
+        self.metrics = TrainingMetrics()
+        log_statement('debug', f'{LOG_INS}::TrainingMetrics initialized.', __name__)
+
+        # --- State Variables ---
         self.current_epoch = 0
-        self.total_pruned_count = 0 # Track total pruned weights
+        self.total_pruned_count = 0
+        log_statement('debug', f'{LOG_INS}::Initial state set: current_epoch={self.current_epoch}, total_pruned_count={self.total_pruned_count}', __name__)
 
-        # Ensure checkpoint directory exists (handled by helpers.save_state now)
-        # CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-
+        # --- Optimizer and Scheduler ---
+        log_statement('debug', f'{LOG_INS}::Initializing optimizer and scheduler...', __name__)
         self.optimizer, self.scheduler = self._init_optimizer_scheduler()
-        log_statement(loglevel=str("info"), logstatement=str(f"EnhancedTrainer initialized for model {type(model).__name__} on device {self.device}"), main_logger=str(__name__))
+        if self.optimizer:
+            log_statement('info', f'{LOG_INS}::Optimizer initialized: {type(self.optimizer).__name__}', __name__)
+        else:
+            log_statement('warning', f'{LOG_INS}::Optimizer initialization failed or returned None.', __name__)
+        if self.scheduler:
+            log_statement('info', f'{LOG_INS}::Scheduler initialized: {type(self.scheduler).__name__}', __name__)
+        else:
+            log_statement('info', f'{LOG_INS}::No scheduler will be used.', __name__)
 
-    def _init_optimizer_scheduler(self):
-        """Configures the optimizer and learning rate scheduler."""
-        # Example: AdamW optimizer
-        optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.INITIAL_LR,
-            weight_decay=self.config.WEIGHT_DECAY
-        )
-        log_statement(loglevel=str("info"), logstatement=str(f"Using AdamW optimizer with LR={self.config.INITIAL_LR}, WeightDecay={self.config.WEIGHT_DECAY}"), main_logger=str(__name__))
+        # --- Log Final Runtime Configuration ---
+        self._log_training_config()
 
-        # Example: Cosine Annealing scheduler
-        # Calculate T_max based on estimated batches per epoch if loader has __len__
+        log_statement('info', f'{LOG_INS}::EnhancedTrainer initialized successfully for {type(model).__name__} on {self.device}.', __name__)
+
+    def _create_runtime_config(self, overrides: Optional[Dict[str, Any]]) -> TrainingConfig:
+        """
+        Creates a TrainingConfig instance, applying overrides from the dictionary.
+        Logs the process and handles potential errors.
+        """
+        log_statement('debug', f'{LOG_INS}::Creating default TrainingConfig instance.', __name__)
+        config_instance = TrainingConfig() # Get defaults
+
+        if overrides:
+            log_statement('info', f'{LOG_INS}::Applying training config overrides: {overrides}', __name__)
+            for key, value in overrides.items():
+                log_statement('debug', f'{LOG_INS}::Processing override: {key}={value}', __name__)
+                if hasattr(config_instance, key):
+                    try:
+                        # Get the type of the default attribute to attempt conversion
+                        default_value = getattr(config_instance, key)
+                        required_type = type(default_value)
+                        log_statement('debug', f'{LOG_INS}::Attribute {key} exists with type {required_type}. Attempting to set value {value} ({type(value)}).', __name__)
+                        # Basic type coercion (can be expanded)
+                        converted_value = value
+                        if required_type != type(value):
+                            try:
+                                converted_value = required_type(value)
+                                log_statement('debug', f'{LOG_INS}::Successfully coerced override value for {key} to type {required_type}.', __name__)
+                            except Exception as conv_e:
+                                log_statement('warning', f'{LOG_INS}::Could not convert override value {value} for {key} to required type {required_type}. Using original value. Error: {conv_e}', __name__)
+                                # Keep original 'value' if conversion fails, maybe log error later if setattr fails
+
+                        setattr(config_instance, key, converted_value)
+                        log_statement('info', f'{LOG_INS}::Override applied: {key} = {getattr(config_instance, key)}', __name__)
+                    except TypeError as e:
+                        log_statement('error', f'{LOG_INS}::Type error applying config override {key}={value}. Required type might be {type(getattr(config_instance, key))}. Error: {e}', __name__, exc_info=True)
+                    except Exception as e:
+                        log_statement('error', f'{LOG_INS}::Unexpected error applying config override {key}={value}. Error: {e}', __name__, exc_info=True)
+                else:
+                    log_statement('warning', f'{LOG_INS}::Ignoring unknown config override key: {key}', __name__)
+        else:
+            log_statement('info', f'{LOG_INS}::No training configuration overrides provided.', __name__)
+
+        log_statement('debug', f'{LOG_INS}::Runtime configuration instance created.', __name__)
+        return config_instance
+
+    def _log_training_config(self):
+        """ Logs the final runtime training configuration to standard logs and a file. """
+        log_statement('info', f'{LOG_INS}::Logging final runtime training configuration...', __name__)
+        config_dict = {}
         try:
-            batches_per_epoch = len(self.data_loader)
-            t_max = self.config.MAX_EPOCHS * batches_per_epoch
-            log_statement(loglevel=str("info"), logstatement=str(f"Using CosineAnnealingLR scheduler with T_max={t_max} (MaxEpochs={self.config.MAX_EPOCHS}, BatchesPerEpoch={batches_per_epoch})"), main_logger=str(__name__))
-        except TypeError:
-            # If loader has no __len__, use a fixed large number or alternative scheduler
-            t_max = self.config.MAX_EPOCHS * 1000 # Placeholder if len() fails
-            log_statement(loglevel=str("warning"), logstatement=str(f"DataLoader has no __len__. Using estimated T_max={t_max} for CosineAnnealingLR."), main_logger=str(__name__))
+            # Extract config attributes
+            log_statement('debug', f'{LOG_INS}::Extracting attributes from self.config.', __name__)
+            for attr in dir(self.config):
+                if not attr.startswith('_') and not callable(getattr(self.config, attr)):
+                     value = getattr(self.config, attr)
+                     # Handle nested config classes like LoggingConfig
+                     if isinstance(value, type): # If it's a class itself (like LoggingConfig)
+                          nested_dict = {}
+                          for nested_attr in dir(value):
+                               if not nested_attr.startswith('_') and not callable(getattr(value, nested_attr)):
+                                    nested_dict[nested_attr] = getattr(value, nested_attr)
+                          config_dict[attr] = nested_dict
+                     else:
+                          config_dict[attr] = value
 
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=t_max,
-            eta_min=0 # Minimum learning rate
-        )
+            log_statement('debug', f'{LOG_INS}::Adding non-config parameters to log dict.', __name__)
+            # Add relevant non-config params
+            config_dict['DEVICE'] = str(self.device)
+            config_dict['MODEL_CLASS'] = type(self.model).__name__
+            config_dict['CRITERION_CLASS'] = type(self.criterion).__name__
+            if self.optimizer:
+                config_dict['OPTIMIZER_CLASS'] = type(self.optimizer).__name__
+            if self.scheduler:
+                 config_dict['SCHEDULER_CLASS'] = type(self.scheduler).__name__
 
+            log_statement('debug', f'{LOG_INS}::Serializing configuration to JSON string.', __name__)
+            # Use default=str for non-serializable types (like paths, classes)
+            config_str = json.dumps(config_dict, indent=2, default=str)
+
+            # Log to standard logger
+            log_statement('warning', f"{LOG_INS}::--- Training Configuration Used ---", __name__)
+            for line in config_str.splitlines():
+                log_statement('info', line, __name__)
+            log_statement('warning', f"{LOG_INS}::---------------------------------", __name__)
+
+            # Save to dedicated config log file
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            config_log_path = LOG_DIR / f"training_config_{ts}.log"
+            log_statement('debug', f'{LOG_INS}::Attempting to save config to file: {config_log_path}', __name__)
+            with open(config_log_path, 'w') as f:
+                f.write(config_str)
+            log_statement('info', f"{LOG_INS}::Training configuration saved to: {config_log_path}", __name__)
+
+        except Exception as e:
+            log_statement('error', f"{LOG_INS}::Failed to log training configuration: {e}", __name__, exc_info=True)
+
+    def _init_optimizer_scheduler(self) -> Tuple[Optional[optim.Optimizer], Optional[Any]]:
+        """
+        Configures the optimizer and learning rate scheduler based on runtime config.
+        Handles potential errors during initialization.
+        """
+        log_statement('debug', f'{LOG_INS}::Initializing optimizer...', __name__)
+        optimizer = None
+        try:
+            # Example: AdamW optimizer using config values
+            lr = self.config.INITIAL_LR
+            wd = self.config.WEIGHT_DECAY
+            log_statement('debug', f'{LOG_INS}::Using AdamW with parameters: lr={lr}, weight_decay={wd}', __name__)
+            optimizer = optim.AdamW(
+                self.model.parameters(),
+                lr=lr,
+                weight_decay=wd
+            )
+            log_statement('info', f"{LOG_INS}::Using AdamW optimizer: LR={lr}, WD={wd}", __name__)
+        except AttributeError as e:
+             log_statement('error', f"{LOG_INS}::Missing required attribute in TrainingConfig for optimizer: {e}", __name__, exc_info=True)
+             return None, None # Cannot proceed without optimizer
+        except Exception as e:
+             log_statement('error', f"{LOG_INS}::Failed to initialize optimizer: {e}", __name__, exc_info=True)
+             return None, None # Cannot proceed without optimizer
+
+        log_statement('debug', f'{LOG_INS}::Initializing scheduler...', __name__)
+        scheduler = None
+        try:
+            batches_per_epoch = 0
+            log_statement('debug', f'{LOG_INS}::Attempting to get length of data_loader.', __name__)
+            try:
+                batches_per_epoch = len(self.data_loader)
+                log_statement('debug', f'{LOG_INS}::DataLoader length: {batches_per_epoch}', __name__)
+            except TypeError:
+                log_statement('warning', f"{LOG_INS}::DataLoader does not support len(). Scheduler T_max will be estimated.", __name__)
+                batches_per_epoch = 0 # Indicate len() failed
+
+            if batches_per_epoch > 0:
+                t_max = self.config.MAX_EPOCHS * batches_per_epoch
+                eta_min = 0 # Common default for CosineAnnealingLR
+                log_statement('info', f"{LOG_INS}::Using CosineAnnealingLR scheduler with T_max={t_max} (Epochs={self.config.MAX_EPOCHS}, BatchesPerEpoch={batches_per_epoch}), eta_min={eta_min}", __name__)
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=eta_min)
+            else:
+                # Fallback if len() fails or is zero
+                t_max_estimate = self.config.MAX_EPOCHS * 1000 # Estimate batches/epoch
+                eta_min = 0
+                log_statement('warning', f"Using CosineAnnealingLR scheduler with estimated T_max={t_max_estimate}, eta_min={eta_min}", __name__)
+                scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max_estimate, eta_min=eta_min)
+
+        except AttributeError as e:
+             log_statement('error', f"{LOG_INS}::Missing required attribute in TrainingConfig for scheduler: {e}", __name__, exc_info=True)
+             scheduler = None # Proceed without scheduler
+        except Exception as e:
+            # Catch more general errors during scheduler init
+            log_statement('error', f"{LOG_INS}::Failed to initialize scheduler: {e}. Proceeding without scheduler.", __name__, exc_info=True)
+            scheduler = None
+
+        log_statement('debug', f'{LOG_INS}::Optimizer: {type(optimizer).__name__}, Scheduler: {type(scheduler).__name__ if scheduler else "None"}', __name__)
         return optimizer, scheduler
 
     def _apply_pruning(self):
-        """Applies global unstructured magnitude pruning to the model."""
-        if self.config.PRUNE_AMOUNT <= 0:
-            log_statement(loglevel=str("info"), logstatement=str("Pruning amount is zero or negative. Skipping pruning step."), main_logger=str(__name__))
+        """
+        Applies global unstructured magnitude pruning to the model's weights
+        based on the runtime configuration. Makes pruning permanent after applying.
+        """
+        log_statement('info', f'{LOG_INS}::Checking pruning configuration...', __name__)
+        prune_amount = getattr(self.config, 'PRUNE_AMOUNT', 0.0) # Default to 0 if not set
+
+        if prune_amount <= 0:
+            log_statement('info', f"{LOG_INS}::Pruning amount ({prune_amount}) is zero or negative. Skipping pruning.", __name__)
             return
 
-        parameters_to_prune = []
+        log_statement('info', f'{LOG_INS}::Attempting to apply global unstructured pruning: Amount={prune_amount:.2f}', __name__)
+        parameters_to_prune: List[Tuple[nn.Module, str]] = []
+        log_statement('debug', f'{LOG_INS}::Identifying prunable parameters (Linear/Conv2d weights)...', __name__)
         for module in self.model.modules():
-            # Prune Linear and Conv2d layers by default, add others if needed
+            # Prune Linear and Conv2d layers by default
             if isinstance(module, (nn.Linear, nn.Conv2d)):
-                # Ensure the parameter 'weight' exists before adding
+                log_statement('debug', f'{LOG_INS}::Checking module: {module}', __name__)
+                # Ensure the parameter 'weight' exists and is not None before adding
                 if hasattr(module, 'weight') and module.weight is not None:
                     parameters_to_prune.append((module, 'weight'))
-                # Optionally prune bias as well:
-                # if hasattr(module, 'bias') and module.bias is not None:
-                #     parameters_to_prune.append((module, 'bias'))
+                    log_statement('debug', f'{LOG_INS}::Adding {module}.weight to prune list.', __name__)
+                # else:
+                #     log_statement('debug', f'{LOG_INS}::Skipping {module}: no weight attribute or weight is None.', __name__)
 
         if not parameters_to_prune:
-            log_statement(loglevel=str("warning"), logstatement=str("No prunable parameters (Linear/Conv2d weights) found in the model."), main_logger=str(__name__))
+            log_statement('warning', f"{LOG_INS}::No prunable parameters (Linear/Conv2d weights) found in the model.", __name__)
             return
 
+        log_statement('info', f'{LOG_INS}::Found {len(parameters_to_prune)} parameter groups to prune.', __name__)
+
         try:
+            log_statement('debug', f'{LOG_INS}::Applying prune.global_unstructured with method L1Unstructured, amount {prune_amount}.', __name__)
             prune.global_unstructured(
                 parameters_to_prune,
                 pruning_method=prune.L1Unstructured, # Magnitude pruning (L1 norm)
-                amount=self.config.PRUNE_AMOUNT
+                amount=prune_amount
             )
-            log_statement(loglevel=str("info"), logstatement=str(f"Applied global unstructured pruning with amount {self.config.PRUNE_AMOUNT:.2f}"), main_logger=str(__name__))
+            log_statement('info', f"{LOG_INS}::Applied global unstructured pruning mask (Amount={prune_amount:.2f}).", __name__)
 
-            # Make pruning permanent by removing re-parameterization hooks (optional, but good practice after pruning)
-            # And calculate total pruned count
+            # Make pruning permanent and calculate counts
+            log_statement('info', f'{LOG_INS}::Making pruning permanent and calculating pruned counts...', __name__)
             current_total_pruned = 0
             total_params = 0
             for module, param_name in parameters_to_prune:
+                log_statement('debug', f'{LOG_INS}::Processing {module}.{param_name} for permanent pruning.', __name__)
+                param = getattr(module, param_name) # Get the parameter tensor
                 if prune.is_pruned(module):
-                    # Remove the hook to make pruning permanent
-                    prune.remove(module, param_name)
-                    log_statement(loglevel=str("debug"), logstatement=str(f"Made pruning permanent for {param_name} in {module}"), main_logger=str(__name__))
-                    # Count remaining zeros after removal
-                    param = getattr(module, param_name)
-                    current_total_pruned += torch.sum(param == 0).item()
-                    total_params += param.nelement()
-                else: # Should not happen if global_unstructured worked, but check
-                    param = getattr(module, param_name)
-                    current_total_pruned += torch.sum(param == 0).item() # Count existing zeros
-                    total_params += param.nelement()
+                    log_statement('debug', f'{LOG_INS}::Removing pruning hook for {module}.{param_name}.', __name__)
+                    prune.remove(module, param_name) # Makes pruning permanent
+                    log_statement('debug', f'{LOG_INS}::Pruning hook removed for {module}.{param_name}.', __name__)
+                    # Recalculate zeros after removal
+                    zeros = torch.sum(param == 0).item()
+                    params_in_tensor = param.nelement()
+                    current_total_pruned += zeros
+                    total_params += params_in_tensor
+                    log_statement('debug', f'{LOG_INS}::Post-removal: {zeros}/{params_in_tensor} zeros in {module}.{param_name}.', __name__)
+                else:
+                    # If not pruned by global_unstructured (shouldn't happen?), count existing zeros
+                    zeros = torch.sum(param == 0).item()
+                    params_in_tensor = param.nelement()
+                    current_total_pruned += zeros
+                    total_params += params_in_tensor
+                    log_statement('debug', f'{LOG_INS}::Module {module}.{param_name} was not pruned by global_unstructured. Counted existing {zeros}/{params_in_tensor} zeros.', __name__)
 
 
             self.total_pruned_count = current_total_pruned # Update total count
-            pruned_percentage = (self.total_pruned_count / total_params) * 100 if total_params > 0 else 0
-            log_statement(loglevel=str("info"), logstatement=str(f"Total pruned weights after making permanent: {self.total_pruned_count} ({pruned_percentage:.2f}%)"), main_logger=str(__name__))
+            pruned_percentage = (self.total_pruned_count / total_params) * 100 if total_params > 0 else 0.0
+            log_statement('info', f"{LOG_INS}::Pruning made permanent. Total pruned weights: {self.total_pruned_count} ({pruned_percentage:.2f}% of {total_params} total params in pruned layers).", __name__)
 
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Pruning failed: {e}", exc_info=True), main_logger=str(__name__))
+            log_statement('error', f"{LOG_INS}::Pruning application or removal failed: {e}", __name__, exc_info=True)
 
-    def train_epoch(self):
-        """Runs training for a single epoch."""
+    def train_epoch(self) -> float:
+        """
+        Runs the training process for a single epoch, iterating through the data_loader.
+        Handles batch processing, loss calculation, backpropagation, optimizer steps,
+        scheduler steps, metrics recording, progress bar updates, and intra-epoch checkpointing.
+
+        Returns:
+            float: The average loss for the epoch.
+        """
+        log_statement('info', f"{LOG_INS}::Starting Epoch {self.current_epoch + 1}/{self.config.MAX_EPOCHS}", __name__)
         self.model.train() # Set model to training mode
         total_loss = 0.0
         batch_count = 0
         epoch_start_time = datetime.now()
 
-        # Estimate total batches if possible
+        log_statement('debug', f'{LOG_INS}::Determining total batches for progress bar...', __name__)
         try:
             total_batches = len(self.data_loader)
             has_len = True
+            log_statement('debug', f'{LOG_INS}::Total batches in epoch: {total_batches}', __name__)
         except TypeError:
-            total_batches = None
+            total_batches = None # Dataloader might be infinite/iterable
             has_len = False
+            log_statement('warning', f'{LOG_INS}::DataLoader has no length. Progress bar total will be unknown.', __name__)
 
-        # Use tqdm for progress bar
-        pbar_desc = f"Epoch {self.current_epoch}/{self.config.MAX_EPOCHS}"
-        pbar = tqdm(self.data_loader, desc=pbar_desc, total=total_batches, unit="batch", leave=False)
+        pbar_desc = f"Epoch {self.current_epoch + 1}/{self.config.MAX_EPOCHS}"
+        log_statement('debug', f'{LOG_INS}::Initializing tqdm progress bar: desc="{pbar_desc}", total={total_batches}', __name__)
+        pbar = tqdm(self.data_loader, desc=pbar_desc, total=total_batches, unit="batch", leave=True) # Keep after loop
 
+        # --- Intra-epoch Checkpointing Setup ---
         last_checkpoint_batch = -1
-        batches_between_checkpoints = int(total_batches * self.config.CHECKPOINT_INTERVAL_BATCH_PERCENT) if has_len and self.config.CHECKPOINT_INTERVAL_BATCH_PERCENT > 0 else -1
+        batches_between_checkpoints = -1
+        checkpoint_interval_percent = getattr(self.config, 'CHECKPOINT_INTERVAL_BATCH_PERCENT', 0.0)
+        if has_len and checkpoint_interval_percent > 0 and total_batches > 0:
+             # Calculate how many batches between checkpoints
+             # Ensure at least 1 batch between checkpoints if percent is very small
+             batches_between_checkpoints = max(1, int(total_batches * checkpoint_interval_percent))
+             log_statement('info', f'{LOG_INS}::Intra-epoch checkpointing enabled every {batches_between_checkpoints} batches.', __name__)
+        else:
+             log_statement('info', f'{LOG_INS}::Intra-epoch checkpointing disabled (interval <= 0 or dataloader has no length).', __name__)
+        # --- End Checkpointing Setup ---
 
+        log_statement('debug', f'{LOG_INS}::Starting batch iteration for epoch...', __name__)
         for batch_idx, batch_data in enumerate(pbar):
             batch_start_time = datetime.now()
+            log_statement('debug', f'{LOG_INS}::Starting Batch {batch_idx + 1}{f"/{total_batches}" if has_len else ""}', __name__)
 
             try:
-                # Assuming data_loader yields (inputs, targets)
-                inputs, targets = batch_data
+                # --- Data Handling ---
+                log_statement('debug', f'{LOG_INS}::Unpacking batch data {batch_idx}...', __name__)
+                inputs, targets = batch_data # Assuming structure
+                log_statement('debug', f'{LOG_INS}::Moving batch data to device: {self.device}...', __name__)
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
+                log_statement('debug', f'{LOG_INS}::Input shape: {inputs.shape}, Target shape: {targets.shape}', __name__)
 
-                # Zero gradients
+                # --- Forward and Backward Pass ---
+                log_statement('debug', f'{LOG_INS}::Zeroing optimizer gradients.', __name__)
                 self.optimizer.zero_grad()
 
-                # Forward pass
+                log_statement('debug', f'{LOG_INS}::Performing model forward pass...', __name__)
                 outputs = self.model(inputs)
+                log_statement('debug', f'{LOG_INS}::Output shape: {outputs.shape}', __name__)
 
-                # Calculate loss
+                log_statement('debug', f'{LOG_INS}::Calculating loss...', __name__)
                 loss = self.criterion(outputs, targets)
+                batch_loss = loss.item() # Get scalar value
+                log_statement('debug', f'{LOG_INS}::Batch loss calculated: {batch_loss:.6f}', __name__)
 
-                # Backward pass and optimization
+                log_statement('debug', f'{LOG_INS}::Performing backward pass (calculating gradients)...', __name__)
                 loss.backward()
-                # Optional: Gradient clipping
+
+                # Optional: Gradient Clipping (Uncomment if needed)
+                # log_statement('debug', f'{LOG_INS}::Applying gradient clipping...', __name__)
                 # nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+                log_statement('debug', f'{LOG_INS}::Performing optimizer step (updating weights)...', __name__)
                 self.optimizer.step()
 
-                # Step the scheduler (typically per batch for CosineAnnealingLR)
+                # --- Scheduler Step ---
                 if self.scheduler:
-                    self.scheduler.step()
+                    log_statement('debug', f'{LOG_INS}::Performing scheduler step.', __name__)
+                    self.scheduler.step() # Step per batch typical for CosineAnnealingLR
 
+                # --- Metrics and Logging ---
                 batch_duration = (datetime.now() - batch_start_time).total_seconds()
                 current_lr = self.optimizer.param_groups[0]['lr']
-                batch_loss = loss.item()
+                log_statement('debug', f'{LOG_INS}::Batch {batch_idx + 1} completed. Loss: {batch_loss:.4f}, LR: {current_lr:.6f}, Duration: {batch_duration:.3f}s', __name__)
+
                 total_loss += batch_loss
                 batch_count += 1
 
-                # Record metrics
+                log_statement('debug', f'{LOG_INS}::Recording batch metrics.', __name__)
                 self.metrics.record(
-                    epoch=self.current_epoch,
-                    batch=batch_idx,
+                    epoch=self.current_epoch + 1, # Use 1-based epoch for recording
+                    batch=batch_idx + 1,       # Use 1-based batch for recording
                     loss=batch_loss,
                     lr=current_lr,
-                    pruned_count=self.total_pruned_count,
+                    pruned_count=self.total_pruned_count, # Record current pruned count
                     duration=batch_duration,
-                    batch_size=inputs.size(0) # Get batch size from input tensor
+                    batch_size=inputs.size(0) # Record actual batch size
                 )
 
-                # Update progress bar postfix
+                # Update progress bar
                 pbar.set_postfix({'Loss': f"{batch_loss:.4f}", 'LR': f"{current_lr:.6f}"})
 
-                # --- Checkpointing within epoch ---
-                if has_len and batches_between_checkpoints > 0 and (batch_idx + 1) % batches_between_checkpoints == 0:
-                    if batch_idx != last_checkpoint_batch: # Avoid saving twice if interval is 1 batch
-                        reason = f"epoch_{self.current_epoch}_batch_{batch_idx+1}"
+                # --- Intra-epoch Checkpointing ---
+                current_batch_num = batch_idx + 1
+                if batches_between_checkpoints > 0 and current_batch_num % batches_between_checkpoints == 0:
+                    # Avoid double checkpoint if interval is 1 batch, or at very start/end
+                    if current_batch_num != last_checkpoint_batch and current_batch_num != total_batches:
+                        reason = f"epoch_{self.current_epoch+1}_batch_{current_batch_num}"
+                        log_statement('info', f'{LOG_INS}::Triggering intra-epoch checkpoint at batch {current_batch_num} (Reason: {reason}).', __name__)
                         self._save_checkpoint(reason=reason)
-                        last_checkpoint_batch = batch_idx
+                        last_checkpoint_batch = current_batch_num
 
             except Exception as e:
-                log_statement(loglevel=str("error"), logstatement=str(f"Error during training batch {batch_idx} in epoch {self.current_epoch}: {e}", exc_info=True), main_logger=str(__name__))
-                # Decide whether to continue to next batch or stop epoch/training
-                # continue # Example: Skip problematic batch
+                log_statement('error', f"{LOG_INS}::Critical error during training batch {batch_idx + 1} in epoch {self.current_epoch + 1}: {e}", __name__, exc_info=True)
+                # Decide recovery strategy: continue, break epoch, or raise
+                log_statement('warning', f'{LOG_INS}::Skipping problematic batch {batch_idx + 1} due to error.', __name__)
+                continue # Example: Skip batch on error
 
         pbar.close()
+        log_statement('debug', f'{LOG_INS}::Finished batch iteration for epoch.', __name__)
         avg_loss = total_loss / batch_count if batch_count > 0 else 0.0
         epoch_duration = (datetime.now() - epoch_start_time).total_seconds()
-        log_statement(loglevel=str("info"), logstatement=str(f"Epoch {self.current_epoch} finished. Avg Loss: {avg_loss:.4f}, Duration: {epoch_duration:.2f}s"), main_logger=str(__name__))
+        log_statement('info', f"{LOG_INS}::Epoch {self.current_epoch + 1} finished. Avg Loss: {avg_loss:.4f}, Duration: {epoch_duration:.2f}s", __name__)
 
         return avg_loss
 
     def train(self):
-        """Runs the full training loop over multiple epochs."""
-        log_statement(loglevel=str("info"), logstatement=str(f"Starting training for {self.config.MAX_EPOCHS} epochs."), main_logger=str(__name__))
+        """
+        Runs the full training loop over the configured number of epochs.
+        Manages epoch iteration, calls train_epoch, handles pruning intervals,
+        saves checkpoints, and saves metrics.
+        """
+        max_epochs = getattr(self.config, 'MAX_EPOCHS', 1) # Default to 1 epoch if not set
+        log_statement('info', f"{LOG_INS}::Starting full training loop for {max_epochs} epochs...", __name__)
         start_time = datetime.now()
 
-        for epoch in range(self.current_epoch, self.config.MAX_EPOCHS):
-            self.current_epoch = epoch
-            avg_loss = self.train_epoch()
+        initial_epoch = self.current_epoch # In case loaded from checkpoint
+        log_statement('debug', f"{LOG_INS}::Starting from epoch index: {initial_epoch}", __name__)
 
-            # --- Optional Pruning Step (End of Epoch) ---
-            if self.config.PRUNE_INTERVAL_EPOCHS > 0 and (epoch + 1) % self.config.PRUNE_INTERVAL_EPOCHS == 0:
-                log_statement(loglevel=str("info"), logstatement=str(f"Applying pruning after epoch {epoch}..."), main_logger=str(__name__))
+        for epoch in range(initial_epoch, max_epochs):
+            self.current_epoch = epoch # Update internal epoch index (0-based)
+            log_statement('info', f"{LOG_INS}::===== Starting Epoch {epoch + 1}/{max_epochs} =====", __name__)
+
+            # --- Run Single Epoch ---
+            avg_loss = self.train_epoch()
+            log_statement('info', f"{LOG_INS}::Epoch {epoch + 1} average loss: {avg_loss:.4f}", __name__)
+
+            # --- Pruning Step (Scheduled End of Epoch) ---
+            prune_interval = getattr(self.config, 'PRUNE_INTERVAL_EPOCHS', 0)
+            if prune_interval > 0 and (epoch + 1) % prune_interval == 0:
+                log_statement('info', f"{LOG_INS}::Applying pruning after epoch {epoch + 1} (Interval: {prune_interval} epochs).", __name__)
                 self._apply_pruning()
 
             # --- End of Epoch Checkpoint ---
-            self._save_checkpoint(reason=f"epoch_{epoch}_end")
+            reason = f"epoch_{epoch+1}_end"
+            log_statement('info', f"{LOG_INS}::Saving end-of-epoch checkpoint (Reason: {reason}).", __name__)
+            self._save_checkpoint(reason=reason)
 
-            # --- Save Metrics Periodically (e.g., every epoch) ---
-            self.metrics.save() # Saves with timestamp
+            # --- Save Metrics (e.g., every epoch) ---
+            log_statement('info', f"{LOG_INS}::Saving metrics after epoch {epoch + 1}.", __name__)
+            self.metrics.save() # Saves with timestamp by default
 
-            # --- Optional: Add validation loop here ---
+            # --- Optional: Add validation loop call here ---
+            # log_statement('info', f"{LOG_INS}::Running validation after epoch {epoch + 1}.", __name__)
             # self.validate()
 
+        # --- Training Finished ---
         end_time = datetime.now()
         total_duration = (end_time - start_time).total_seconds()
-        log_statement(loglevel=str("info"), logstatement=str(f"Training finished after {self.config.MAX_EPOCHS} epochs. Total duration: {total_duration:.2f}s"), main_logger=str(__name__))
-        # Save final metrics
-        self.metrics.save(filename=f"{TrainingConfig.METRICS_FILENAME_PREFIX}_final.csv")
+        actual_epochs_run = max_epochs - initial_epoch
+        log_statement('info', f"{LOG_INS}::Training loop finished after {actual_epochs_run} epochs.", __name__)
+        log_statement('info', f"{LOG_INS}::Total training duration: {total_duration:.2f} seconds.", __name__)
+
+        # Save final metrics state with a specific name
+        final_metrics_filename = f"{getattr(self.config, 'METRICS_FILENAME_PREFIX', 'training_metrics')}_final.csv"
+        log_statement('info', f"{LOG_INS}::Saving final metrics to {final_metrics_filename}.", __name__)
+        self.metrics.save(filename=final_metrics_filename)
 
     def _save_checkpoint(self, reason: str = "checkpoint"):
-        """Saves the current model, optimizer, and scheduler state."""
+        """
+        Saves the current training state (model, optimizer, scheduler, epoch, pruned count)
+        using the configured helper function `save_state`.
+        """
         filename = f"{type(self.model).__name__}_{reason}.pt"
-        log_statement(loglevel=str("info"), logstatement=str(f"Saving checkpoint: {filename}"), main_logger=str(__name__))
+        log_statement('info', f"{LOG_INS}::Saving checkpoint: {filename} (Reason: {reason})", __name__)
+        log_statement('debug', f'{LOG_INS}::Current state to save: epoch={self.current_epoch}, pruned_count={self.total_pruned_count}', __name__)
         try:
-            # Use the helper function
+            # Call the helper function, passing all relevant state
             save_state(
                 model=self.model,
                 filename=filename,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
-                epoch=self.current_epoch,
-                # Add any other relevant info
-                total_pruned_count=self.total_pruned_count,
-                # Note: Saving the entire metrics object might be large/inefficient.
-                # Consider saving the path to the metrics file or just recent metrics.
-                # metrics_data=self.metrics.metrics_data[-100:] # Example: last 100 rows
+                epoch=self.current_epoch, # Save the *completed* epoch index (0-based)
+                total_pruned_count=self.total_pruned_count
+                # Add any other custom data needed for restoring state if necessary
+                # custom_data = {'example': 'value'}
             )
+            log_statement('info', f'{LOG_INS}::Checkpoint save initiated for {filename}.', __name__)
         except Exception as e:
-            # Error is logged within save_state
-            log_statement(loglevel=str("error"), logstatement=str(f"Checkpoint saving failed for reason '{reason}'."), main_logger=str(__name__))
+            # Error should ideally be logged within save_state, but log here too.
+            log_statement('error', f"{LOG_INS}::Failed to initiate checkpoint save for '{filename}'. Error: {e}", __name__, exc_info=True)
 
-    def load_checkpoint(self, filename: str, load_optimizer: bool = True, load_scheduler: bool = True, strict: bool = True):
-        """Loads state from a checkpoint file."""
-        log_statement(loglevel=str("info"), logstatement=str(f"Attempting to load checkpoint: {filename}"), main_logger=str(__name__))
+    def load_checkpoint(self, filename: str, load_optimizer: bool = True, load_scheduler: bool = True, strict: bool = True) -> bool:
+        """
+        Loads training state from a checkpoint file using the helper function `load_state`.
+        Restores model weights, and optionally optimizer/scheduler states, epoch, and pruned count.
+
+        Args:
+            filename (str): The name of the checkpoint file (expected in checkpoint dir).
+            load_optimizer (bool): Whether to load the optimizer state. Defaults to True.
+            load_scheduler (bool): Whether to load the scheduler state. Defaults to True.
+            strict (bool): Whether to strictly enforce that the keys in state_dict
+                           match the keys returned by this module's state_dict().
+                           Defaults to True.
+
+        Returns:
+            bool: True if the checkpoint was loaded successfully, False otherwise.
+        """
+        log_statement('info', f"{LOG_INS}::Attempting to load checkpoint: {filename}", __name__)
+        log_statement('debug', f'{LOG_INS}::Load flags: optimizer={load_optimizer}, scheduler={load_scheduler}, strict={strict}', __name__)
         try:
-            # Use the helper function
+            # Call the helper function
             checkpoint_data = load_state(
                 model=self.model,
                 filename=filename,
@@ -669,23 +722,35 @@ class EnhancedTrainer:
             )
 
             if checkpoint_data:
-                # Restore epoch and other metadata if available
+                log_statement('info', f"{LOG_INS}::Checkpoint file '{filename}' loaded by helper function.", __name__)
+                # Restore metadata if available
                 if 'epoch' in checkpoint_data and checkpoint_data['epoch'] is not None:
-                    self.current_epoch = checkpoint_data['epoch'] + 1 # Start next epoch
-                    log_statement(loglevel=str("info"), logstatement=str(f"Resuming training from epoch {self.current_epoch}"), main_logger=str(__name__))
-                if 'total_pruned_count' in checkpoint_data:
-                    self.total_pruned_count = checkpoint_data['total_pruned_count']
-                    log_statement(loglevel=str("info"), logstatement=str(f"Restored pruned weight count: {self.total_pruned_count}"), main_logger=str(__name__))
-                # Restore metrics if saved/needed (might need custom logic)
+                    # Epoch saved is the completed epoch (0-based), so start next one
+                    self.current_epoch = checkpoint_data['epoch'] + 1
+                    log_statement('info', f"{LOG_INS}::Resuming training from epoch {self.current_epoch} (loaded completed epoch {checkpoint_data['epoch']}).", __name__)
+                else:
+                    log_statement('warning', f"'epoch' key not found or is None in checkpoint '{filename}'. Starting from epoch 0.", __name__)
+                    self.current_epoch = 0 # Reset if not found
 
-                log_statement(loglevel=str("info"), logstatement=str(f"Checkpoint '{filename}' loaded successfully."), main_logger=str(__name__))
+                if 'total_pruned_count' in checkpoint_data and checkpoint_data['total_pruned_count'] is not None:
+                    self.total_pruned_count = checkpoint_data['total_pruned_count']
+                    log_statement('info', f"{LOG_INS}::Restored pruned weight count: {self.total_pruned_count}", __name__)
+                else:
+                     log_statement('warning', f"'total_pruned_count' not found or is None in checkpoint '{filename}'. Resetting to 0.", __name__)
+                     self.total_pruned_count = 0 # Reset if not found
+
+                # Add logic here to restore metrics state if it was saved in the checkpoint
+                # Example: if 'metrics_data' in checkpoint_data: self.metrics.load_state(checkpoint_data['metrics_data'])
+
+                log_statement('info', f"{LOG_INS}::Checkpoint '{filename}' processed successfully.", __name__)
                 return True
             else:
-                log_statement(loglevel=str("error"), logstatement=str(f"Failed to load checkpoint '{filename}'. File not found or load_state returned None."), main_logger=str(__name__))
+                # load_state returned None, likely file not found or other load error logged within helper
+                log_statement('error', f"{LOG_INS}::Failed to load checkpoint '{filename}'. Check previous logs from load_state helper.", __name__)
                 return False
 
         except Exception as e:
-            log_statement(loglevel=str("error"), logstatement=str(f"Error loading checkpoint {filename}: {e}", exc_info=True), main_logger=str(__name__))
+            log_statement('error', f"{LOG_INS}::Critical error during checkpoint loading process for {filename}: {e}", __name__, exc_info=True)
             return False
 
     # --- Optional: Validation Loop ---

@@ -31,22 +31,6 @@ kdf = PBKDF2HMAC(
 ENCRYPTION_KEY = base64.urlsafe_b64encode(kdf.derive(PASSWORD))
 _CIPHER_SUITE = Fernet(ENCRYPTION_KEY)
 
-
-
-# --- Filepath Hashing (Encryption/Decryption) ---
-# Using encryption for filepaths as hashing is one-way
-def hash_filepath(filepath: str) -> str:
-    """
-    Encrypts a filepath to use as a 'hashed' identifier.
-    Returns a URL-safe base64 encoded encrypted string.
-    """
-    try:
-        encrypted_path = _CIPHER_SUITE.encrypt(filepath.encode('utf-8'))
-        return encrypted_path.decode('utf-8')
-    except Exception as e:
-        log_statement(loglevel=str("error"), logstatement=str(f"Error encrypting filepath '{filepath}': {e}"), main_logger=str(__name__))
-        return "" # Return empty string or handle error as appropriate
-
 def unhash_filepath(hashed_path: str) -> str:
     """
     Decrypts a 'hashed' (encrypted) filepath identifier.

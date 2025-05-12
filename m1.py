@@ -1,215 +1,85 @@
 # TLATOv4.1/src/m1.py
 # Contains the logic for the Data Processing and Tokenization submenu
-
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+import time
 import os
+import json
 import sys
 import hashlib
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
-import time
+from typing import Union, Dict, Optional, Any
 import json
 from pathlib import Path
-import concurrent.futures
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from transformers import AutoTokenizer
 import random
 import torch # For model loading and training type hints
-from transformers import AutoTokenizer, PreTrainedTokenizerBase # For tokenization type hints
 import inspect # For dynamic imports
-import math # For determining worker counts
+import traceback
 
 # --- Project Imports ---
 # Assuming PYTHONPATH is set correctly or main.py handles sys.path
+from src.analysis.labeler import SemanticLabeler, save_state, load_state
+from src.utils.helpers import _generate_file_paths
+from src.core.repo_handler import DataRepository
 from src.utils.helpers import *
 from src.utils.config import *
 from src.data.constants import *
-# Logger setup
-try:
-    from src.utils.logger import configure_logging, log_statement
-    # Configure logger immediately upon import if needed by the module
-    # Depending on logger.py, this might be done once in main.py instead.
-    # If configure_logging sets up handlers globally, calling it here is fine.
-    # If it returns a logger instance, adjust usage below. Assume it configures globally for now.
-    configure_logging()
-    log_statement(loglevel='info', logstatement="Logger configured via src.utils.logger.", main_logger=str(__name__))
-except ImportError:
-    # Fallback standard logging if custom logger fails
-    import logging
-    _logger = logging.getLogger(__name__)
-    _logger.setLevel(logging.WARNING)
-    if not _logger.handlers: # Avoid adding duplicate handlers
-        _ch = logging.StreamHandler()
-        _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        _ch.setFormatter(_formatter)
-        _logger.addHandler(_ch)
-    # Define a compatible log_statement function using the standard logger
-    def log_statement(loglevel, logstatement, main_logger, exc_info=False):
-        level_map = {
-            'debug': logging.DEBUG, 'info': logging.INFO, 'warning': logging.WARNING,
-            'error': logging.ERROR, 'critical': logging.CRITICAL
-        }
-        # Use the fallback logger specific to this module
-        fallback_logger = logging.getLogger(main_logger) # Get logger by name
-        # Ensure fallback logger has basic config if it wasn't the main __name__ logger
-        if not fallback_logger.handlers:
-             fallback_logger.setLevel(logging.WARNING)
-             fallback_logger.addHandler(_ch) # Add the handler configured above
-        fallback_logger.log(level_map.get(loglevel.lower(), logging.WARNING), logstatement, exc_info=exc_info)
-    log_statement(loglevel='error', logstatement="Custom logger module not found. Using fallback standard logging.", main_logger=str(__name__))
-
-# Configuration Constants
-try:
-    from src.utils.config import (
-        load_config,
-        BASE_DATA_DIR,
-        RAW_DATA_DIR, # May not be used directly here, but available
-        PROCESSED_DATA_DIR,
-        TOKENIZED_DATA_DIR,
-        SYNTHETIC_DATA_DIR, # May not be used directly here
-        CHECKPOINT_DIR,
-        LOG_DIR,
-        DEFAULT_DEVICE
-        # Constants related to data structure/columns (attempt import)
-        # Assuming these might be defined in config or a constants file
-        # If not, defaults will be used below
-    )
-    # Ensure base directories are Path objects
-    BASE_DATA_DIR = Path(BASE_DATA_DIR)
-    PROCESSED_DATA_DIR = Path(PROCESSED_DATA_DIR)
-    TOKENIZED_DATA_DIR = Path(TOKENIZED_DATA_DIR)
-    CHECKPOINT_DIR = Path(CHECKPOINT_DIR)
-    LOG_DIR = Path(LOG_DIR)
-    log_statement(loglevel='info', logstatement="Configuration constants loaded.", main_logger=str(__name__))
-except ImportError as e:
-     log_statement(loglevel='error', logstatement=f"Failed to import constants from src.utils.config: {e}. Using defaults.", main_logger=str(__name__))
-     # Define fallback defaults if config load fails
-     BASE_DATA_DIR = Path(".")
-     PROCESSED_DATA_DIR = BASE_DATA_DIR / "processed_data"
-     TOKENIZED_DATA_DIR = BASE_DATA_DIR / "tokenized_data"
-     CHECKPOINT_DIR = BASE_DATA_DIR / "checkpoints"
-     LOG_DIR = BASE_DATA_DIR / "logs"
-     DEFAULT_DEVICE = "auto"
-
-# Data/Repo Constants (Try importing, otherwise define locally)
-try:
-    # Dynamically import all constants and assign them as variables with their own names
-    from src.data.constants import *
-    # Use imported constants for column definitions
-    REPO_COLUMNS = [COL_FILEPATH, COL_FILENAME, COL_SIZE, COL_MTIME, COL_CTIME, COL_HASH, COL_EXTENSION]
-    # Define other repo columns, mixing constants and local names
-    PROCESSED_REPO_COLUMNS = ['processed_filepath', 'processed_hash', COL_FILEPATH, COL_HASH, COL_MTIME] # Map to original cols
-    TOKENIZED_REPO_COLUMNS = ['tokenized_filepath', 'processed_filepath', 'processed_hash', 'tokenizer_name'] # Use processed cols
-    log_statement(loglevel='info', logstatement="Data constants (column names) loaded from src.data.constants.", main_logger=str(__name__))
-
-except ImportError:
-    log_statement(loglevel='warning', logstatement="src.data.constants not found or missing column names. Using local defaults.", main_logger=str(__name__))
-    # Define local column names as fallback
-    COL_FILEPATH = 'filepath' # Need to define these if import fails
-    COL_FILENAME = 'filename'
-    COL_SIZE = 'size'
-    COL_MTIME = 'mtime'
-    COL_CTIME = 'ctime'
-    COL_HASH = 'file_hash'
-    COL_EXTENSION = 'extension'
-    REPO_COLUMNS = [COL_FILEPATH, COL_FILENAME, COL_SIZE, COL_MTIME, COL_CTIME, COL_HASH, COL_EXTENSION]
-    PROCESSED_REPO_COLUMNS = ['processed_filepath', 'processed_hash', COL_FILEPATH, COL_HASH, COL_MTIME]
-    TOKENIZED_REPO_COLUMNS = ['tokenized_filepath', 'processed_filepath', 'processed_hash', 'tokenizer_name']
-
-# Other Core Project Imports
-try:
-    from src.utils.hashing import unhash_filepath as unhash_file
-except ImportError: 
-    def calculate_file_hash(p): 
-        log_statement('warning','Dummy hash func used',__name__); return None
-try:
-    from src.utils.hashing import hash_filepath as calculate_file_hash
-except ImportError:
-    def set_compute_device(p): 
-        log_statement('warning','Dummy GPU switch func used',__name__); return 'cpu'
-try:
-    from src.utils.gpu_switch import set_compute_device
-except ImportError:
-    def set_compute_device(p):
-        log_statement('warning','Dummy GPU switch func used',__name__); return 'cpu'
-try:    
-    from src.utils.helpers import clear_screen # If needed
-except ImportError:
-    def clear_screen(): pass # Dummy function if not available
-try:
-    from src.data.readers import read_file
-except ImportError:
-    def read_file(p):
-        log_statement('warning','Dummy read_file func used',__name__); return ""
-try:
-    from src.data.processing import DataProcessor as dp
-except ImportError:
-    class DataProcessor:
-        def __init__(self, config=None): pass
-        def preprocess_text(self, text): return text
-except ImportError:
-    class TokenizerWrapper:
-        def __init__(self, model_name_or_path, config=None): 
-            self.name_or_path=model_name_or_path
-            def __call__(self, text): return text
-try:
-    from src.data.loaders import TokenDataset, create_dataloader # Assuming these exist
-except ImportError:
-    class TokenDataset:
-        def __init__(self, token_files):
-            self.files=token_files
-            def __len__(self): return len(self.files)
-    class TokenDataset:
-        def __init__(self, token_files):
-            self.files=token_files
-            def __len__(self): return len(self.files)
-try:
-    from src.core.models import load_model_from_checkpoint
-except ImportError:
-    def load_model_from_checkpoint(p):
-        log_statement('warning','Dummy model load func used',__name__); return None, None
-try:
-    from src.training.trainer import Trainer
-except ImportError:
-    class Trainer:
-        def __init__(self, model, train_dataloader, config, device, hyperparameters): pass
-        def train(self): time.sleep(2)
-except Exception as e:
-    log_statement(loglevel='error', logstatement=f"Failed to import core project modules: {e}. Functionality limited.", main_logger=str(__name__), exc_info=True)
-    # Define dummies if needed, log_statement handles logger dummy
-    if 'calculate_file_hash' not in globals():
-        def calculate_file_hash(p): return None
-    if 'set_compute_device' not in globals():
-        def set_compute_device(p): return 'cpu'
-    if 'read_file' not in globals():
-        def read_file(p): return ""
-    if 'DataProcessor' not in globals():
-        class DataProcessor:
-            def __init__(self, config=None): pass
-            def preprocess_text(self, text): return text
-    if 'TokenizerWrapper' not in globals():
-        class TokenizerWrapper:
-            def __init__(self, model_name_or_path, config=None): 
-                self.name_or_path=model_name_or_path
-                def __call__(self, text): return text
-    if 'TokenDataset' not in globals():
-        class TokenDataset:
-            def __init__(self, token_files):
-                self.files=token_files
-                def __len__(self): return len(self.files)
-    if 'create_dataloader' not in globals():
-        def create_dataloader(ds, batch_size, shuffle=True, num_workers=0, persistent_workers=False): pass
-    if 'load_model_from_checkpoint' not in globals(): 
-        def load_model_from_checkpoint(p): return None, None
-    if 'Trainer' not in globals():
-        class Trainer:
-            def __init__(self, model, train_dataloader, config, device, hyperparameters): pass
-            def train(self): time.sleep(2)
+from src.data.processing import DataProcessor, Tokenizer
+from src.utils.logger import configure_logging, log_statement
+configure_logging()
+log_statement(loglevel='info', logstatement=f"{LOG_INS} - Logger configured via src.utils.logger.", main_logger=__file__)
+from src.utils.config import *
+from src.data.constants import *
+from src.utils.hashing import generate_data_hash, hash_filepath as calculate_file_hash
+from src.utils.gpu_switch import set_compute_device
+from src.data.readers import *
+from src.data.processing import DataProcessor, Tokenizer
+from src.core.models import load_model_from_checkpoint, ZoneClassifier
+from src.training.trainer import EnhancedTrainer, EnhancedDataLoader
+from src.data.loaders import EnhancedDataLoader#, TokenDataset, create_dataloader
+essential_imports_available = True
 
 # --- Derived Constants ---
 DATA_REPO_DIR = BASE_DATA_DIR / "repositories" # Central place for repo metadata CSVs
 INDEX_FILE = DATA_REPO_DIR / "repository_index.json" # Index file location
-DEFAULT_MODEL_SAVE_DIR = CHECKPOINT_DIR # Use CHECKPOINT_DIR as default save location
-DEFAULT_MAX_WORKERS = os.cpu_count() or 16
 
-from src.utils.config import load_config
+if not INDEX_FILE.exists():
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Creating new repository index file at {INDEX_FILE}.", main_logger=__file__)
+    DataProcessor._ensure_repo_exists(filepath=Path(INDEX_FILE), header=MAIN_REPO_HEADER)
+    repository_index = {}
+    with open(INDEX_FILE, 'w') as f:
+        json.dump(repository_index, f, indent=4)
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Initialized empty repository index file at {INDEX_FILE}.", main_logger=__file__)
+else:
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Validating existing repository index file at {INDEX_FILE}.", main_logger=__file__)
+    try:
+        with open(INDEX_FILE, 'r') as f:
+            repository_index = json.load(f)
+        if not isinstance(repository_index, dict):
+            raise ValueError("Repository index file is not a valid dictionary. Reinitializing.")
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error reading repository index file: {e}. Reinitializing.", main_logger=__file__, exc_info=True)
+        repository_index = {}
+        with open(INDEX_FILE, 'w') as f:
+            json.dump(repository_index, f, indent=4)
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Reinitialized repository index file at {INDEX_FILE}.", main_logger=__file__)
+
+DEFAULT_MODEL_SAVE_DIR = CHECKPOINT_DIR  # Use CHECKPOINT_DIR as default save location
+DEFAULT_MAX_WORKERS = os.cpu_count() or 16
+project_root = Path(__file__).resolve().parents[1]
+src_path = project_root / "src"
+if str(src_path) not in sys.path:
+    sys.path.insert(0, str(src_path))
+
+LOG_INS_MODULE = Path(__file__).stem
 
 # --- Application State ---
 app_state = {
@@ -231,111 +101,918 @@ def _get_max_workers(config=None):
     if isinstance(general_workers, int) and general_workers > 0: return general_workers
     return min(os.cpu_count() or 4, 32) # Cap default
 
-def _ensure_dir_exists(dir_path: Path):
-    """Creates a directory if it doesn't exist."""
+def _get_repo_hash(path_input: Union[str, Path]): # Accept str or Path
+    """Generates a consistent hash for a directory path."""
+    main_logger_name=__file__ # Define logger name locally
     try:
-        dir_path.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        log_statement(loglevel='error', logstatement=f"Could not create directory {dir_path}: {e}", main_logger=str(__name__), exc_info=True)
-        raise
+        # Ensure we have a Path object
+        if isinstance(path_input, str):
+            path_obj = Path(path_input)
+        elif isinstance(path_input, Path):
+            path_obj = path_input
+        else:
+            raise TypeError(f"Input must be a string or Path object, got {type(path_input)}")
 
-def _get_repo_hash(path_obj: Path):
-    # Generates a consistent hash for a directory path.
-    log_statement(loglevel='info', logstatement=f"Getting repository hash for {path_obj}:", main_logger=__name__)
-    normalized_path_str = str(path_obj.resolve())
-    log_statement(loglevel='info', logstatement=f"Generating hash for path {normalized_path_str}", main_logger=__name__)
-    return hashlib.sha256(normalized_path_str.encode()).hexdigest()[:16]
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Getting repository hash for {path_obj}", main_logger=main_logger_name) # Use debug
+        normalized_path_str = str(path_obj.resolve())
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Generating hash for resolved path: {normalized_path_str}", main_logger=main_logger_name) # Use debug
+        return hashlib.sha256(normalized_path_str.encode()).hexdigest()[:16] # Keep consistent length
+
+    except Exception as e:
+        # Log the error and the input that caused it
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error generating repo hash for input '{path_input}': {e}", main_logger=main_logger_name, exc_info=True)
+        return None # Return None on error
 
 def _get_repository_info(folder_path_obj: Path):
     """Generates hash and filename for the main data repository."""
     repo_hash = _get_repo_hash(folder_path_obj)
     # Store repo CSVs in DATA_REPO_DIR (derived from BASE_DATA_DIR)
-    repo_filename = DATA_REPO_DIR / f"data_repository_{repo_hash}.csv.gz"
-    log_statement(loglevel='debug', logstatement=f"Generated main repository info for '{folder_path_obj.resolve()}': hash={repo_hash}, filename={repo_filename}", main_logger=str(__name__))
+    repo_filename = DATA_REPO_DIR / f"data_repository_{repo_hash}.csv.zst"
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Generated main repository info for '{folder_path_obj.resolve()}': hash={repo_hash}, filename={repo_filename}", main_logger=__file__)
     return repo_hash, repo_filename
-
-def _load_repository_index():
-    """Loads the hash -> original_path mapping from the index file."""
-    log_statement(loglevel='info', logstatement=f"Ensuring directory exists for {DATA_REPO_DIR}", main_logger=__name__)
-    _ensure_dir_exists(DATA_REPO_DIR) # Use central repo dir
-    if not INDEX_FILE.exists():
-        log_statement(loglevel='warning', logstatement=f"Repository index file '{INDEX_FILE}' not found. Starting fresh.", main_logger=str(__name__))
-        return {}
-    try:
-        with open(INDEX_FILE, 'r') as f: index_data = json.load(f)
-        log_statement(loglevel='info', logstatement=f"Loaded repository index from '{INDEX_FILE}' with {len(index_data)} entries.", main_logger=str(__name__))
-        return {h: Path(p) for h, p in index_data.items()}
-    except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Failed to load repository index '{INDEX_FILE}': {e}", main_logger=str(__name__), exc_info=True)
-        return {}
-
-def _save_repository_index(index_data):
-    """Saves the hash -> original_path mapping to the index file."""
-    _ensure_dir_exists(DATA_REPO_DIR)
-    try:
-        serializable_data = {h: str(p.resolve()) for h, p in index_data.items()}
-        with open(INDEX_FILE, 'w') as f: json.dump(serializable_data, f, indent=4)
-        log_statement(loglevel='info', logstatement=f"Saved repository index to '{INDEX_FILE}' with {len(index_data)} entries.", main_logger=str(__name__))
-    except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Failed to save repository index '{INDEX_FILE}': {e}", main_logger=str(__name__), exc_info=True)
 
 def _find_sub_repositories(target_path_obj: Path, repo_index: dict):
     """Identifies existing repositories that cover subdirectories of the target path."""
     sub_repos = []
     target_path_res = target_path_obj.resolve()
-    log_statement(loglevel='info', logstatement=f"Checking {len(repo_index)} existing repositories for sub-paths of '{target_path_res}'...", main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Checking {len(repo_index)} existing repositories for sub-paths of '{target_path_res}'...", main_logger=__file__)
     for repo_hash, existing_path_obj in repo_index.items():
         try:
             existing_path_res = existing_path_obj.resolve()
             if target_path_res != existing_path_res and target_path_res in existing_path_res.parents:
-                repo_filename = DATA_REPO_DIR / f"data_repository_{repo_hash}.csv.gz" # Use central repo dir
+                repo_filename = DATA_REPO_DIR / f"data_repository_{repo_hash}.csv.zst" # Use central repo dir
                 if repo_filename.exists():
-                    log_statement(loglevel='debug', logstatement=f"Found potential sub-repository: hash={repo_hash}, path='{existing_path_res}', file='{repo_filename}'", main_logger=str(__name__))
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Found potential sub-repository: hash={repo_hash}, path='{existing_path_res}', file='{repo_filename}'", main_logger=__file__)
                     sub_repos.append((repo_hash, existing_path_res, repo_filename))
                 else:
-                     log_statement(loglevel='warning', logstatement=f"Index points to non-existent repo file '{repo_filename}'. Skipping.", main_logger=str(__name__))
+                     log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Index points to non-existent repo file '{repo_filename}'. Skipping.", main_logger=__file__)
         except Exception as e:
-             log_statement(loglevel='error', logstatement=f"Error processing potential sub-repository hash {repo_hash} path '{existing_path_obj}': {e}", main_logger=str(__name__), exc_info=True)
-    log_statement(loglevel='info', logstatement=f"Found {len(sub_repos)} potential sub-repositories.", main_logger=str(__name__))
+             log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error processing potential sub-repository hash {repo_hash} path '{existing_path_obj}': {e}", main_logger=__file__, exc_info=True)
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Found {len(sub_repos)} potential sub-repositories.", main_logger=__file__)
     return sub_repos
 
-def _get_file_metadata(filepath: Path):
-    """Extracts metadata for a single file using constants for column names."""
+def _initialize_repository_index():
+    """Ensures the repository index file is properly structured and populated."""
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Initializing repository index structure.", main_logger=__file__)
     try:
-        if not filepath.is_file(): return None
-        stat = filepath.stat()
-        file_hash = calculate_file_hash(str(filepath))
-        if file_hash is None:
-             log_statement(loglevel='warning', logstatement=f"Could not calculate hash for {filepath}", main_logger=str(__name__))
-
-        # Use imported constants for keys if they exist
-        metadata = {
-            COL_FILEPATH: str(filepath.resolve()),
-            COL_FILENAME: filepath.name,
-            COL_SIZE: stat.st_size,
-            COL_MTIME: stat.st_mtime,
-            COL_CTIME: stat.st_ctime,
-            COL_HASH: file_hash,
-            COL_EXTENSION: filepath.suffix.lower()
-        }
-        return metadata
+        with open(INDEX_FILE, 'r') as f: repository_index = json.load(f)
     except Exception as e:
-        log_statement(loglevel='warning', logstatement=f"Could not get metadata for {filepath}: {e}", main_logger=str(__name__), exc_info=False)
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Failed to load repository index: {e}. Reinitializing.", main_logger=__file__, exc_info=False)
+        repository_index = {} # Start fresh if load fails
+
+    updated_index = {}
+    if isinstance(repository_index, dict): # Process only if it's a dict
+        for folder, files in repository_index.items():
+            folder_path = Path(folder)
+            if not folder_path.is_dir(): # Check if directory exists
+                log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Folder {folder} no longer exists. Skipping.", main_logger=__file__)
+                continue
+            # Assume files is a list of file entries (dicts) - add more validation if needed
+            if isinstance(files, list):
+                 updated_files = []
+                 for file_entry in files:
+                     if isinstance(file_entry, dict) and 'filepath' in file_entry:
+                         file_path = Path(file_entry.get('filepath', ''))
+                         if not file_path.is_file(): # Check if file exists
+                             file_entry['status'] = 'nonexistent'
+                         else:
+                             # Example updates, adjust as needed
+                             file_entry['status'] = file_entry.get('status', 'unknown') # Keep existing status or mark unknown
+                             try:
+                                 stat = file_path.stat()
+                                 file_entry['last_access_date'] = time.ctime(stat.st_atime)
+                                 file_entry['last_modified_time'] = time.ctime(stat.st_mtime)
+                                 file_entry['filesize'] = stat.st_size
+                                 file_entry['extension'] = file_path.suffix.lower()
+                                 # Recalculate hash only if missing or explicitly needed? Heavy operation.
+                                 if 'data_hash' not in file_entry or not file_entry['data_hash']:
+                                     file_entry['data_hash'] = calculate_file_hash(str(file_path)) or ""
+                             except Exception as stat_e:
+                                 log_statement(loglevel='error', logstatement=f"{LOG_INS} - Could not stat/hash file {file_path}: {stat_e}", main_logger=__file__)
+                                 file_entry['status'] = 'error'
+                         updated_files.append(file_entry)
+                     else:
+                         log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Skipping invalid file entry in index for folder {folder}: {file_entry}", main_logger=__file__)
+                 updated_index[str(folder_path.resolve())] = updated_files
+            else:
+                 log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Invalid 'files' format for folder {folder} in index. Expected list, got {type(files)}.", main_logger=__file__)
+    else:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Repository index file {INDEX_FILE} does not contain a valid dictionary.", main_logger=__file__)
+        # Decide whether to wipe the file or just return empty
+        updated_index = {} # Reinitialize
+
+    # Save the potentially modified index
+    try:
+        DATA_REPO_DIR.mkdir(parents=True, exist_ok=True) # Ensure dir exists before saving
+        with open(INDEX_FILE, 'w') as f:
+            json.dump(updated_index, f, indent=4)
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Repository index updated/validated and saved to {INDEX_FILE}.", main_logger=__file__)
+    except Exception as save_e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to save updated repository index {INDEX_FILE}: {save_e}", main_logger=__file__, exc_info=True)
+
+def print_welcome_message():
+    log_statement('info', f">>>>>>>>>>>>>>>{LOG_INS}<<<<<<<<<<<<<<", __file__)
+    log_statement('info', "=" * 44, __file__)
+    log_statement('info', " >>>>>     Welcome, To Zombocom     <<<<< ", __file__)
+    log_statement('info', " >>>>>     ANYTHING Is Possible     <<<<< ", __file__)
+    log_statement('info', " >>>>>        At Zombocom           <<<<< ", __file__)
+    log_statement('info', "", __file__)
+    log_statement('info', "", __file__)
+    log_statement('info', "*" * 44, __file__)
+
+# Replace the existing _load_repository_index function (around line 211):
+def _load_repository_index():
+    """Loads the hierarchical repository index from the JSON file."""
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Ensuring directory exists for {DATA_REPO_DIR}", main_logger=__file__)
+    DATA_REPO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Use INDEX_FILE constant defined at top level
+    if not INDEX_FILE.exists():
+        _initialize_repository_index()
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Repository index file '{INDEX_FILE}' not found. Starting fresh.", main_logger=__file__)
+        return {} # Return empty dict
+
+    try:
+        with open(INDEX_FILE, 'r') as f:
+            index_data = json.load(f)
+
+        # --- Validation and Conversion ---
+        loaded_index = {}
+        if isinstance(index_data, dict):
+            for repo_hash, entry in index_data.items():
+                # Check if entry is the old format (just path string)
+                if isinstance(entry, str):
+                     log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Found old format entry for hash {repo_hash}. Converting.", main_logger=__file__)
+                     try:
+                         path_obj = Path(entry)
+                         loaded_index[repo_hash] = {
+                             INDEX_KEY_PATH: path_obj,
+                             INDEX_KEY_METADATA: {}, # Initialize empty metadata
+                             INDEX_KEY_CHILDREN: []   # Initialize empty children
+                         }
+                     except Exception as path_e:
+                         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error converting old path '{entry}' for hash {repo_hash}: {path_e}", main_logger=__file__)
+                # Check if entry is the new format (dict)
+                elif isinstance(entry, dict) and INDEX_KEY_PATH in entry:
+                    try:
+                        path_obj = Path(entry[INDEX_KEY_PATH])
+                        # Ensure metadata and children keys exist, default if not
+                        metadata = entry.get(INDEX_KEY_METADATA, {})
+                        children = entry.get(INDEX_KEY_CHILDREN, [])
+                        if not isinstance(metadata, dict): metadata = {}
+                        if not isinstance(children, list): children = []
+
+                        loaded_index[repo_hash] = {
+                            INDEX_KEY_PATH: path_obj,
+                            INDEX_KEY_METADATA: metadata,
+                            INDEX_KEY_CHILDREN: children
+                        }
+                    except Exception as path_e:
+                         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error processing new format entry for hash {repo_hash}: {path_e}", main_logger=__file__)
+                else:
+                     log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Skipping invalid entry in index file for hash {repo_hash}: {entry}", main_logger=__file__)
+
+        else:
+             log_statement(loglevel='error', logstatement=f"{LOG_INS} - Repository index file '{INDEX_FILE}' is not a valid JSON dictionary. Reinitializing.", main_logger=__file__)
+             return {} # Return empty on invalid format
+
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Loaded repository index from '{INDEX_FILE}' with {len(loaded_index)} entries.", main_logger=__file__)
+        return loaded_index
+
+    except json.JSONDecodeError as json_e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to decode JSON repository index '{INDEX_FILE}': {json_e}", main_logger=__file__, exc_info=True)
+        return {} # Return empty on decode error
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to load repository index '{INDEX_FILE}': {e}", main_logger=__file__, exc_info=True)
+        return {} # Return empty on other errors
+
+# Replace the existing _save_repository_index function (around line 226):
+def _save_repository_index(index_data: Dict[str, Dict]):
+    """
+    Saves the hierarchical repository index, calculates parent/child relationships,
+    and updates metadata for specified entries.
+
+    Args:
+        index_data (Dict[str, Dict]): The repository index data structure to save.
+                                      Structure: {hash: {"path": Path, "metadata": {}, "children": []}}
+        update_metadata_for_hash (Optional[str]): If provided, recalculates metadata for this specific hash.
+    """
+    DATA_REPO_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --- Recalculate Parent/Child Relationships ---
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Recalculating parent/child relationships in repository index.", main_logger=__file__)
+    path_to_hash = str({Path(entry[INDEX_KEY_PATH].resolve()): h for h, entry in index_data.items()})
+    hash_to_path = {h: entry[INDEX_KEY_PATH].resolve() for h, entry in index_data.items()}
+
+    # Reset children lists first
+    for h in index_data:
+        index_data[h][INDEX_KEY_CHILDREN] = []
+
+    # Determine children
+    sorted_hashes = sorted(index_data.keys(), key=lambda h: len(hash_to_path[h].parts), reverse=True) # Process deeper paths first
+
+    for h_child in sorted_hashes:
+        child_path = hash_to_path[h_child]
+        for h_parent in index_data:
+            if h_child == h_parent: continue # Skip self
+            parent_path = hash_to_path[h_parent]
+            # Check if parent_path is a direct parent of child_path
+            if parent_path == child_path.parent:
+                 if h_child not in index_data[h_parent][INDEX_KEY_CHILDREN]:
+                     index_data[h_parent][INDEX_KEY_CHILDREN].append(h_child)
+                 break # Found direct parent, move to next child
+
+    # --- Serialize for JSON ---
+    serializable_data = {}
+    for repo_hash, entry in index_data.items():
+        serializable_data[repo_hash] = {
+            INDEX_KEY_PATH: str(entry[INDEX_KEY_PATH].resolve()), # Store resolved path string
+            INDEX_KEY_METADATA: entry.get(INDEX_KEY_METADATA, {}), # Keep existing metadata
+            INDEX_KEY_CHILDREN: entry.get(INDEX_KEY_CHILDREN, []) # Store children list
+        }
+
+    # --- Save to JSON ---
+    try:
+        with open(INDEX_FILE, 'w') as f:
+            json.dump(serializable_data, f, indent=4, sort_keys=True) # Sort keys for consistency
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Saved repository index to '{INDEX_FILE}' with {len(index_data)} entries.", main_logger=__file__)
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to save repository index '{INDEX_FILE}': {e}", main_logger=__file__, exc_info=True)
+
+# --- Helper function to update metadata for a specific repository ---
+def _update_index_metadata(index_data: Dict[str, Dict], repo_hash_to_update: str):
+    """
+    Loads the corresponding .csv.zst, gets summary metadata, and updates the index_data.
+    """
+    if repo_hash_to_update not in index_data:
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Cannot update metadata, hash '{repo_hash_to_update}' not found in index.", main_logger=__file__)
+        return
+
+    entry = index_data[repo_hash_to_update]
+    path_obj = entry[INDEX_KEY_PATH]
+    repo_filename = DATA_REPO_DIR / f"data_repository_{repo_hash_to_update}.csv.zst"
+
+    if not repo_filename.exists():
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Cannot update metadata, repository file not found: {repo_filename}", main_logger=__file__)
+        entry[INDEX_KEY_METADATA] = {"error": "Repository file missing"}
+        return
+
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Updating index metadata for repository: {path_obj.name} (Hash: {repo_hash_to_update})", main_logger=__file__)
+    try:
+        # Use DataRepository to load and get summary
+        repo = DataRepository(repo_path=repo_filename)
+        summary = repo.get_summary_metadata() # Call the new method
+        if summary:
+            entry[INDEX_KEY_METADATA] = summary
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Successfully updated metadata for hash {repo_hash_to_update}: {summary}", main_logger=__file__)
+        else:
+             entry[INDEX_KEY_METADATA] = {"error": "Failed to calculate summary"}
+             log_statement(loglevel='warning', logstatement=f"{LOG_INS} - get_summary_metadata returned empty for {repo_filename}", main_logger=__file__)
+
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to load repository or get summary for {repo_filename} to update index metadata: {e}", main_logger=__file__, exc_info=True)
+        entry[INDEX_KEY_METADATA] = {"error": f"Metadata update failed: {e}"}
+
+# def _validate_sub_repository(repo_file: Path, original_path: Path, num_check=10):
+#     """Validates a sub-repository using defined constants, with thread-safe counter."""
+#     max_workers = _get_max_workers()
+#     log_statement(loglevel='info', logstatement=f"Validating sub-repository: {repo_file} (using up to {max_workers} workers)", main_logger=__file__)
+#     try:
+#         repo = DataRepository(repo_path=repo_file)
+#         df = repo.df
+#         if df is None:
+#             log_statement(loglevel='error', logstatement=f"DataRepository failed to load {repo_file}. Invalid.", main_logger=__file__)
+#             return False, None
+#         log_statement(loglevel='debug', logstatement=f"Loaded {repo_file} via DataRepository with {len(df)} entries.", main_logger=__file__)
+
+#         required_cols = [COL_FILEPATH, COL_SIZE, COL_MTIME, COL_HASH]
+#         if not all(col in df.columns for col in required_cols):
+#              log_statement(loglevel='warning', logstatement=f"Sub-repository {repo_file} missing required columns ({required_cols}). Invalid.", main_logger=__file__)
+#              return False, None
+#         if not original_path.is_dir(): return False, None # Original path must still exist
+
+#         num_to_check = min(num_check, len(df))
+#         if num_to_check == 0: return True, df
+
+#         sample_indices = random.sample(range(len(df)), num_to_check)
+#         files_to_check = df.iloc[sample_indices]
+
+#         # --- Thread-safe mismatch counter ---
+#         mismatches = 0
+#         mismatch_lock = threading.Lock()
+#         # ---
+
+#         log_statement(loglevel='debug', logstatement=f"Checking {num_to_check} sample files from {repo_file} using {max_workers} workers.", main_logger=__file__)
+
+#         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+#             path_to_stored_row = {Path(row[COL_FILEPATH]): row for _, row in files_to_check.iterrows()}
+#             future_to_path = {executor.submit(_get_file_metadata, path): path for path in path_to_stored_row.keys()}
+
+#             pbar_validate = tqdm(as_completed(future_to_path), total=len(future_to_path), desc=f"Validating {repo_file.name}", leave=False, unit="file")
+#             for future in pbar_validate:
+#                 current_path = future_to_path[future]
+#                 stored_row = path_to_stored_row[current_path]
+#                 increment_mismatch = False
+#                 try:
+#                     current_metadata = future.result()
+#                     if current_metadata is None:
+#                         increment_mismatch = True
+#                     else:
+#                         # Compare using constants
+#                         size_mismatch = current_metadata[COL_SIZE] != stored_row[COL_SIZE]
+#                         mtime_mismatch = abs(current_metadata[COL_MTIME] - stored_row[COL_MTIME]) > 1 # Allow 1s difference
+#                         hash_mismatch = current_metadata[COL_HASH] != stored_row[COL_HASH]
+#                         if size_mismatch or mtime_mismatch or hash_mismatch:
+#                             increment_mismatch = True
+#                             log_statement(loglevel='debug',
+#                                           logstatement=f"Mismatch found for {current_path.name}: "
+#                                                        f"Size({size_mismatch}), MTime({mtime_mismatch}), Hash({hash_mismatch})",
+#                                           main_logger=__file__)
+
+#                 except Exception as exc:
+#                     log_statement(loglevel='error', logstatement=f'Validation check exception for {current_path}: {exc}', main_logger=__file__, exc_info=False) # Keep log concise
+#                     increment_mismatch = True
+
+#                 if increment_mismatch:
+#                     with mismatch_lock: # Lock the counter increment
+#                         mismatches += 1
+
+#         # Read the final mismatch count after the parallel block
+#         final_mismatches = mismatches
+
+#         if final_mismatches == 0:
+#             log_statement(loglevel='info', logstatement=f"Validation successful for {repo_file}.", main_logger=__file__)
+#             return True, df
+#         else:
+#             log_statement(loglevel='warning', logstatement=f"Validation failed for {repo_file} ({final_mismatches}/{num_to_check} mismatches).", main_logger=__file__)
+#             return False, None
+
+#     except ImportError:
+#         log_statement(loglevel='critical', logstatement=f"DataRepository class not available. Cannot load {repo_file}.", main_logger=__file__)
+#         return False, None
+#     except Exception as e:
+#         log_statement(loglevel='error', logstatement=f"Error instantiating/loading DataRepository for {repo_file}: {e}", main_logger=__file__, exc_info=True)
+#         return False, None
+
+def set_data_directory(): # Added app_state argument as it's likely needed
+    """
+    Handles Option 1: Set Data Directory.
+    Integrates sub-repository discovery, validation, scanning, and
+    detailed file reconciliation (new, modified, deleted).
+    Updates the global app_state.
+    """
+    # global app_state # Keep global if app_state is truly global, otherwise remove if passed in
+    frame = inspect.currentframe()
+    LOG_INS = f"{LOG_INS_MODULE}::set_data_directory::{frame.f_lineno if frame else 'UnknownLine'}"
+    global app_state
+
+    log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Starting 'Set Data Directory' process.", main_logger=__file__)
+    folder_path_str = ""
+    target_path_resolved = None # Initialize for use in final log message
+
+    try:
+        # --- 1. Get and Validate Target Directory ---
+        # Use BASE_DATA_DIR from config/constants as part of the example prompt
+        example_path = BASE_DATA_DIR # Assuming BASE_DATA_DIR is Path object
+        folder_path_str = input(f"Enter the full path to the data directory (e.g., {example_path}): ").strip()
+        if not folder_path_str:
+             log_statement(loglevel='warning', logstatement=f"{LOG_INS}:WARNING>>No path entered by user. Aborting.", main_logger=__file__)
+             print("Operation cancelled.")
+             return
+
+        target_path = Path(folder_path_str)
+        if not target_path.exists():
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Directory path does not exist: {target_path}", main_logger=__file__)
+             print(f"Error: Path does not exist: {target_path}")
+             return
+        if not target_path.is_dir():
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Provided path is not a directory: {target_path}", main_logger=__file__)
+            print(f"Error: Invalid directory path: {target_path}")
+            return
+
+        target_path_resolved = target_path.resolve()
+        log_statement(loglevel="info", logstatement=f"{LOG_INS}:INFO>>Processing directory: {target_path_resolved}", main_logger=__file__)
+
+        # --- Get Repo Info & Calculate Central Storage Path ---
+        # Assuming _get_repository_info calculates hash and base filename from target_path_resolved
+        repo_hash, repo_base_filename = _get_repository_info(target_path_resolved) # Requires helper
+        repo_storage_path = DATA_REPO_DIR / repo_base_filename # Construct full path in central dir
+        # Define the expected index path (e.g., in the same central directory)
+        central_index_path = DATA_REPO_DIR / INDEX_FILE
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Target data dir='{target_path_resolved}', Hash={repo_hash}, Repo Storage File='{repo_storage_path}'", main_logger=__file__)
+        DATA_REPO_DIR.mkdir(parents=True, exist_ok=True)
+
+        # --- 2. Load and Update Hierarchical Index (Central Index) ---
+        repo_index = _load_repository_index() # Load central index
+        if repo_hash not in repo_index:
+             # Add entry using the actual data directory path
+             repo_index[repo_hash] = { INDEX_KEY_PATH: str(target_path_resolved), INDEX_KEY_METADATA: {}, INDEX_KEY_CHILDREN: [] }
+        else:
+             # Update existing entry path
+             entry = repo_index[repo_hash]
+             entry.setdefault(INDEX_KEY_METADATA, {})
+             entry.setdefault(INDEX_KEY_CHILDREN, [])
+             entry[INDEX_KEY_PATH] = str(target_path_resolved)
+        _save_repository_index(repo_index) # Save central index immediately after potential update
+
+        # --- 3. Find Potential Sub-repositories ---
+        sub_repos_to_check = []
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Checking {len(repo_index)} index entries for sub-paths of '{target_path_resolved}'...", main_logger=__file__)
+        for r_hash, entry in repo_index.items():
+             if r_hash == repo_hash: continue # Skip self
+             try:
+                 existing_path_raw = entry.get(INDEX_KEY_PATH)
+                 if not existing_path_raw: continue
+                 existing_path_obj = Path(existing_path_raw)
+                 existing_path_res = existing_path_obj.resolve() # Resolve path from index
+
+                 # Check if target_path_resolved is an ancestor of existing_path_res
+                 # Use is_relative_to for robust check (Python 3.9+)
+                 if existing_path_res != target_path_resolved and existing_path_res.is_relative_to(target_path_resolved):
+                 # Alt check: if target_path_resolved in existing_path_res.parents:
+                     # Determine sub-repo filename based on its hash
+                     sub_repo_filename = DATA_REPO_DIR / f"data_repository_{r_hash}.csv.zst"
+                     if sub_repo_filename.exists():
+                          log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Found potential sub-repository: Hash={r_hash}, Path='{existing_path_res}', File='{sub_repo_filename}'", main_logger=__file__)
+                          sub_repos_to_check.append((r_hash, existing_path_res, sub_repo_filename))
+                     else:
+                          log_statement(loglevel='warning', logstatement=f"{LOG_INS}:WARNING>>Index points to sub-repository path '{existing_path_res}' but its state file '{sub_repo_filename}' does not exist! Skipping.", main_logger=__file__)
+             except Exception as e:
+                  log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error processing potential sub-repository (Hash: {r_hash}, Path: '{entry.get(INDEX_KEY_PATH)}'): {e}", main_logger=__file__, exc_info=False) # Keep log cleaner
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Found {len(sub_repos_to_check)} potential existing sub-repositories.", main_logger=__file__)
+
+        # --- 4. Validate Sub-repositories in Parallel ---
+        valid_sub_repo_dfs = []
+        max_validation_workers = _get_max_workers(app_state.get('config')) # Requires helper
+        log_statement(loglevel="info", logstatement=(f"{LOG_INS}:INFO>>Validating {len(sub_repos_to_check)} potential sub-repositories (using up to {max_validation_workers} workers)..."), main_logger=__file__)
+
+        if not sub_repos_to_check:
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>No sub-repositories found to validate.", main_logger=__file__)
+            merged_df_from_subs = pd.DataFrame(columns=MAIN_REPO_HEADER) # Use constant/schema
+        else:
+            # Ensure _validate_sub_repository is available
+            validate_func = globals().get('_validate_sub_repository') # Check global scope
+            if not callable(validate_func):
+                 log_statement(loglevel='critical', logstatement=f"{LOG_INS}:CRITICAL>>Helper function '_validate_sub_repository' not found or not callable. Cannot validate sub-repos.", main_logger=__file__)
+                 return # Critical dependency missing
+
+            validation_futures = []
+            with ThreadPoolExecutor(max_workers=max_validation_workers, thread_name_prefix="SubRepo_Validator") as executor:
+                for r_hash, r_path, r_filename in sub_repos_to_check:
+                    # Pass required args to validation function
+                    future = executor.submit(validate_func, r_filename, r_path, num_check=10) # Assume signature
+                    validation_futures.append(future)
+
+                pbar_validate = tqdm(as_completed(validation_futures), total=len(validation_futures), desc="Validating sub-repos", unit="repo", leave=False)
+                temp_valid_dfs = []
+                valid_count = 0
+                for future in pbar_validate:
+                    try:
+                        # Assuming validate_func returns (bool, DataFrame or None)
+                        is_valid, df_result = future.result()
+                        if is_valid and isinstance(df_result, pd.DataFrame) and not df_result.empty:
+                            temp_valid_dfs.append(df_result)
+                            valid_count += 1
+                            log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Collected valid data from sub-repository ({len(df_result)} files). Total valid: {valid_count}", main_logger=__file__)
+                        # else: Validation failed or empty, assuming logged within validate_func
+                    except Exception as e:
+                        log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error processing validation result future: {e}", main_logger=__file__, exc_info=True)
+            valid_sub_repo_dfs = temp_valid_dfs
+
+            # --- 5. Merge Valid Sub-repository Data ---
+            if valid_sub_repo_dfs:
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Concatenating data from {len(valid_sub_repo_dfs)} valid sub-repositories...", main_logger=__file__)
+                # Ensure consistent columns before concat using the authoritative header order
+                safe_dfs_to_concat = []
+                for df in valid_sub_repo_dfs:
+                     try:
+                          # Add missing columns from authoritative header, filled with NA/None
+                          df_reindexed = df.reindex(columns=MAIN_REPO_HEADER)
+                          safe_dfs_to_concat.append(df_reindexed)
+                     except Exception as reindex_e:
+                          log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error reindexing sub-repo DataFrame before concat: {reindex_e}. Skipping this sub-repo.", main_logger=__file__)
+
+                if safe_dfs_to_concat:
+                    try:
+                        merged_df_from_subs = pd.concat(safe_dfs_to_concat, ignore_index=True)
+                        # Deduplicate based on COL_FILEPATH (absolute paths assumed)
+                        dedup_key = COL_FILEPATH
+                        if dedup_key in merged_df_from_subs.columns:
+                            initial_count = len(merged_df_from_subs)
+                            # Ensure key is string for reliable drop_duplicates
+                            merged_df_from_subs[dedup_key] = merged_df_from_subs[dedup_key].astype(str)
+                            merged_df_from_subs.drop_duplicates(subset=[dedup_key], keep='first', inplace=True)
+                            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Merged {len(merged_df_from_subs)} unique file entries from sub-repos (deduplicated by {dedup_key} from {initial_count}).", main_logger=__file__)
+                        else:
+                            log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Cannot deduplicate merged sub-repos: Missing key column '{dedup_key}'.", main_logger=__file__)
+                            merged_df_from_subs = pd.DataFrame(columns=MAIN_REPO_HEADER) # Reset
+                    except Exception as concat_e:
+                        log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error concatenating/deduplicating sub-repo DataFrames: {concat_e}", main_logger=__file__, exc_info=True)
+                        merged_df_from_subs = pd.DataFrame(columns=MAIN_REPO_HEADER) # Reset on error
+                else: # No DFs survived reindexing
+                     merged_df_from_subs = pd.DataFrame(columns=MAIN_REPO_HEADER)
+            else:
+                log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>No valid, non-empty DataFrames found from sub-repositories.", main_logger=__file__)
+                merged_df_from_subs = pd.DataFrame(columns=MAIN_REPO_HEADER)
+        authoritative_cols = DataRepository._get_expected_columns(None) # Need a way to get schema without instance? Static method? Or instance needed?
+        if 'merged_df_from_subs' in locals() and isinstance(merged_df_from_subs, pd.DataFrame):
+             merged_df_from_subs = merged_df_from_subs.reindex(columns=authoritative_cols)
+        else:
+             merged_df_from_subs = pd.DataFrame(columns=authoritative_cols)
+
+        # --- 6. Initialize Target Repository Instance ---
+        target_repo: Optional[DataRepository] = None # Initialize
+        try:
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Initializing DataRepository. Data Root='{target_path_resolved}', Storage Path='{repo_storage_path}'", main_logger=__file__)
+            # Pass the data directory and the calculated central storage path
+            target_repo = DataRepository(
+                data_root_path=target_path_resolved,
+                repo_storage_path=repo_storage_path,
+                repo_index_path=central_index_path, # Associate with the central index
+                create_if_missing=True
+            )
+            # Get existing data (or empty frame) from the instance
+            existing_df = target_repo.df.copy() if target_repo.df is not None else pd.DataFrame(columns=target_repo.expected_columns_order)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>DataRepository instance initialized. Loaded/Created state file {target_repo.repo_file} ({len(existing_df)} entries).", main_logger=__file__)
+            repo_schema_dict = target_repo.columns_schema_dict
+
+        except ImportError: # Should not happen if imports are correct
+            log_statement(loglevel='critical', logstatement=f"{LOG_INS}:CRITICAL>>CRITICAL: DataRepository class not available.", main_logger=__file__)
+            return
+        except Exception as load_e:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error initializing/loading target repository for data root {target_path_resolved}: {load_e}", main_logger=__file__, exc_info=True)
+            return
+
+        # --- 7. Scan Target Directory ---
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Scanning target directory '{target_path_resolved.name}'...", main_logger=__file__)
+        scan_func = globals().get('_scan_directory') # Or repo_instance.scan_directory() if refactored
+        if not callable(scan_func):
+             log_statement(loglevel='critical', logstatement=f"{LOG_INS}:CRITICAL>>Helper function '_scan_directory' not found or not callable. Cannot scan directory.", main_logger=__file__)
+             return
+        try:
+            current_files_metadata = scan_func(target_path_resolved, existing_files_set=set()) # Assuming scan provides needed metadata
+            current_files_df = pd.DataFrame(current_files_metadata) if current_files_metadata else pd.DataFrame()
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Scan found {len(current_files_df)} files.", main_logger=__file__)
+        except Exception as scan_e:
+            # ... (handle scan error) ...
+             return
+
+        # --- 8. Reconcile Data ---
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Reconciling existing ({len(existing_df)}), sub-repository ({len(merged_df_from_subs)}), and scan ({len(current_files_df)}) data...", main_logger=__file__)
+        final_df_to_save = pd.DataFrame()
+        authoritative_cols = target_repo.expected_columns_order # Use order from instance
+
+        # Define authoritative column order (crucial for consistency)
+        if current_files_df.empty and existing_df.empty and merged_df_from_subs.empty:
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS}:WARNING>>No file data from any source. Resulting repository will be empty.", main_logger=__file__)
+            final_df_to_save = pd.DataFrame(columns=authoritative_cols)
+        else:
+            # --- Prepare Base (Existing + Unique Sub-Repos) ---
+            base_dfs = []
+            if not existing_df.empty: base_dfs.append(existing_df.reindex(columns=authoritative_cols))
+            if not merged_df_from_subs.empty: base_dfs.append(merged_df_from_subs.reindex(columns=authoritative_cols))
+            if base_dfs:
+                 combined_base_df = pd.concat(base_dfs, ignore_index=True)
+                 # Deduplicate base (prioritize existing over sub-repo if duplicate)
+                 # Use absolute filepath string for reliable deduplication
+                 dedup_key = COL_FILEPATH
+                 if dedup_key in combined_base_df.columns:
+                      combined_base_df[dedup_key] = combined_base_df[dedup_key].astype(str) # Ensure string type
+                      combined_base_df.drop_duplicates(subset=[dedup_key], keep='first', inplace=True)
+                      log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Combined base dataset (existing + unique subs) has {len(combined_base_df)} unique entries (by {dedup_key}).", main_logger=__file__)
+                 else:
+                      log_statement(loglevel='warning', logstatement=f"{LOG_INS}:WARNING>>Cannot deduplicate combined base DF: Missing '{dedup_key}'.", main_logger=__file__)
+            else:
+                 combined_base_df = pd.DataFrame(columns=authoritative_cols)
+
+            # --- Prepare Current Scan DF ---
+            current_files_df_reindexed = current_files_df.reindex(columns=authoritative_cols)
+
+            # --- Reconciliation Merge ---
+            merge_key = COL_FILEPATH # Use absolute filepath string
+            try:
+                if combined_base_df.empty and current_files_df_reindexed.empty: # Both sides empty
+                     merged_output = pd.DataFrame() # Result is empty
+                elif combined_base_df.empty: # Only new files
+                     merged_output = current_files_df_reindexed.copy()
+                     merged_output['merge_status'] = 'new'
+                elif current_files_df_reindexed.empty: # Only old files (all deleted)
+                     merged_output = combined_base_df.copy()
+                     merged_output['merge_status'] = 'deleted'
+                else: # Both have data, perform merge
+                     # Ensure merge keys have compatible types (string)
+                     combined_base_df[merge_key] = combined_base_df[merge_key].astype(str)
+                     current_files_df_reindexed[merge_key] = current_files_df_reindexed[merge_key].astype(str)
+
+                     # Outer merge to find matches, new, and deleted
+                     merged_output = pd.merge(
+                         combined_base_df,
+                         current_files_df_reindexed,
+                         on=merge_key, # Merge on filepath
+                         how='outer',
+                         suffixes=('_old', '_new'),
+                         indicator='merge_status' # Add column indicating source ('left_only', 'right_only', 'both')
+                     )
+                     # Map indicator to meaningful status
+                     merged_output['merge_status'] = merged_output['merge_status'].map({
+                         'left_only': 'deleted', 'right_only': 'new', 'both': 'potential_match'
+                     })
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Reconciliation merge completed ({len(merged_output)} rows). Status counts:\n{merged_output['merge_status'].value_counts() if 'merge_status' in merged_output else 'N/A'}", main_logger=__file__)
+            except Exception as merge_e:
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error during reconciliation merge: {merge_e}", main_logger=__file__, exc_info=True)
+                 return
+
+            # --- Process Merged Rows ---
+            output_rows = []
+            for _, row in tqdm(merged_output.iterrows(), total=len(merged_output), desc="Reconciling files", leave=False, unit="file"):
+                status = row.get('merge_status')
+                output_row = {}
+
+                if status == 'new':
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Reconcile NEW: {row.get(f'{COL_FILEPATH}')}", main_logger=__file__)
+                    for col_const in authoritative_cols:
+                        # Get data from the '_new' columns (which are the original names since suffixes only added on merge='both')
+                        output_row[col_const] = row.get(col_const)
+                    output_row[COL_STATUS] = STATUS_NEW
+                    output_rows.append(output_row)
+
+                elif status == 'deleted':
+                    log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Reconcile DELETED (Ignoring): {row.get(f'{COL_FILEPATH}')}", main_logger=__file__)
+                    # Do not include deleted files in the final output
+
+                elif status == 'potential_match':
+                    # Compare mtime and size from _old (repo) and _new (scan) columns
+                    # Convert timestamps (stored as objects/strings from merge) back to numeric/datetime for comparison
+                    mtime_old_ts = pd.to_datetime(row.get(f"{COL_MTIME}_old"), errors='coerce', utc=True)
+                    mtime_new_ts = pd.to_datetime(row.get(f"{COL_MTIME}_new"), errors='coerce', utc=True)
+                    size_old = pd.to_numeric(row.get(f"{COL_SIZE}_old"), errors='coerce')
+                    size_new = pd.to_numeric(row.get(f"{COL_SIZE}_new"), errors='coerce')
+
+                    # Use a tolerance for timestamp comparison (e.g., 1 second)
+                    mtime_diff_ok = abs((mtime_old_ts - mtime_new_ts).total_seconds()) < 1 if pd.notna(mtime_old_ts) and pd.notna(mtime_new_ts) else (pd.isna(mtime_old_ts) and pd.isna(mtime_new_ts))
+                    size_match = size_old == size_new if pd.notna(size_old) and pd.notna(size_new) else (pd.isna(size_old) and pd.isna(size_new))
+
+                    if mtime_diff_ok and size_match: # UNCHANGED
+                        log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Reconcile UNCHANGED: {row.get(f'{COL_FILEPATH}')}", main_logger=__file__)
+                        # Keep the old data, as only mtime/size were compared
+                        for col_const in authoritative_cols:
+                            output_row[col_const] = row.get(f"{col_const}_old")
+                        # Ensure status is carried over, default if missing
+                        output_row[COL_STATUS] = row.get(f"{COL_STATUS}_old", STATUS_UNKNOWN)
+                        output_rows.append(output_row)
+                    else: # MODIFIED
+                        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Reconcile MODIFIED: {row.get(f'{COL_FILEPATH}')} (MTIME Match: {mtime_diff_ok}, Size Match: {size_match})", main_logger=__file__)
+                        # Take the new scan data
+                        for col_const in authoritative_cols:
+                             output_row[col_const] = row.get(f"{col_const}_new")
+                        output_row[COL_STATUS] = STATUS_NEW # Mark as new/modified, needs reprocessing
+                        # Explicitly reset downstream fields? Or let processing handle it? Let's reset key ones.
+                        output_row[COL_PROCESSED_PATH] = None # Example reset
+                        output_row[COL_TOKENIZED_PATH] = None # Example reset
+                        output_row[COL_SEMANTIC_LABEL] = None # Example reset
+                        output_row[COL_LINGUISTIC_METADATA] = None # Example reset
+                        output_rows.append(output_row)
+                else: # Should not happen with outer merge if logic is correct
+                     log_statement(loglevel='warning', logstatement=f"{LOG_INS}:WARNING>>Unexpected merge status '{status}' for row with key {row.get(COL_FILEPATH)}. Skipping.", main_logger=__file__)
+
+
+            # Create final DataFrame from the reconciled rows
+            if output_rows:
+                final_df_to_save = pd.DataFrame(output_rows)
+                # Ensure final schema conformance (order and type application)
+                final_df_to_save = final_df_to_save.reindex(columns=authoritative_cols) # Ensure order/presence
+                # Apply final dtypes rigorously using the map from the target repo instance
+                schema_dtype_map = target_repo._get_schema_dtypes()
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS}:DEBUG>>Applying final schema dtypes to reconciled DataFrame...", main_logger=__file__)
+                for col, dtype_obj in schema_dtype_map.items():
+                     if col in final_df_to_save.columns:
+                          try:
+                              # Apply type conversions using the robust logic (similar to loading)
+                                if isinstance(dtype_obj, pd.DatetimeTZDtype):
+                                     final_df_to_save[col] = pd.to_datetime(final_df_to_save[col], errors='coerce', utc=True).astype(dtype_obj)
+                                elif isinstance(dtype_obj, pd.Int64Dtype):
+                                     final_df_to_save[col] = pd.to_numeric(final_df_to_save[col], errors='coerce').astype('Float64').astype(dtype_obj)
+                                elif isinstance(dtype_obj, pd.BooleanDtype):
+                                     bool_map = {'true': True, 'yes': True, 'y': True, '1': True, 't': True,
+                                                 'false': False, 'no': False, 'n': False, '0': False, 'f': False,
+                                                 '': pd.NA, '<na>': pd.NA, 'none': pd.NA}
+                                     lower_series = final_df_to_save[col].fillna('<NA>').astype(str).str.lower()
+                                     final_df_to_save[col] = lower_series.map(bool_map).astype(dtype_obj)
+                                elif isinstance(dtype_obj, pd.Float64Dtype):
+                                     final_df_to_save[col] = pd.to_numeric(final_df_to_save[col], errors='coerce').astype(dtype_obj)
+                                elif isinstance(dtype_obj, pd.StringDtype):
+                                     final_df_to_save[col] = final_df_to_save[col].astype(dtype_obj)
+                                else: # Other types
+                                     final_df_to_save[col] = final_df_to_save[col].astype(dtype_obj)
+                          except Exception as final_type_e:
+                              log_statement(loglevel='warning', logstatement=f"{LOG_INS}:WARNING>>Error applying final dtype {dtype_obj} to column '{col}' after reconcile: {final_type_e}. Keeping current type.", main_logger=__file__)
+            else: # No rows survived reconciliation
+                 final_df_to_save = pd.DataFrame(columns=authoritative_cols).astype(schema_dtype_map, errors='ignore')
+
+        if 'final_df_to_save' not in locals() or not isinstance(final_df_to_save, pd.DataFrame): # Check if reconciliation produced DataFrame
+             log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Reconciliation failed to produce final DataFrame.", main_logger=__file__)
+             return # Cannot proceed
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Reconciliation complete. Final DataFrame has {len(final_df_to_save)} entries.", main_logger=__file__)
+
+        # --- 9. Save Final DataFrame and Update State ---
+        try:
+            if target_repo is None: # Should not happen if init succeeded
+                log_statement(loglevel='critical', logstatement=f"{LOG_INS}:CRITICAL>>CRITICAL: target_repo is None before final save.", main_logger=__file__)
+                return
+
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Assigning final DataFrame ({len(final_df_to_save)} entries) to DataRepository instance.", main_logger=__file__)
+            target_repo.df = final_df_to_save # Assign the final reconciled DataFrame
+
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Requesting repository save via target_repo.save(save_type='repository')...", main_logger=__file__)
+            target_repo.save(save_type='repository') # Save the main repository data (DF and Index)
+
+            # *** Robust Save Confirmation ***
+            if target_repo.repo_file and target_repo.repo_file.exists():
+                 log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>Repository save completed successfully for {target_path_resolved}. File: {target_repo.repo_file}", main_logger=__file__)
+            else:
+                 # Log error but don't raise immediately, allow app state update attempt
+                 log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Save reported success but repository file NOT FOUND at expected location: {target_repo.repo_file}", main_logger=__file__)
+                 # Maybe raise a custom exception or return a failure status?
+                 # raise IOError(f"Save failed verification for {target_repo.repo_file}") # Optional: re-enable raise if needed
+
+            # Update App State (use the repo instance and resolved path)
+            app_state['repo'] = target_repo
+            app_state['repo_path'] = target_path_resolved
+            # app_state['main_repo_df'] = final_df_to_save.copy() # Probably redundant if app_state['repo'] holds the live object
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>App state updated. Active repository path: {target_path_resolved}", main_logger=__file__)
+            print(f"\nRepository for '{target_path_resolved.name}' set and updated successfully ({len(final_df_to_save)} files tracked).")
+
+        except Exception as save_e:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Failed during final repository save or app state update: {save_e}", main_logger=__file__, exc_info=True)
+            print(f"\nError saving repository changes for {target_path_resolved}. Check logs.")
+            # Reset app state on save failure?
+            app_state['repo'] = None
+            app_state['repo_path'] = None
+
+
+    except Exception as outer_e:
+        print(f"\nAn unexpected error occurred: {outer_e}") # User feedback
+        log_statement(loglevel='error', logstatement=f"{LOG_INS}:ERROR>>Error during 'Set Data Directory' process for input '{folder_path_str}': {outer_e}", main_logger=__file__, exc_info=True)
+        app_state['repo'] = None
+        app_state['repo_path'] = None
+
+    log_statement(loglevel='info', logstatement=f"{LOG_INS}:INFO>>'Set Data Directory' process finished.", main_logger=__file__)
+
+
+def has_file_changed(filepath: Path) -> tuple[bool, str, float, float]:
+    """
+    Checks if a file's metadata (mtime, size) or content hash has changed
+    compared to stored information (requires access to the repository DataFrame).
+    Logs errors WITHOUT exc_info=True in the handler to prevent recursion.
+
+    Args:
+        filepath (Path): The path to the file to check.
+
+    Returns:
+        tuple[bool, str, float, float]: (has_changed, change_flag, mtime, atime)
+            has_changed: True if mtime, size, or hash differs from repo.
+            change_flag: 'M' (Metadata), 'C' (Content), 'N' (None)
+            mtime: Current modification time (float timestamp).
+            atime: Current access time (float timestamp).
+            Returns (False, 'E', 0.0, 0.0) on error accessing file/repo.
+    """
+    global app_state # Need access to the loaded main_repo_df
+    main_logger_name = __file__
+    change_flag = 'N'
+    has_changed_flag = False
+    current_mtime = 0.0
+    current_atime = 0.0
+
+    try:
+        stat = filepath.stat()
+        current_mtime = stat.st_mtime
+        current_atime = stat.st_atime
+        current_size = stat.st_size
+
+        repo_df = app_state.get('main_repo_df')
+        if repo_df is None or repo_df.empty:
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS} - No repo DataFrame loaded, assuming file needs processing: {filepath.name}", main_logger=main_logger_name)
+            return True, 'N', current_mtime, current_atime # Treat as new/changed if no repo baseline
+
+        # Find the file entry in the DataFrame
+        filepath_str = str(filepath.resolve())
+        entry = repo_df[repo_df[COL_FILEPATH] == filepath_str]
+
+        if entry.empty:
+            # File not found in repo, it's new/changed
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS} - File not found in repo, assuming changed: {filepath.name}", main_logger=main_logger_name)
+            return True, 'N', current_mtime, current_atime
+
+        # File found, compare metadata
+        stored_row = entry.iloc[0]
+        # Convert stored timestamps (which might be datetime objects after loading) back to float for comparison
+        stored_mtime = stored_row[COL_MTIME]
+        if isinstance(stored_mtime, pd.Timestamp): stored_mtime = stored_mtime.timestamp()
+        stored_size = stored_row[COL_SIZE]
+        stored_hash = stored_row[COL_HASH]
+
+        # Check metadata change
+        metadata_changes = abs(current_mtime - stored_mtime) > 1 or current_size != stored_mtime.timestamp()
+
+        # Compare mtime (with tolerance) and size
+        if not metadata_changes:
+            return False, 
+        else:
+            change_flag = 'M' # Metadata changed
+            has_changed_flag = True
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Metadata change detected for {filepath.name}", main_logger=main_logger_name)
+            # Check content hash only if metadata changed
+            current_hash = generate_data_hash(filepath)
+            if not current_hash or current_hash != stored_hash:
+                change_flag = 'C' # Content changed (implies metadata may also have)
+                log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Content change detected for {filepath.name}", main_logger=main_logger_name)
+        
+        return has_changed_flag, change_flag, current_mtime, current_atime
+
+    except FileNotFoundError:
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - File not found during change check: {filepath.name}", main_logger=main_logger_name, exc_info=False) # Log WITHOUT traceback
+        return False, 'E', 0.0, 0.0 # Error state
+    except Exception as e:
+        # Log error WITHOUT exc_info=True to prevent recursion
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error checking file changes for {filepath}: {e}", main_logger=main_logger_name, exc_info=False)
+        return False, 'E', 0.0, 0.0 # Error state
+
+def _get_file_metadata(filepath: Path) -> Optional[Dict[str, Any]]:
+    """
+    Extracts metadata for a single file using project constants defined
+    in MAIN_REPO_HEADER. Handles errors gracefully.
+    """
+    metadata_logger_name = __file__
+    metadata = {} # Initialize empty dict
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Getting metadata for: {filepath.name}", main_logger=metadata_logger_name)
+    try:
+        if not filepath.is_file():
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Skipping non-file item: {filepath}", main_logger=metadata_logger_name)
+            return None
+        stat = filepath.stat()
+        file_hash = generate_data_hash(filepath)
+        file_hash_to_store = file_hash if file_hash else ""
+
+        # --- Populate known metadata using constants ---
+        metadata[COL_FILEPATH] = str(filepath.resolve())
+        metadata[COL_FILENAME] = filepath.name
+        metadata[COL_SIZE] = stat.st_size
+        metadata[COL_MTIME] = stat.st_mtime # Float timestamp
+        metadata[COL_CTIME] = stat.st_ctime # Float timestamp
+        metadata[COL_HASH] = file_hash_to_store
+        metadata[COL_EXTENSION] = filepath.suffix.lower().lstrip('.')
+        metadata[COL_STATUS] = STATUS_DISCOVERED if file_hash else STATUS_ERROR
+        metadata[COL_ERROR] = "" if file_hash else "Hash calculation failed"
+        metadata[COL_PROCESSED_PATH] = ""
+        metadata[COL_TOKENIZED_PATH] = ""
+        metadata[COL_LAST_UPDATED] = time.time() # Float timestamp
+
+        # --- Add defaults for ALL other columns in MAIN_REPO_HEADER ---
+        for key in MAIN_REPO_HEADER:
+            if key not in metadata:
+                # Use sensible nulls/empty values based on likely type convention
+                if 'ts' in key or 'time' in key: metadata[key] = np.nan # Float NaN
+                elif 'size' in key or 'designation' in key: metadata[key] = pd.NA # Nullable Int NA
+                else: metadata[key] = '' # Default empty string
+            if COL_HASHED_PATH_ID in MAIN_REPO_HEADER: metadata[COL_HASHED_PATH_ID] = hash_filepath(metadata[COL_FILEPATH]) if 'hash_filepath' in globals() else ""
+            if COL_COMPRESSED_FLAG in MAIN_REPO_HEADER: metadata[COL_COMPRESSED_FLAG] = 'N' # Default assumption
+            if COL_IS_COPY_FLAG in MAIN_REPO_HEADER: metadata[COL_IS_COPY_FLAG] = 'N' # Default assumption
+
+        # log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Successfully gathered metadata for {filepath.name}.", main_logger=metadata_logger_name)
+        return metadata
+
+    except PermissionError as pe:
+         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Permission error getting metadata for {filepath.name}: {pe}", main_logger=metadata_logger_name, exc_info=False) # REMOVED exc_info
+         return None
+    except OSError as ose:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - OS error getting metadata for {filepath.name}: {ose}", main_logger=metadata_logger_name, exc_info=False) # REMOVED exc_info
+        return None
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Unexpected error getting metadata for {filepath.name}: {e}", main_logger=metadata_logger_name, exc_info=False) # REMOVED exc_info
         return None
 
 def _validate_sub_repository(repo_file: Path, original_path: Path, num_check=10):
     """Validates a sub-repository using defined constants."""
     max_workers = _get_max_workers()
-    log_statement(loglevel='info', logstatement=f"Validating sub-repository: {repo_file} (using up to {max_workers} workers)", main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Validating sub-repository: {repo_file} (using up to {max_workers} workers)", main_logger=__file__)
     try:
-        df = pd.read_csv(repo_file, compression='gzip')
-        log_statement(loglevel='debug', logstatement=f"Loaded {repo_file} with {len(df)} entries.", main_logger=str(__name__))
+        # Instantiate DataRepository for the sub-repo file (this loads the data)
+        repo = DataRepository(repo_path=repo_file)
+        df = repo.df # Access the loaded DataFrame
 
-        if df.empty: return False, None
-        # Use imported constants for required columns
-        required_cols = [COL_FILEPATH, COL_SIZE, COL_MTIME, COL_HASH]
+        # Check if loading failed within DataRepository
+        if df is None:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - DataRepository failed to load {repo_file}. Invalid.", main_logger=__file__)
+            return False, None
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Loaded {repo_file} via DataRepository with {len(df)} entries.", main_logger=__file__)
+
+        required_cols = MAIN_REPO_HEADER
         if not all(col in df.columns for col in required_cols):
-             log_statement(loglevel='warning', logstatement=f"Sub-repository {repo_file} missing required columns ({required_cols}). Invalid.", main_logger=str(__name__))
+             log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Sub-repository {repo_file} missing required columns ({required_cols}). Invalid.", main_logger=__file__)
              return False, None
         if not original_path.is_dir(): return False, None
 
@@ -346,12 +1023,12 @@ def _validate_sub_repository(repo_file: Path, original_path: Path, num_check=10)
         files_to_check = df.iloc[sample_indices]
         mismatches = 0
 
-        log_statement(loglevel='debug', logstatement=f"Checking {num_to_check} sample files from {repo_file} using {max_workers} workers.", main_logger=str(__name__))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Checking {num_to_check} sample files from {repo_file} using {max_workers} workers.", main_logger=__file__)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             path_to_stored_row = {Path(row[COL_FILEPATH]): row for _, row in files_to_check.iterrows()}
             future_to_path = {executor.submit(_get_file_metadata, path): path for path in path_to_stored_row.keys()}
 
-            for future in tqdm(concurrent.futures.as_completed(future_to_path), total=len(future_to_path), desc=f"Validating {repo_file.name}", leave=False, unit="file"):
+            for future in tqdm(as_completed(future_to_path), total=len(future_to_path), desc=f"Validating {repo_file.name}", leave=False, unit="file"):
                 current_path = future_to_path[future]
                 stored_row = path_to_stored_row[current_path]
                 try:
@@ -363,474 +1040,981 @@ def _validate_sub_repository(repo_file: Path, original_path: Path, num_check=10)
                        current_metadata[COL_HASH] != stored_row[COL_HASH]:
                         mismatches += 1
                 except Exception as exc:
-                    log_statement(loglevel='error', logstatement=f'Validation check exception for {current_path}: {exc}', main_logger=str(__name__), exc_info=True)
+                    log_statement(loglevel='error', logstatement=f'Validation check exception for {current_path}: {exc}', main_logger=__file__, exc_info=True)
                     mismatches += 1
 
         if mismatches == 0:
-            log_statement(loglevel='info', logstatement=f"Validation successful for {repo_file}.", main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Validation successful for {repo_file}.", main_logger=__file__)
             return True, df
         else:
-            log_statement(loglevel='warning', logstatement=f"Validation failed for {repo_file} ({mismatches}/{num_to_check} mismatches).", main_logger=str(__name__))
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Validation failed for {repo_file} ({mismatches}/{num_to_check} mismatches).", main_logger=__file__)
             return False, None
+    except ImportError: # Handle case where DataRepository couldn't be imported
+        log_statement(loglevel='critical', logstatement=f"{LOG_INS} - DataRepository class not available. Cannot load {repo_file}.", main_logger=__file__)
+        return False, None
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Error validating sub-repository {repo_file}: {e}", main_logger=str(__name__), exc_info=True)
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error instantiating/loading DataRepository for {repo_file}: {e}", main_logger=__file__, exc_info=True)
         return False, None
 
-def _generate_file_paths(start_path):
-    """Generator to yield file paths using os.scandir."""
-    try:
-        for entry in os.scandir(start_path):
-            try:
-                if entry.is_dir(follow_symlinks=False): yield from _generate_file_paths(entry.path)
-                elif entry.is_file(follow_symlinks=False): yield Path(entry.path)
-            except OSError as e: log_statement(loglevel='warning', logstatement=f"Permission error accessing {entry.path}: {e}", main_logger=str(__name__))
-    except OSError as e: log_statement(loglevel='warning', logstatement=f"Permission error scanning {start_path}: {e}", main_logger=str(__name__))
-
 def _scan_directory(folder_path_obj: Path, existing_files_set: set):
-    """Scans directory, gets metadata using constants and configured workers."""
-    max_workers = _get_max_workers()
+    """
+    Scans directory recursively, gets metadata for new files in parallel,
+    displays progress, and uses custom logging.
+
+    Args:
+        folder_path_obj (Path): The directory to scan.
+        existing_files_set (set): A set of resolved file path strings already known
+                                  (typically from loaded sub-repositories).
+
+    Returns:
+        list: A list of dictionaries, where each dictionary contains metadata
+              for a newly discovered file (not present in existing_files_set).
+    """
+    max_workers = _get_max_workers(app_state.get('config'))
     new_files_metadata = []
-    files_to_scan = []
-    log_statement(loglevel='info', logstatement=f"Starting recursive scan of '{folder_path_obj}' (using up to {max_workers} workers). Excluding {len(existing_files_set)} known files.", main_logger=str(__name__))
+    scan_logger_name = __file__ # Logger name for this context
 
-    collected_count = 0
-    log_statement(loglevel='debug', logstatement=f"Collecting file list using os.scandir generator...", main_logger=str(__name__))
-    for filepath in _generate_file_paths(folder_path_obj):
-        collected_count += 1
-        resolved_filepath_str = str(filepath.resolve())
-        if resolved_filepath_str not in existing_files_set:
-            files_to_scan.append(filepath)
-        if collected_count % 20000 == 0: # Log less frequently
-             log_statement(loglevel='debug', logstatement=f"Collected {collected_count} paths, found {len(files_to_scan)} new candidates...", main_logger=str(__name__))
+    # Stage 1: Collect potential paths (Serial)
+    potential_paths = []
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Stage 1: Collecting all potential file paths recursively...", main_logger=scan_logger_name)
+    with tqdm(desc=f"Discovering items [{folder_path_obj.name}]", unit=" items", smoothing=0.1, leave=False) as pbar_discover:
+        try:
+            for filepath in _generate_file_paths(folder_path_obj):
+                potential_paths.append(filepath)
+                pbar_discover.update(1)
+        except Exception as gen_e:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error during path generation: {gen_e}", main_logger=scan_logger_name, exc_info=True)
+    collected_count = len(potential_paths)
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Stage 1 complete. Found {collected_count} total items.", main_logger=scan_logger_name)
+    if not potential_paths: log_statement(loglevel='info', logstatement=f"{LOG_INS} - No items found in the target directory to process further.", main_logger=scan_logger_name); return []
 
-    log_statement(loglevel='info', logstatement=f"Found {len(files_to_scan)} potential new files to gather metadata for.", main_logger=str(__name__))
+    log_statement(
+        loglevel='info',
+        logstatement=(
+            f"Starting recursive scan: '{folder_path_obj.name}'. "
+            f"Max Workers: {max_workers}. "
+            f"Excluding: {len(existing_files_set)} known file paths."
+        ),
+        main_logger=scan_logger_name
+    )
+
+    def check_path(filepath: Path, known_paths: set) -> Optional[Path]:
+        try:
+            resolved_path_str = str(filepath.resolve())
+            if resolved_path_str not in known_paths: return filepath
+            return None
+        except OSError as e:
+            log_statement(loglevel='warning', logstatement=f"{LOG_INS} - OS Error resolving/checking path '{filepath.name}': {e}.  Skipping.", main_logger=scan_logger_name)
+        except Exception as e:
+            log_statement(loglevel='warning', logstatement=f"{__file__}:{inspect.currentframe().f_linenu} - Error resolving/checking path '{filepath.name}': {e}", main_logger=scan_logger_name)
+            return None
+
+    # Stage 2: Parallel Path Filtering (Modified for safety)
+    log_statement(loglevel='info', logstatement=f"Stage 2: Filtering {collected_count} paths against {len(existing_files_set)} known paths (Parallel)...", main_logger=scan_logger_name)
+
+    # --- Thread-safe counter and results collection ---
+    skipped_known_count = 0
+    files_to_scan_results = [] # Collect results here first
+    skipped_lock = Lock() # Lock for the counter
+    # ---
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='FilterPath') as executor:
+        futures = {executor.submit(check_path, fpath, existing_files_set): fpath for fpath in potential_paths}
+        pbar_filter = tqdm(as_completed(futures), total=len(potential_paths), desc=f"Filtering Paths [{folder_path_obj.name}]", unit="path", leave=False)
+
+        for future in pbar_filter:
+            original_path = futures[future]
+            try:
+                result_path = future.result()
+                if result_path:
+                    files_to_scan_results.append(result_path) # Append to temp list
+                else:
+                    with skipped_lock: # Lock the counter increment
+                        skipped_known_count += 1
+                if pbar_filter.n % 100 == 0 or pbar_filter.n == pbar_filter.total:
+                     pbar_filter.set_postfix_str(f"New: {len(files_to_scan_results)}, Skip/Known: {skipped_known_count}", refresh=True)
+            except Exception as e:
+                log_statement(loglevel='error', logstatement=f"Error processing path filter future for ~'{original_path.name}': {e}", main_logger=scan_logger_name, exc_info=False)
+                with skipped_lock: # Also lock if incrementing due to error
+                    skipped_known_count += 1
+
+    # Now update the main list outside the parallel block
+    files_to_scan = files_to_scan_results
+    log_statement(loglevel='info', logstatement=f"Stage 2 complete. Found {len(files_to_scan)} new file paths. Skipped/Known: {skipped_known_count}.", main_logger=scan_logger_name)
     if not files_to_scan: return []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_path = {executor.submit(_get_file_metadata, filepath): filepath for filepath in files_to_scan}
-        pbar = tqdm(total=len(files_to_scan), desc=f"Scanning {folder_path_obj.name}", unit="file")
-        for future in concurrent.futures.as_completed(future_to_path):
+    # --- Stage 3: Gather Metadata for new files (Parallel) ---
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Stage 3: Gathering metadata for {len(files_to_scan)} files (Parallel)...", main_logger=scan_logger_name)
+    # --- Thread-safe counter and results collection ---
+    processed_count_meta = 0
+    metadata_results = [] # Collect results here
+    processed_lock = Lock() # Lock for counter
+    start_time_meta = time.time()
+    # ---
+    mdata_err = None
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='Metadata') as executor:
+        future_to_path = { executor.submit(_get_file_metadata, filepath): filepath for filepath in files_to_scan }
+        pbar_meta = tqdm(as_completed(future_to_path), total=len(files_to_scan), desc=f"Gather Metadata [{folder_path_obj.name[:20]}]", unit="file", leave=True, postfix={"files/s": "0.0", "CPU": "N/A", "Mem": "N/A"} )
+        for future in pbar_meta:
             filepath = future_to_path[future]
+            with processed_lock: # Lock counter increment
+                processed_count_meta += 1
+            current_count = processed_count_meta # Read locked value locally
             try:
                 metadata = future.result()
-                if metadata: new_files_metadata.append(metadata)
+                if metadata:
+                    metadata_results.append(metadata) # Append to temp list
+                else: metadata_errors += 1; mdata_err = metadata_errors
             except Exception as exc:
-                 log_statement(loglevel='error', logstatement=f'Metadata extraction generated an exception for {filepath}: {exc}', main_logger=str(__name__), exc_info=True)
-            finally: pbar.update(1)
-        pbar.close()
+                log_statement(loglevel='error', logstatement=f'{LOG_INS} - Metadata task generated an exception for {filepath.name}: {exc}', main_logger=scan_logger_name, exc_info=True)
+                metadata_errors += 1
+                mdata_err = metadata_errors
 
-    log_statement(loglevel='info', logstatement=f"Gathered metadata for {len(new_files_metadata)} new files.", main_logger=str(__name__))
+            # Update Metrics Postfix (less frequent)
+            if current_count % 50 == 0 or current_count == len(files_to_scan):
+                elapsed_time = time.time() - start_time_meta
+                files_per_sec = current_count / elapsed_time if elapsed_time > 0 else 0
+                metrics_postfix = {"files/s": f"{files_per_sec:.1f}"}
+                if PSUTIL_AVAILABLE:
+                    try:
+                        cpu_usage = psutil.cpu_percent(interval=None)
+                        mem_usage = psutil.virtual_memory().percent
+                        metrics_postfix["CPU"] = f"{cpu_usage:.1f}%"
+                        metrics_postfix["Mem"] = f"{mem_usage:.1f}%"
+                    except Exception as psutil_e:
+                         metrics_postfix["CPU"] = "ERR"; metrics_postfix["Mem"] = "ERR"
+                         if current_count % 500 == 0: log_statement(loglevel='warning', logstatement=f"psutil metrics failed: {psutil_e}", main_logger=scan_logger_name)
+                pbar_meta.set_postfix(metrics_postfix, refresh=False)
+            
+    # Update main list outside parallel block
+    new_files_metadata = metadata_results
+    final_elapsed_time_meta = time.time() - start_time_meta
+    final_rate_meta = processed_count_meta / final_elapsed_time_meta if final_elapsed_time_meta > 0 else 0
+    log_statement(loglevel='info', 
+                logstatement=(f"Stage 3 finished. Processed {processed_count_meta} files for metadata in {final_elapsed_time_meta:.2f}s ({final_rate_meta:.2f} files/s).",
+                f"({mdata_err} errors) in {final_elapsed_time_meta:.2f}s "
+                f"({final_rate_meta:.2f} files/s)."
+            ),
+            main_logger=scan_logger_name
+    )
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Recursive scan complete. Returning metadata for {len(new_files_metadata)} new files.", main_logger=scan_logger_name)
     return new_files_metadata
 
+# --- MODIFIED WRAPPER FUNCTION ---
 def _process_file_wrapper(args):
-    """Wrapper for parallel processing/tokenization task using constants."""
-    original_filepath_str, output_dir, task_type, processor_or_tokenizer = args
-    original_filepath = Path(original_filepath_str)
-    try:
-        content = read_file(original_filepath)
-        if content is None: return None # Error logged in read_file usually
+    """
+    Wrapper for parallel tokenization task using constants.
+    Expects args: (processed_filepath_str, processed_file_hash, output_dir, tokenizer_instance)
+    Returns a dictionary matching TOKENIZED_REPO_COLUMNS structure on success.
+    """
+    processed_filepath_str, processed_file_hash, output_dir, tokenizer = args
+    processed_filepath = Path(processed_filepath_str)
+    main_logger_name = __file__ # Define logger name
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Wrapper start for {processed_filepath.name}", main_logger=main_logger_name)
 
-        if task_type == 'process':
-            processed_text = processor_or_tokenizer.preprocess_text(content)
-            output_filename = f"{original_filepath.stem}_processed{original_filepath.suffix}"
-            output_filepath = output_dir / output_filename
-            with open(output_filepath, 'w', encoding='utf-8') as f: f.write(processed_text)
-            processed_hash = calculate_file_hash(str(output_filepath))
-            original_hash = calculate_file_hash(str(original_filepath))
-            stat = original_filepath.stat()
-            # Return dict matching PROCESSED_REPO_COLUMNS structure (using constants where applicable)
-            return {
-                'processed_filepath': str(output_filepath.resolve()),
-                'processed_hash': processed_hash,
-                COL_FILEPATH: original_filepath_str, # Original filepath using constant
-                COL_HASH: original_hash, # Original hash using constant
-                COL_MTIME: stat.st_mtime # Original mtime using constant
-            }
-        elif task_type == 'tokenize':
-            output_filename = f"{original_filepath.stem}_tokens.pt"
-            output_filepath = output_dir / output_filename
-            tokens = processor_or_tokenizer(content)
-            torch.save(tokens, output_filepath)
-            processed_hash = calculate_file_hash(str(original_filepath))
-            # Return dict matching TOKENIZED_REPO_COLUMNS structure
-            return {
-                'tokenized_filepath': str(output_filepath.resolve()),
-                'processed_filepath': original_filepath_str,
-                'processed_hash': processed_hash,
-                'tokenizer_name': processor_or_tokenizer.name_or_path
-            }
-        else: return None
+    try:
+        # --- Load Processed Data ---
+        # This requires a robust way to load based on the processed file format
+        # Assuming a helper function _load_processed_data exists that handles
+        # loading based on suffix (e.g., .json.zst, .parquet.zst) and returns
+        # content suitable for the tokenizer (e.g., text string or structured data).
+        # For simplicity, we'll simulate reading text content here.
+        # Replace this with actual loading logic.
+        try:
+            # Example: Load compressed text from .json.zst (adjust based on actual save format)
+            if processed_filepath.suffix == '.zst' and processed_filepath.suffixes[-2] == '.json':
+                 import zstandard as zstd
+                 import io
+                 import json
+                 dctx = zstd.ZstdDecompressor()
+                 with open(processed_filepath, 'rb') as ifh:
+                      with dctx.stream_reader(ifh) as reader:
+                           content_bytes = reader.read()
+                           json_data = json.loads(content_bytes.decode('utf-8'))
+                           # Assuming the text is stored under a key like 'cleaned_text'
+                           content = json_data.get('cleaned_text', '')
+                           if not content:
+                               # Try combining all string values if 'cleaned_text' is missing
+                               content = " ".join([str(v) for v in json_data.values() if isinstance(v, str)])
+                 log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Loaded JSON content ({len(content)} chars) from {processed_filepath.name}", main_logger=main_logger_name)
+
+            elif processed_filepath.suffix == '.zst' and processed_filepath.suffixes[-2] == '.parquet':
+                 # Add logic to load parquet if needed
+                 log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Parquet loading logic not implemented in wrapper for {processed_filepath.name}", main_logger=main_logger_name)
+                 content = None # Mark as failure if loader not implemented
+            else:
+                 # Add logic for other potential processed formats or raw text
+                 log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Unhandled processed file type in wrapper: {processed_filepath.name}", main_logger=main_logger_name)
+                 content = None # Mark as failure
+
+            if content is None:
+                 raise ValueError(f"Failed to load or extract content from {processed_filepath.name}")
+
+        except Exception as load_err:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error loading processed file {processed_filepath.name} in wrapper: {load_err}", main_logger=main_logger_name, exc_info=True)
+            return None # Failed to load
+
+        # --- Tokenize Content ---
+        # Actual tokenization logic using the passed tokenizer instance
+        # This might involve chunking for long content depending on the model
+        # Example: Simple call (adjust based on tokenizer needs)
+        try:
+            # Assuming tokenizer expects text and returns something savable by torch.save
+            # (e.g., dictionary of tensors like {'input_ids': ..., 'attention_mask': ...})
+            tokens_output = tokenizer(content, return_tensors="pt", padding=True, truncation=True, max_length=512) # Example HF tokenizer call
+        except Exception as tok_err:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - Tokenization failed for {processed_filepath.name}: {tok_err}", main_logger=main_logger_name, exc_info=True)
+            return None
+
+        # --- Save Tokenized Output ---
+        # Use a consistent naming scheme, link to processed path hash maybe?
+        # Using processed file stem + _tokens.pt.zst for now
+        tokenized_filename = f"{processed_filepath.stem}_tokens.pt.zst"
+        tokenized_filepath = output_dir / tokenized_filename
+        tokenized_filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Ensure tensors are on CPU before saving
+            tokens_cpu = {k: v.cpu() for k, v in tokens_output.items()} if isinstance(tokens_output, dict) else tokens_output.cpu()
+
+            # Compress and save using torch.save and zstd
+            buffer = io.BytesIO()
+            torch.save(tokens_cpu, buffer)
+            buffer.seek(0)
+            cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL) # Assumes COMPRESSION_LEVEL is defined
+            with open(tokenized_filepath, 'wb') as f:
+                with cctx.stream_writer(f) as compressor:
+                    compressor.write(buffer.read())
+            buffer.close()
+            log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Saved tokenized output to {tokenized_filepath.name}", main_logger=main_logger_name)
+        except Exception as save_err:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to save tokenized output {tokenized_filepath.name}: {save_err}", main_logger=main_logger_name, exc_info=True)
+            if tokenized_filepath.exists(): # Cleanup partial file
+                try: tokenized_filepath.unlink()
+                except OSError: pass
+            return None
+
+        # --- Return structured result matching TOKENIZED_REPO_COLUMNS ---
+        tokenizer_name = getattr(tokenizer, 'name_or_path', 'unknown_tokenizer')
+        result_dict = {
+            COL_TOKENIZED_PATH: str(tokenized_filepath.resolve()), # Absolute path to the *.pt.zst file
+            COL_PROCESSED_PATH: processed_filepath_str, # Absolute path to the *.proc file used as input
+            COL_HASH: processed_file_hash, # Hash of the processed file (*.proc) that was tokenized
+            'tokenizer_name': tokenizer_name, # Name of the tokenizer used
+            # Add other columns expected by TOKENIZED_REPO_COLUMNS, getting defaults if needed
+            COL_LAST_UPDATED: time.time(), # Timestamp of this tokenization event
+            # Fill others potentially needed for joins/info, e.g., original filepath if available
+            # COL_FILEPATH: ??? # Needs to be passed into the wrapper or looked up
+            # COL_STATUS: STATUS_TOKENIZED # Status is usually updated after collecting results
+        }
+        # Ensure all columns from TOKENIZED_REPO_COLUMNS are present
+        final_result = {col: result_dict.get(col, pd.NA) for col in TOKENIZED_REPO_COLUMNS} # Use constant, default to NA
+
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Wrapper success for {processed_filepath.name}", main_logger=main_logger_name)
+        return final_result
+
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Error in wrapper for file {original_filepath} task {task_type}: {e}", main_logger=str(__name__), exc_info=True)
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Unhandled error in wrapper for {processed_filepath_str}: {e}", main_logger=__file__, exc_info=True)
         return None
 
-# --- Main Menu Option Functions ---
-def set_data_directory():
-    """Handles Option 1: Set Data Directory using project constants and utilities."""
+def process_linguistic_data():
+    """
+    Performs linguistic processing on files marked as PROCESSED.
+
+    Uses SemanticLabeler (if available) to generate labels for textual data.
+    Updates the repository with results and new status.
+
+    Args:
+        app_state (dict): Dictionary holding the application state,
+                          including 'repo' (DataRepository instance) and 'config'.
+    """
     global app_state
-    log_statement(loglevel='info', logstatement="Starting 'Set Data Directory' process.", main_logger=str(__name__))
-    folder_path_str = ""
-    try:
-        # Use BASE_DATA_DIR as potential default suggestion?
-        folder_path_str = input(f"Enter the full path to the data directory (e.g., {BASE_DATA_DIR / 'my_raw_data'}): ")
-        target_path = Path(folder_path_str)
-        if not target_path.is_dir():
-            log_statement(loglevel='error', logstatement=f"Invalid directory path provided: {folder_path_str}", main_logger=str(__name__), exc_info=True)
-            return
+    log_statement('info', f"{LOG_INS}:INFO>>Starting linguistic data processing...", __file__)
+    print("\n--- Starting Linguistic Data Processing ---")
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Processing directory: {target_path.resolve()}"), main_logger=str(__name__), exc_info=True)
-        log_statement(loglevel='info', logstatement=f"Target data directory set to: {target_path.resolve()}", main_logger=str(__name__), exc_info=True)
-        repo_hash, repo_filename = _get_repository_info(target_path) # Uses DATA_REPO_DIR now
-        log_statement(loglevel='info', logstatement=f"Target repository hash={repo_hash}, file='{repo_filename}'", main_logger=str(__name__))
-        _ensure_dir_exists(DATA_REPO_DIR) # Uses derived constant
-        repo_index = _load_repository_index() # Uses DATA_REPO_DIR/INDEX_FILE now
-        sub_repos_to_check = _find_sub_repositories(target_path, repo_index) # Uses DATA_REPO_DIR now
+    if 'repo' not in app_state or app_state['repo'] is None:
+        log_statement('error', f"{LOG_INS}:ERROR>>Data repository not initialized. Cannot perform linguistic processing.", __file__)
+        print("Error: Data repository is not initialized. Please set the data directory first.")
+        return
 
-        valid_sub_repo_dfs = []
-        processed_files_set = set()
-        validation_futures = []
-        max_validation_workers = _get_max_workers(app_state.get('config'))
-        log_statement(loglevel=str("info"), logstatement=(f"Validating {len(sub_repos_to_check)} potential sub-repositories (using up to {max_validation_workers} workers)..."), main_logger=str(__name__), exc_info=True)
-        if not sub_repos_to_check:
-            log_statement(loglevel='info', logstatement="No sub-repositories found to validate.", main_logger=str(__name__))
-            return
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_validation_workers) as executor:
-            for r_hash, r_path, r_filename in sub_repos_to_check:
-                future = executor.submit(_validate_sub_repository, r_filename, r_path, num_check=10)
-                validation_futures.append(future)
-            pbar_validate = tqdm(total=len(validation_futures), desc="Validating sub-repos", unit="repo")
-            for future in concurrent.futures.as_completed(validation_futures):
-                try:
-                    is_valid, df = future.result()
-                    if is_valid and df is not None:
-                        valid_sub_repo_dfs.append(df)
-                        # Use constant for filepath column
-                        processed_files_set.update(df[COL_FILEPATH].astype(str).tolist())
-                        log_statement(loglevel='info', logstatement=f"Validated and included data from a sub-repository ({len(df)} files).", main_logger=str(__name__))
-                except Exception as e:
-                     log_statement(loglevel='error', logstatement=f"Error processing validation result: {e}", main_logger=str(__name__), exc_info=True)
-                finally: pbar_validate.update(1)
-            pbar_validate.close()
-        log_statement(loglevel='info', logstatement=f"Validation complete. Merging data from {len(valid_sub_repo_dfs)} valid sub-repositories ({len(processed_files_set)} files.", main_logger=str(__name__))
-        log_statement(loglevel='info', logstatement=f"Total files covered by sub-repositories: {len(processed_files_set)}", main_logger=str(__name__))
+    if 'config' not in app_state or app_state['config'] is None:
+        log_statement('error', f"{LOG_INS}:ERROR>>Configuration not loaded. Cannot perform linguistic processing.", __file__)
+        print("Error: Configuration not loaded. Aborting.")
+        return
 
-        merged_df = pd.DataFrame(columns=REPO_COLUMNS) # Use constant list
-        if valid_sub_repo_dfs:
-            # Use constant list for reindexing
-            valid_sub_repo_dfs = [df.reindex(columns=REPO_COLUMNS) for df in valid_sub_repo_dfs if isinstance(df, pd.DataFrame)]
-            if valid_sub_repo_dfs:
-                merged_df = pd.concat(valid_sub_repo_dfs, ignore_index=True).drop_duplicates(subset=[COL_FILEPATH]) # Use constant
-                log_statement(loglevel='info', logstatement=f"Merged DataFrame contains {len(merged_df)} entries.", main_logger=str(__name__))
+    repo = app_state['repo']
+    config = app_state['config']
+    data_processor = app_state.get('data_processor') # Get if already instantiated
 
-        # Scan directory (uses helpers that use constants)
-        new_files_metadata = _scan_directory(target_path, processed_files_set)
-        new_files_df = pd.DataFrame(new_files_metadata, columns=REPO_COLUMNS) # Use constant list
-        log_statement(loglevel='info', logstatement=f"Created DataFrame with {len(new_files_df)} newly scanned files.", main_logger=str(__name__))
-
-        # Combine and clean
-        final_df = pd.concat([merged_df, new_files_df], ignore_index=True)
-        final_df = final_df.reindex(columns=REPO_COLUMNS).dropna(subset=[COL_FILEPATH, COL_HASH]).drop_duplicates(subset=[COL_FILEPATH], keep='last') # Use constants
-        log_statement(loglevel='info', logstatement=f"Final combined repository contains {len(final_df)} unique file entries.", main_logger=str(__name__))
-        log_statement(loglevel='info', logstatement=f"Saving final repository to {repo_filename}", main_logger=str(__name__))
+    if data_processor is None:
+        log_statement('debug', f"{LOG_INS}:DEBUG>>DataProcessor not found in app_state, attempting instantiation.", __file__)
         try:
-            # Saving is sequential but generally fast for compressed CSV
-            with tqdm(total=1, desc="Saving repository", unit="file") as pbar:
-                 final_df.to_csv(repo_filename, compression='gzip', index=False)
-                 pbar.update(1)
-            log_statement(loglevel='info', logstatement="Repository saved successfully.", main_logger=__name__)
-            log_statement(loglevel='info', logstatement=f"Successfully saved repository to {repo_filename}", main_logger=str(__name__))
-            repo_index[repo_hash] = target_path # Store Path object
-            _save_repository_index(repo_index)
+            # Ensure config structure is correctly accessed
+            dp_config = config.get('DataProcessingConfig', {})
+            output_dir_str = dp_config.get('output_directory', './processed_data')
+            if not output_dir_str:
+                 raise ValueError("Output directory for DataProcessor is not configured.")
+            output_dir = Path(output_dir_str)
 
-            # Update App State
-            app_state['main_repo_path'] = str(repo_filename.resolve()); app_state['main_repo_df'] = final_df
-            app_state['processed_repo_path'] = None; app_state['processed_repo_df'] = None
-            app_state['tokenized_repo_path'] = None; app_state['tokenized_repo_df'] = None
-            log_statement(loglevel='info', logstatement=f"App state updated. Active repository: {repo_filename}", main_logger=str(__name__))
+            # Check if DataProcessor class is the dummy one
+            if 'DataProcessor' not in globals() or DataProcessor.__name__ == 'DataProcessor': # Checks if it's the real class
+                 data_processor = DataProcessor(repo, output_directory=output_dir)
+                 app_state['data_processor'] = data_processor # Store it back
+                 log_statement('debug', f"{LOG_INS}:DEBUG>>Instantiated DataProcessor for linguistic processing.", __file__)
+            else:
+                 raise ImportError("DataProcessor class is not available (dummy class present).") # Raise specific error
+
+        except (ImportError, NameError, ValueError, KeyError, Exception) as e:
+            log_statement('error', f"{LOG_INS}:ERROR>>Failed to instantiate DataProcessor: {e}", __file__, exc_info=True)
+            print(f"Error: Could not initialize the Data Processor. Linguistic processing cannot continue. Details in logs.")
+            return
+
+    # --- Semantic Labeling (Example Linguistic Task) ---
+    labeler = None
+    try:
+        # Check if SemanticLabeler class is the dummy one
+        if 'SemanticLabeler' in globals() and SemanticLabeler.__name__ == 'SemanticLabeler': # Checks if it's the real class
+            # Pass config if needed by the actual SemanticLabeler constructor
+            labeler = SemanticLabeler(config=config)
+            log_statement('info', f"{LOG_INS}:INFO>>SemanticLabeler initialized.", __file__)
+        else:
+            log_statement('warning', f"{LOG_INS}:WARNING>>SemanticLabeler class is not available (dummy class present). Skipping semantic labeling.", __file__)
+            print("Warning: SemanticLabeler component not found. Skipping semantic labeling step.")
+
+    except (NameError, Exception) as e: # Catch NameError just in case, plus general exceptions
+        log_statement('error', f"{LOG_INS}:ERROR>>Failed to initialize SemanticLabeler: {e}", __file__, exc_info=True)
+        print(f"Error: Could not initialize the Semantic Labeler. Skipping. Details in logs.")
+        labeler = None # Ensure labeler is None if init failed
+
+    # --- Processing Loop ---
+    try:
+        files_to_process_df = repo.get_files_by_status(STATUS_PROCESSED)
+    except Exception as e:
+         log_statement('error', f"{LOG_INS}:ERROR>>Failed to retrieve files from repository: {e}", __file__, exc_info=True)
+         print("Error: Could not retrieve file list from repository. Aborting. Details in logs.")
+         return
+
+    if files_to_process_df.empty:
+        log_statement('info', f"{LOG_INS}:INFO>>No files found with status '{STATUS_PROCESSED}'. Linguistic processing step skipped.", __file__)
+        print("No files are ready for linguistic processing (Status 'PROCESSED').")
+        print("Ensure data has been processed using option [2] first.")
+        return
+
+    log_statement('info', f"{LOG_INS}:INFO>>Found {len(files_to_process_df)} files to process linguistically.", __file__)
+    print(f"Found {len(files_to_process_df)} processed files to analyze linguistically.")
+
+    processed_count = 0
+    failed_count = 0
+
+    # Ensure necessary columns exist in the repository DataFrame
+    # Use try-except for potentially missing repo.df
+    try:
+        if repo.df is None:
+             raise AttributeError("Repository DataFrame (repo.df) is None.")
+        if COL_SEMANTIC_LABEL not in repo.df.columns:
+             repo.df[COL_SEMANTIC_LABEL] = None # Or appropriate dtype like object
+             log_statement('debug', f"{LOG_INS}:DEBUG>>Added '{COL_SEMANTIC_LABEL}' column to repository.", __file__)
+        if COL_LINGUISTIC_METADATA not in repo.df.columns:
+             repo.df[COL_LINGUISTIC_METADATA] = None # Or appropriate dtype like object
+             log_statement('debug', f"{LOG_INS}:DEBUG>>Added '{COL_LINGUISTIC_METADATA}' column to repository.", __file__)
+    except AttributeError as e:
+        log_statement('error', f"{LOG_INS}:ERROR>>Failed to access or modify repository DataFrame columns: {e}", __file__, exc_info=True)
+        print("Error: Problem accessing repository data structure. Aborting. Details in logs.")
+        return
+
+
+    for index, row in files_to_process_df.iterrows():
+        filepath_str = row[COL_FILEPATH] # Get path string from repo
+        filepath = Path(filepath_str) # Convert to Path object
+        file_hash = row[COL_HASH]
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Processing linguistically: {filepath} (Hash: {file_hash})", __file__)
+
+        try:
+            # Update status to indicate processing
+            repo.update_entry(filepath_str, {COL_STATUS: STATUS_LINGUISTIC_PROCESSING}) # Pass path string
+
+            # Check data type - only process textual data for this example
+            data_type = row.get(COL_DATA_TYPE) # Assumes DataProcessor adds this column
+            if data_type != TYPE_TEXTUAL:
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Skipping non-textual file: {filepath} (Type: {data_type})", __file__)
+                # Revert status - simpler to just not process than track another status
+                repo.update_entry(filepath_str, {COL_STATUS: STATUS_PROCESSED})
+                continue
+
+            # Get the path to the *processed* data file generated by DataProcessor
+            processed_path = repo.get_processed_path(filepath_str, app_state) # Pass path string and app_state
+            if processed_path is None or not processed_path.exists():
+                 log_statement('warning', f"{LOG_INS}:WARNING>>Processed file path not found or file does not exist for {filepath}. Skipping.", __file__)
+                 print(f"Warning: Could not find processed data for {filepath}. Skipping.")
+                 repo.update_entry(filepath_str, {COL_STATUS: STATUS_LINGUISTIC_FAILED, COL_ERROR_INFO: "Processed file missing"})
+                 failed_count += 1
+                 continue
+
+            # --- Read Processed Content ---
+            content = ""
+            try:
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Attempting to read processed content from {processed_path}", __file__)
+                reader_cls = get_reader_class(processed_path) # Use existing reader discovery
+                if reader_cls:
+                    reader = reader_cls(processed_path)
+                    content = reader.read() # Assumes a simple read() method exists
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Successfully read processed content using {reader_cls.__name__} from {processed_path}", __file__)
+                else:
+                    # Fallback for unknown types or if get_reader_class fails
+                    # Needs care for binary reads if compression involved but not handled by readers
+                    try:
+                         with open(processed_path, 'r', encoding='utf-8') as f: # Basic text fallback
+                             content = f.read()
+                         log_statement('debug', f"{LOG_INS}:DEBUG>>Read processed content using basic text file open from {processed_path}", __file__)
+                    except UnicodeDecodeError:
+                         log_statement('warning', f"{LOG_INS}:WARNING>>Basic text read failed (UnicodeDecodeError) for {processed_path}. Trying binary read (may not be useful).", __file__)
+                         try:
+                              with open(processed_path, 'rb') as f: # Basic binary fallback
+                                  content = f.read().decode('utf-8', errors='ignore') # Attempt decode, ignore errors
+                              log_statement('debug', f"{LOG_INS}:DEBUG>>Read processed content using basic binary file open (decoded) from {processed_path}", __file__)
+                         except Exception as bin_read_err:
+                              log_statement('error', f"{LOG_INS}:ERROR>>Basic binary read also failed for {processed_path}: {bin_read_err}", __file__, exc_info=True)
+                              raise IOError(f"Failed to read file {processed_path} with text or binary fallback.") from bin_read_err
+                    except Exception as text_read_err:
+                         log_statement('error', f"{LOG_INS}:ERROR>>Basic text read failed for {processed_path}: {text_read_err}", __file__, exc_info=True)
+                         raise IOError(f"Failed to read file {processed_path} with text fallback.") from text_read_err
+
+
+            except Exception as read_err:
+                log_statement('error', f"{LOG_INS}:ERROR>>Failed to read processed content from {processed_path}: {read_err}", __file__, exc_info=True)
+                print(f"Error: Failed to read processed data for {filepath}. Skipping. Details in logs.")
+                repo.update_entry(filepath_str, {COL_STATUS: STATUS_LINGUISTIC_FAILED, COL_ERROR_INFO: f"Failed to read processed file: {read_err}"})
+                failed_count += 1
+                continue
+
+            # --- Apply Linguistic Processing ---
+            semantic_label = None
+            linguistic_metadata = {} # Placeholder for other potential metadata
+
+            if labeler and content:
+                try:
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Calling SemanticLabeler.generate_label for {filepath}", __file__)
+                    semantic_label = labeler.generate_label(content)
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Generated semantic label '{semantic_label}' for {filepath}", __file__)
+                    # Example: Add more processing here (POS tagging, NER, etc.)
+                    # linguistic_metadata['pos_tags'] = perform_pos_tagging(content) # Placeholder
+                    # linguistic_metadata['entities'] = perform_ner(content) # Placeholder
+
+                except Exception as label_err:
+                    log_statement('error', f"{LOG_INS}:ERROR>>Semantic labeling failed for {filepath}: {label_err}", __file__, exc_info=True)
+                    print(f"Warning: Semantic labeling failed for {filepath}. Details in logs.")
+                    # Decide if failure prevents marking as processed or just leaves label empty
+                    # For now, allow processing to finish but label will be None
+
+            # --- Update Repository ---
+            update_data = {
+                COL_STATUS: STATUS_LINGUISTIC_PROCESSED,
+                COL_SEMANTIC_LABEL: semantic_label,
+                 # Store complex data as JSON string, handle potential serialization errors
+                COL_LINGUISTIC_METADATA: json.dumps(linguistic_metadata) if linguistic_metadata else None
+            }
+            repo.update_entry(filepath_str, update_data)
+            processed_count += 1
+            log_statement('info', f"{LOG_INS}:INFO>>Successfully processed linguistically: {filepath}", __file__)
 
         except Exception as e:
-             log_statement(loglevel='error', logstatement=f"Failed to save repository file {repo_filename}: {e}", main_logger=str(__name__), exc_info=True)
-
-        log_statement(loglevel='info', logstatement=f"Repository generation/update complete for {target_path.resolve()}", main_logger=str(__name__))
-
-    except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Error during Set Data Directory for path '{folder_path_str}': {e}", main_logger=str(__name__), exc_info=True)
-
-def process_linguistic_data():
-    """Handles Option 2: Process Linguistic Data using project constants."""
-    global app_state
-    log_statement(loglevel='info', logstatement="Starting linguistic data processing.", main_logger=str(__name__))
-
-    if app_state.get('main_repo_df') is None:
-        log_statement(loglevel='error', logstatement="Error: No main data repository loaded. Please run Option 1 first.", main_logger=str(__name__)); return
-
-    if app_state.get('config') is None: app_state['config'] = load_config()
-    config = app_state['config']
-    main_repo_df = app_state['main_repo_df']
-    main_repo_path = Path(app_state['main_repo_path'])
-    main_repo_hash = _get_repo_hash(main_repo_path.parent)
-
-    try:
-        processing_config = config.get('data_processing', {})
-        text_extensions = processing_config.get('text_extensions', ['.txt', '.md'])
-        max_workers = _get_max_workers(config)
-        # Use imported constant for output base directory
-        output_dir = PROCESSED_DATA_DIR / main_repo_hash
-        _ensure_dir_exists(output_dir)
-
-        # Use constant COL_EXTENSION for filtering
-        source_files_df = main_repo_df[main_repo_df[COL_EXTENSION].isin(text_extensions)].copy()
-        if source_files_df.empty: log_statement(loglevel='warning', logstatement="No text files found to process.", main_logger=__name__); return
-
-        log_statement(loglevel='info', logstatement=f"Found {len(source_files_df)} potential text files (using up to {max_workers} workers).", main_logger=str(__name__))
-        dp = DataProcessor(repo_dir=REPO_DIR, filename=MAIN_REPO_FILENAME, max_workers=16)
-        log_statement(loglevel='info', logstatement=f"DataProcessor initialized.", main_logger=str(__name__))
-
-        # Use central DATA_REPO_DIR for processed repo CSV
-        processed_repo_filename = DATA_REPO_DIR / f"processed_repository_{main_repo_hash}.csv.gz"
-        existing_processed_df = pd.DataFrame(columns=PROCESSED_REPO_COLUMNS)
-        files_to_process_args = []
-
-        if processed_repo_filename.exists():
+            failed_count += 1
+            # Use logger formatting for critical errors
+            log_statement('critical', f"{LOG_INS}:CRITICAL>>Unhandled error during linguistic processing for {filepath}: {e}", __file__, exc_info=True)
+            print(f"Error: An unexpected error occurred while processing {filepath}. Skipping. Details in logs.")
+            # Attempt to mark as failed in repository
             try:
-                existing_processed_df = pd.read_csv(processed_repo_filename, compression='gzip')
-                log_statement(loglevel='info', logstatement=f"Loaded existing processed repository: {processed_repo_filename}", main_logger=str(__name__))
-                # Use constants for merge columns
-                comparison_df = pd.merge(
-                    source_files_df[[COL_FILEPATH, COL_HASH, COL_MTIME]], # Current state from main repo
-                    existing_processed_df[[COL_FILEPATH, COL_HASH, COL_MTIME]], # Stored original state in processed repo
-                    how='left', on=COL_FILEPATH, suffixes=('_current', '_repo')
-                )
-                # Identify changes using constants
-                needs_processing = comparison_df[
-                    comparison_df[f"{COL_HASH}_repo"].isnull() | # New file (no match on filepath)
-                    (comparison_df[f"{COL_HASH}_current"] != comparison_df[f"{COL_HASH}_repo"]) | # Hash changed
-                    (comparison_df[f"{COL_MTIME}_current"].fillna(0).astype(int) != comparison_df[f"{COL_MTIME}_repo"].fillna(0).astype(int)) # Mtime changed
-                ]
-                # Use constant COL_FILEPATH for getting list
-                files_to_process_args = [(fp, output_dir, 'process', dp) for fp in needs_processing[COL_FILEPATH].tolist()]
-                log_statement(loglevel='info', logstatement=f"Identified {len(files_to_process_args)} files needing processing.", main_logger=str(__name__))
-            except Exception as e:
-                log_statement(loglevel='error', logstatement=f"Error loading/comparing processed repo {processed_repo_filename}: {e}. Reprocessing all.", main_logger=str(__name__), exc_info=True)
-                existing_processed_df = pd.DataFrame(columns=PROCESSED_REPO_COLUMNS)
-                files_to_process_args = [(fp, output_dir, 'process', dp) for fp in source_files_df[COL_FILEPATH].tolist()] # Use constant
-        else:
-            log_statement(loglevel='info', logstatement="No existing processed repository found. Processing all.", main_logger=str(__name__))
-            files_to_process_args = [(fp, output_dir, 'process', dp) for fp in source_files_df[COL_FILEPATH].tolist()] # Use constant
+                repo.update_entry(filepath_str, {COL_STATUS: STATUS_LINGUISTIC_FAILED, COL_ERROR_INFO: str(e)})
+            except Exception as repo_update_err:
+                 log_statement('critical', f"{LOG_INS}:CRITICAL>>Failed to update repository status to FAILED for {filepath} after error: {repo_update_err}", __file__, exc_info=True)
 
-        processed_results = []
-        if files_to_process_args:
-            log_statement(loglevel='info', logstatement=f"Processing {len(files_to_process_args)} files...", main_logger=str(__name__))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_path = {executor.submit(_process_file_wrapper, args): args[0] for args in files_to_process_args}
-                pbar = tqdm(total=len(files_to_process_args), desc="Processing text", unit="file")
-                for future in concurrent.futures.as_completed(future_to_path):
-                    try:
-                        result = future.result();
-                        if result: processed_results.append(result)
-                    except Exception as e: log_statement(loglevel='error', logstatement=f"Error processing result: {e}", main_logger=str(__name__), exc_info=True)
-                    finally: pbar.update(1)
-                pbar.close()
-        else: log_statement(loglevel='warning', logstatement="No files require processing.", main_logger=__name__)
+    # --- Finalization ---
+    log_statement('info', f"{LOG_INS}:INFO>>Linguistic processing finished. Processed: {processed_count}, Failed: {failed_count}.", __file__)
+    print(f"\n--- Linguistic Processing Complete ---")
+    print(f"Successfully processed: {processed_count}")
+    print(f"Failed: {failed_count}")
 
-        # Update repository DataFrame
-        new_processed_df = pd.DataFrame(processed_results, columns=PROCESSED_REPO_COLUMNS)
-        # Use constant COL_FILEPATH for identifying reprocessed originals
-        reprocessed_originals = set(new_processed_df[COL_FILEPATH]) if not new_processed_df.empty else set()
-        source_filepaths = set(source_files_df[COL_FILEPATH])
+    if processed_count > 0 or failed_count > 0:
+        try:
+            log_statement('info', f"{LOG_INS}:INFO>>Attempting to save repository after linguistic processing.", __file__)
+            repo.save_repo()
+            log_statement('info', f"{LOG_INS}:INFO>>Repository saved after linguistic processing.", __file__)
+            print("Repository changes saved.")
+        except Exception as e:
+            log_statement('critical', f"{LOG_INS}:CRITICAL>>Failed to save repository after linguistic processing: {e}", __file__, exc_info=True)
+            print(f"CRITICAL ERROR: Failed to save repository changes! Details in logs.")
 
-        if not existing_processed_df.empty:
-            final_processed_df = pd.concat([
-                existing_processed_df[
-                    ~existing_processed_df[COL_FILEPATH].isin(reprocessed_originals) &
-                    existing_processed_df[COL_FILEPATH].isin(source_filepaths)
-                 ],
-                new_processed_df
-            ], ignore_index=True).drop_duplicates(subset=['processed_filepath'], keep='last')
-        else: final_processed_df = new_processed_df
+# def process_linguistic_data():
+#     """
+#     Handles Option 2: Process Linguistic Data using DataProcessor.
+#     Determines base directory, processes files via DataProcessor,
+#     and updates app_state with the processed repository details.
+#     """
+#     global app_state
+#     func_name = inspect.currentframe().f_code.co_name
+#     log_statement(loglevel='info', logstatement=f"{LOG_INS} - Starting linguistic data processing.", main_logger=__file__)
 
-        final_processed_df = final_processed_df.dropna(subset=['processed_filepath', COL_FILEPATH]) # Use constant
-        log_statement(loglevel='info', logstatement=f"Processed repository contains {len(final_processed_df)} entries.", main_logger=str(__name__))
+#     # --- 1. Pre-checks ---
+#     if app_state.get('main_repo_df') is None or app_state.get('main_repo_path') is None:
+#         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error: No main data repository loaded/path set. Please run Option 1 first.", main_logger=__file__)
+#         print("Error: Main repository not set. Please run Option 1 first.")
+#         return
+#     if app_state.get('config') is None:
+#         try:
+#             app_state['config'] = load_config()
+#             log_statement(loglevel='info', logstatement=f"{LOG_INS} - Config loaded.", main_logger=__file__)
+#         except Exception as e:
+#             app_state['config'] = {}
+#             log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to load config: {e}. Using empty config.", main_logger=__file__, exc_info=True)
+#             print("Error: Failed to load system configuration.")
+#             return
 
-        # Save & Update State
-        if not final_processed_df.empty:
-            log_statement(loglevel='info', logstatement=f"Saving processed repository to {processed_repo_filename}", main_logger=str(__name__))
-            try:
-                _ensure_dir_exists(DATA_REPO_DIR) # Use central repo dir
-                final_processed_df.to_csv(processed_repo_filename, compression='gzip', index=False)
-                log_statement(loglevel='info', logstatement="Processed repository saved successfully.", main_logger=str(__name__))
-                app_state['processed_repo_path'] = str(processed_repo_filename.resolve()); app_state['processed_repo_df'] = final_processed_df
-                app_state['tokenized_repo_path'] = None; app_state['tokenized_repo_df'] = None
-                log_statement(loglevel='info', logstatement=f"App state updated. Active processed repo: {processed_repo_filename}", main_logger=str(__name__))
-            except Exception as e:
-                log_statement(loglevel='error', logstatement=f"Failed to save processed repo {processed_repo_filename}: {e}", main_logger=str(__name__), exc_info=True)
-        else:
-            log_statement(loglevel='warning', logstatement="Final processed repository is empty.", main_logger=str(__name__))
-            app_state['processed_repo_path'] = None; app_state['processed_repo_df'] = None
+#     config = app_state['config']
+#     main_repo_path = Path(app_state['main_repo_path'])
+#     target_repo_path_str = str(main_repo_path.resolve()) # Use resolved path string for DataProcessor init
 
-        log_statement(loglevel='info', logstatement="Linguistic data processing finished successfully.", main_logger=str(__name__))
+#     # --- 2. Determine Base Directory Filter (Optional) ---
+#     repo_index = _load_repository_index()
+#     current_repo_hash = None
+#     base_dir_filter_path = None
+#     try:
+#         filename_parts = main_repo_path.stem.split('data_repository_')
+#         if len(filename_parts) > 1:
+#              current_repo_hash = filename_parts[-1].split('.')[0]
+#              if current_repo_hash in repo_index:
+#                  base_dir_filter_path = repo_index[current_repo_hash].get(INDEX_KEY_PATH)
+#                  if base_dir_filter_path: log_statement(loglevel='info', logstatement=f"{LOG_INS} - Determined base directory for filtering: {base_dir_filter_path}", main_logger=__file__)
+#                  else: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Could not determine base directory from index for hash {current_repo_hash}.", main_logger=__file__)
+#              else: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Current repo hash '{current_repo_hash}' not found in index.", main_logger=__file__)
+#         else: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Could not parse repo hash from filename: {main_repo_path.name}", main_logger=__file__)
+#     except Exception as e:
+#          log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Could not reliably determine base directory for filtering from path {main_repo_path}: {e}. Proceeding without filter.", main_logger=__file__)
+#          base_dir_filter_path = None
 
-    except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Error during linguistic data processing: {e}", main_logger=str(__name__), exc_info=True)
+#     dp = None # Initialize dp to None for finally block
+#     processed_repo_path_determined = None # Track the path DataProcessor used
+#     processed_repo_load_success = False   # Track if loading the processed repo worked
+
+#     try:
+#         # --- 3. Initialize DataProcessor ---
+#         if 'DataProcessor' not in globals() or DataProcessor is None: raise ImportError("DataProcessor class not available.")
+#         max_workers = _get_max_workers(config)
+#         dp = DataProcessor(max_workers=max_workers, repo_path_override=target_repo_path_str)
+#         log_statement(loglevel='info', logstatement=f"{LOG_INS} - DataProcessor initialized for processing repository: {target_repo_path_str}", main_logger=__file__)
+#         # Store the path the DataProcessor intends to use for the processed repo
+#         processed_repo_path_determined = dp.processed_repo_filepath
+
+#         # --- 4. Execute Processing ---
+#         log_statement(loglevel='info', logstatement=f"{LOG_INS} - Calling DataProcessor.process_all (filter: {base_dir_filter_path})...", main_logger=__file__)
+#         statuses = ('discovered', 'error', STATUS_NEW) if 'STATUS_NEW' in globals() else ('discovered', 'error')
+#         if not hasattr(dp, 'process_all'): raise AttributeError("DataProcessor instance lacks 'process_all' method.")
+#         dp.process_all(base_dir_filter=base_dir_filter_path, statuses_to_process=statuses)
+#         log_statement(loglevel='info', logstatement=f"{LOG_INS} - DataProcessor.process_all finished.", main_logger=__file__)
+
+#         # --- 5. Reload Main Repository DF (reflects status updates from DataProcessor) ---
+#         log_statement(loglevel='info', logstatement=f"{LOG_INS} - Reloading main repository DataFrame into app_state after processing.", main_logger=__file__)
+#         repo_after_proc = DataRepository(repo_path=main_repo_path)
+#         app_state['main_repo_df'] = repo_after_proc.df
+#         log_statement(loglevel='info', logstatement=f"{LOG_INS} - Main repo DF reloaded ({len(app_state['main_repo_df']) if app_state['main_repo_df'] is not None else 0} entries).", main_logger=__file__)
+
+#         # --- 6. Update Processed Repository State in app_state ---
+#         processed_repo_df_loaded = None
+#         if processed_repo_path_determined and processed_repo_path_determined.exists():
+#              log_statement(loglevel='info', logstatement=f"{LOG_INS} - Processed repository file found at: {processed_repo_path_determined}. Attempting to load...", main_logger=__file__)
+#              try:
+#                  if DataRepository is None: raise ImportError("DataRepository class not available.")
+#                  processed_repo = DataRepository(repo_path=processed_repo_path_determined)
+#                  processed_repo_df_loaded = processed_repo.df
+#                  if processed_repo_df_loaded is not None and not processed_repo_df_loaded.empty:
+#                       app_state['processed_repo_path'] = str(processed_repo_path_determined.resolve())
+#                       app_state['processed_repo_df'] = processed_repo_df_loaded
+#                       processed_repo_load_success = True # Mark success
+#                       log_statement(loglevel='info', logstatement=f"{LOG_INS} - Successfully loaded processed DataFrame ({len(processed_repo_df_loaded)} entries) into app_state.", main_logger=__file__)
+#                  elif processed_repo_df_loaded is not None and processed_repo_df_loaded.empty:
+#                       log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Processed repository file is empty: {processed_repo_path_determined}. State 'processed_repo_df' set to empty DataFrame.", main_logger=__file__)
+#                       app_state['processed_repo_path'] = str(processed_repo_path_determined.resolve()) # Path exists, even if empty
+#                       app_state['processed_repo_df'] = processed_repo_df_loaded # Store the empty DF
+#                       processed_repo_load_success = True # Loading technically succeeded, even if empty
+#                  else: # DataRepository loaded None
+#                      log_statement(loglevel='warning', logstatement=f"{LOG_INS} - DataRepository loaded None for processed repo: {processed_repo_path_determined}. State 'processed_repo_df' set to None.", main_logger=__file__)
+#                      app_state['processed_repo_path'] = None # Clear path if load returned None
+#                      app_state['processed_repo_df'] = None
+#              except ImportError:
+#                   log_statement(loglevel='critical', logstatement=f"{LOG_INS} - DataRepository class not available. Cannot load processed repository.", main_logger=__file__)
+#                   app_state['processed_repo_path'] = None
+#                   app_state['processed_repo_df'] = None
+#              except Exception as load_err:
+#                   log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to load processed repository DataFrame from {processed_repo_path_determined}: {load_err}", main_logger=__file__, exc_info=True)
+#                   app_state['processed_repo_path'] = None
+#                   app_state['processed_repo_df'] = None
+#         else:
+#              log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Processed repository file path not determined or file does not exist ({processed_repo_path_determined}). Processed state not updated.", main_logger=__file__)
+#              app_state['processed_repo_path'] = None
+#              app_state['processed_repo_df'] = None
+
+#         # --- 7. Clear Subsequent State if Processed State Failed/Empty ---
+#         if not processed_repo_load_success or (processed_repo_df_loaded is not None and processed_repo_df_loaded.empty):
+#             log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Processed repository state is not valid or empty. Clearing subsequent tokenization state.", main_logger=__file__)
+#             app_state['tokenized_repo_path'] = None
+#             app_state['tokenized_repo_df'] = None
+
+#         log_statement(loglevel='info', logstatement=f"{LOG_INS} - Linguistic data processing function finished.", main_logger=__file__)
+
+#     except ImportError as imp_err:
+#          log_statement(loglevel='critical', logstatement=f"{LOG_INS} - Missing import required for processing: {imp_err}", main_logger=__file__, exc_info=True)
+#          print(f"Error: A required library is missing ({imp_err}). Processing cannot continue.")
+#     except AttributeError as attr_err:
+#          log_statement(loglevel='error', logstatement=f"{LOG_INS} - Missing required method/attribute (e.g., in DataProcessor): {attr_err}", main_logger=__file__, exc_info=True)
+#          print(f"Error: A required component is missing ({attr_err}).")
+#     except Exception as e:
+#         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error during linguistic data processing: {e}", main_logger=__file__, exc_info=True)
+#         print(f"An unexpected error occurred during processing: {e}. Check logs.")
+#     finally:
+#         # --- 8. Cleanup ---
+#         if dp is not None: # Check if dp was successfully assigned
+#             # Check if dp has a 'shutdown' method before calling
+#             if hasattr(dp, 'shutdown') and callable(dp.shutdown):
+#                  try:
+#                      log_statement(loglevel='info', logstatement=f"{LOG_INS} - Shutting down DataProcessor resources...", main_logger=__file__)
+#                      dp.shutdown()
+#                      log_statement(loglevel='info', logstatement=f"{LOG_INS} - DataProcessor resources shut down.", main_logger=__file__)
+#                  except Exception as shutdown_e:
+#                      log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error during DataProcessor shutdown: {shutdown_e}", main_logger=__file__, exc_info=True)
+#             elif hasattr(dp, 'executor') and dp.executor is not None: # Fallback: try shutting down executor directly
+#                 try:
+#                     log_statement(loglevel='info', logstatement=f"{LOG_INS} - Shutting down DataProcessor executor directly...", main_logger=__file__)
+#                     dp.executor.shutdown(wait=True)
+#                     log_statement(loglevel='info', logstatement=f"{LOG_INS} - DataProcessor executor shut down.", main_logger=__file__)
+#                 except Exception as shutdown_e:
+#                      log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error during DataProcessor executor shutdown: {shutdown_e}", main_logger=__file__, exc_info=True)
+                
+def _load_tokenizer():
+    m_workers = os.cpu_count()
+    tokenizer = Tokenizer(max_workers=m_workers)
+    return tokenizer
 
 def tokenize_data():
-    """Handles Option 3: Data Tokenization using project constants."""
+    """
+    Handles Option 3: Data Tokenization using project constants, with thread-safe collection.
+    Loads processed data correctly using DataRepository and compares against existing
+    tokenized data to only process changed/new files. Includes diagnostic logging.
+    """
     global app_state
-    log_statement(loglevel='info', logstatement="Starting data tokenization.", main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Starting data tokenization.", main_logger=__name__)
 
-    if app_state.get('processed_repo_df') is None:
-        log_statement(loglevel='error', logstatement="Error: No processed data repository loaded. Please run Option 2 first.", main_logger=__name__); return
+    # --- 1. Pre-checks & Load Processed Repo CORRECTLY ---
+    processed_repo_path_str = app_state.get('processed_repo_path')
+    if not processed_repo_path_str:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error: No processed data repository path set. Please run Option 2 first.", main_logger=__name__)
+        print("Error: Processed repository path not set. Please run Option 2 first.")
+        return
 
-    if app_state.get('config') is None: app_state['config'] = load_config()
-    config = app_state['config']; processed_repo_df = app_state['processed_repo_df']; processed_repo_path = Path(app_state['processed_repo_path'])
-    processed_repo_hash = _get_repo_hash(processed_repo_path.parent)
+    processed_repo_path = Path(processed_repo_path_str)
+    processed_repo_df = None # Initialize
 
-    if processed_repo_df.empty: log_statement(loglevel=str("error"), logstatement="Error: Processed repository DataFrame is empty.", main_logger=str(__name__)); return
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Loading processed repository from: {processed_repo_path}", main_logger=__name__)
     try:
-        tokenizer_config = config.get('tokenizer', {}); model_name = tokenizer_config.get('model_name', 'bert-base-uncased')
-        max_workers = _get_max_workers(config)
-        # Use imported constant for output base dir
-        output_dir = TOKENIZED_DATA_DIR / processed_repo_hash
-        _ensure_dir_exists(output_dir)
+        # --- Load DataFrame using DataRepository to ensure schema ---
+        if not processed_repo_path.exists():
+             raise FileNotFoundError(f"Processed repository file not found at {processed_repo_path}")
 
-        # Initialize Tokenizer (same as before)
+        # Use DataRepository to load - this applies _load_repo logic
+        proc_repo_loader = DataRepository(repo_path=processed_repo_path)
+        processed_repo_df = proc_repo_loader.df # Get the loaded, schema-compliant DataFrame
+
+        if processed_repo_df is None:
+             raise ValueError("DataRepository failed to load the processed DataFrame.")
+        if processed_repo_df.empty:
+             log_statement(loglevel="warning", logstatement=f"{LOG_INS} - Warning: Processed repository DataFrame is empty. Nothing to tokenize.", main_logger=__name__)
+             print("Warning: Processed data repository is empty. Nothing to tokenize.")
+             return # Exit if empty
+
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Successfully loaded processed repository with {len(processed_repo_df)} entries.", main_logger=__name__)
+
+    except FileNotFoundError as fnf_err:
+         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error: {fnf_err}", main_logger=__name__)
+         print(f"Error: Cannot find the processed repository file expected at {processed_repo_path}.")
+         print("Please ensure Option 2 (Process Linguistic Data) ran successfully and created the file.")
+         return
+    except Exception as load_err:
+         log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error loading processed repository from {processed_repo_path}: {load_err}", main_logger=__name__, exc_info=True)
+         print(f"Error loading processed data: {load_err}. Cannot proceed with tokenization.")
+         return
+
+
+    # --- Config Loading ---
+    if app_state.get('config') is None:
         try:
-            if 'TokenizerWrapper' in globals() and tokenizer_config:
-                tokenizer = TokenizerWrapper(model_name_or_path=model_name, config=tokenizer_config)
-                log_statement(loglevel='info', logstatement=f"TokenizerWrapper initialized for '{model_name}'", main_logger=str(__name__))
-            else:
-                tokenizer = AutoTokenizer.from_pretrained(model_name); tokenizer.name_or_path = model_name
-                log_statement(loglevel='info', logstatement=f"AutoTokenizer initialized for '{model_name}'", main_logger=str(__name__))
+            app_state['config'] = load_config() # Assuming load_config is available
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Config loaded.", main_logger=__name__)
         except Exception as e:
-            log_statement(loglevel='error', log_statement=f"Error initializing tokenizer '{model_name}': {e}", main_logger=__name__, exc_info=True); return
+            app_state['config'] = {}
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to load config: {e}. Using empty config.", main_logger=__name__, exc_info=True)
+            print("Warning: Failed to load system configuration. Using defaults.")
+    config = app_state['config']
 
-        # Use central DATA_REPO_DIR for tokenized repo CSV
-        tokenized_repo_filename = DATA_REPO_DIR / f"tokenized_repository_{processed_repo_hash}.csv.gz"
-        existing_tokenized_df = pd.DataFrame(columns=TOKENIZED_REPO_COLUMNS)
-        files_to_tokenize_args = []
-
-        required_cols = ['processed_filepath', 'processed_hash']
-        if not all(col in processed_repo_df.columns for col in required_cols):
-            log_statement(loglevel=str("error"), logstatement=str(f"Error: Processed repo DF missing required columns.  Required columns: {required_cols}"), main_logger=str(__name__), exc_info=True); return
-
-        # Comparison Logic (same as before)
-        if tokenized_repo_filename.exists():
-            try:
-                existing_tokenized_df = pd.read_csv(tokenized_repo_filename, compression='gzip')
-                log_statement(loglevel='info', logstatement=f"Loaded existing tokenized repository: {tokenized_repo_filename}", main_logger=str(__name__))
-                comparison_df = pd.merge(
-                    processed_repo_df[['processed_filepath', 'processed_hash']], existing_tokenized_df[['processed_filepath', 'processed_hash', 'tokenizer_name']], how='left', on='processed_filepath', suffixes=('_current', '_repo')
-                )
-                needs_tokenizing = comparison_df[
-                    comparison_df['processed_hash_repo'].isnull() |
-                    (comparison_df['processed_hash_current'] != comparison_df['processed_hash_repo']) |
-                    (comparison_df['tokenizer_name'].fillna('') != tokenizer.name_or_path)
-                ]
-                files_to_tokenize_args = [(fp, output_dir, 'tokenize', tokenizer) for fp in needs_tokenizing['processed_filepath'].tolist()]
-                log_statement(loglevel='info', logstatement=f"Identified {len(files_to_tokenize_args)} files needing tokenization.", main_logger=str(__name__))
-            except Exception as e:
-                log_statement(loglevel='error', logstatement=f"Error loading/comparing tokenized repo {tokenized_repo_filename}: {e}. Retokenizing all.", main_logger=str(__name__), exc_info=True)
-                existing_tokenized_df = pd.DataFrame(columns=TOKENIZED_REPO_COLUMNS)
-                files_to_tokenize_args = [(fp, output_dir, 'tokenize', tokenizer) for fp in processed_repo_df['processed_filepath'].tolist()]
-        else:
-            log_statement(loglevel='info', logstatement="No existing tokenized repository found. Tokenizing all files.", main_logger=str(__name__))
-            files_to_tokenize_args = [(fp, output_dir, 'tokenize', tokenizer) for fp in processed_repo_df['processed_filepath'].tolist()]
-
-        # Parallel Tokenization (same as before)
-        tokenized_results = []
-        if files_to_tokenize_args:
-            log_statement(loglevel='info', logstatement=f"Tokenizing {len(files_to_tokenize_args)} files (using up to {max_workers} workers)...", main_logger=__name__)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_path = {executor.submit(_process_file_wrapper, args): args[0] for args in files_to_tokenize_args}
-                pbar = tqdm(total=len(files_to_tokenize_args), desc="Tokenizing files", unit="file")
-                for future in concurrent.futures.as_completed(future_to_path):
-                    try:
-                        result = future.result()
-                        if result: tokenized_results.append(result)
-                    except Exception as e: log_statement(loglevel='error', logstatement=f"Error tokenizing result: {e}", main_logger=str(__name__), exc_info=True)
-                    finally: pbar.update(1)
-                pbar.close()
-        else: log_statement(loglevel='warning', logstatement="No files require tokenization.", main_logger=__name__)
-
-        # Update repository DataFrame (same as before)
-        new_tokenized_df = pd.DataFrame(tokenized_results, columns=TOKENIZED_REPO_COLUMNS)
-        retokenized_processed = set(new_tokenized_df['processed_filepath']) if not new_tokenized_df.empty else set()
-        processed_filepaths = set(processed_repo_df['processed_filepath'])
-        if not existing_tokenized_df.empty:
-            final_tokenized_df = pd.concat([
-                existing_tokenized_df[
-                     ~existing_tokenized_df['processed_filepath'].isin(retokenized_processed) &
-                     existing_tokenized_df['processed_filepath'].isin(processed_filepaths)
-                ], new_tokenized_df
-            ], ignore_index=True).drop_duplicates(subset=['tokenized_filepath'], keep='last')
-        else: final_tokenized_df = new_tokenized_df
-        final_tokenized_df = final_tokenized_df.dropna(subset=['tokenized_filepath', 'processed_filepath'])
-        log_statement(loglevel='info', logstatement=f"Tokenized repository contains {len(final_tokenized_df)} entries.", main_logger=str(__name__))
-
-        # Save & Update State
-        if not final_tokenized_df.empty:
-            log_statement(loglevel='info', logstatement=f"Saving tokenized repository to {tokenized_repo_filename}", main_logger=str(__name__))
-            try:
-                _ensure_dir_exists(DATA_REPO_DIR) # Use central repo dir
-                final_tokenized_df.to_csv(tokenized_repo_filename, compression='gzip', index=False)
-                log_statement(loglevel='info', logstatement="Tokenized repository saved successfully.", main_logger=str(__name__))
-                app_state['tokenized_repo_path'] = str(tokenized_repo_filename.resolve())
-                app_state['tokenized_repo_df'] = final_tokenized_df
-                log_statement(loglevel='info', logstatement=f"App state updated. Active tokenized repo: {tokenized_repo_filename}", main_logger=str(__name__))
-            except Exception as e:
-                log_statement(loglevel='error', logstatement=f"Failed to save tokenized repo {tokenized_repo_filename}: {e}", main_logger=str(__name__), exc_info=True)
-        else:
-            log_statement(loglevel='warning', logstatement="Final tokenized repository is empty.", main_logger=str(__name__))
-            app_state['tokenized_repo_path'] = None; app_state['tokenized_repo_df'] = None
-
-        log_statement(loglevel='info', logstatement="Data tokenization finished successfully.", main_logger=str(__name__))
-
+    # --- 2. Extract Hash from Processed Repo Path ---
+    try:
+        filename_stem = processed_repo_path.stem
+        if filename_stem.endswith('.csv'): # Remove .csv if present before splitting
+             filename_stem = filename_stem[:-4]
+        filename_parts = filename_stem.split('processed_repository_')
+        if len(filename_parts) > 1:
+             processed_repo_hash = filename_parts[-1]
+             log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Extracted processed repo hash: {processed_repo_hash}", main_logger=__name__)
+        else: raise ValueError("Filename does not follow expected 'processed_repository_*_hash' pattern")
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Error during data tokenization: {e}", main_logger=str(__name__), exc_info=True)
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Cannot extract hash from processed repo path '{processed_repo_path}'. Aborting tokenization. Error: {e}", main_logger=__name__)
+        return
+
+    # --- Ensure Processed DataFrame Schema & ADD DIAGNOSTIC LOGGING ---
+    required_processed_cols = MAIN_REPO_HEADER # Use constant
+    log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Selecting required columns. Required list: {required_processed_cols}", main_logger=__name__)
+
+    # --- DIAGNOSTIC LOGGING ---
+    actual_cols = processed_repo_df.columns.tolist()
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Columns ACTUALLY PRESENT in loaded processed_repo_df: {actual_cols}", main_logger=__name__) # INFO level for visibility
+    missing_cols_check = [col for col in required_processed_cols if col not in actual_cols]
+    if missing_cols_check:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - ERROR: Columns confirmed missing before slicing attempt: {missing_cols_check}", main_logger=__name__)
+    else:
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - All required columns appear present before slicing.", main_logger=__name__)
+    # --- END DIAGNOSTIC LOGGING ---
+
+    # The potentially failing line: Wrap in try-except for clarity
+    try:
+        # Attempt to select the required columns
+        processed_repo_df_subset = processed_repo_df[required_processed_cols].copy()
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Successfully selected required columns.", main_logger=__name__)
+    except KeyError as e:
+        # This block will catch the error if columns are still missing
+        log_statement(loglevel='critical', logstatement=f"{LOG_INS} - CRITICAL KeyError selecting columns: {e}. DF Columns were: {actual_cols}", main_logger=__name__)
+        print(f"Critical Error: Failed to select required columns from processed data. Columns present: {actual_cols}. Error: {e}")
+        print("This indicates an issue with the processed repository file structure or the loading process.")
+        return # Stop execution
+    except Exception as e_slice:
+         # Catch any other unexpected errors during slicing
+         log_statement(loglevel='critical', logstatement=f"{LOG_INS} - CRITICAL Error during column selection: {e_slice}. DF Columns were: {actual_cols}", main_logger=__name__)
+         print(f"Critical Error: Failed to select required columns. Check logs. Error: {e_slice}")
+         return # Stop execution
+
+
+    # --- Ensure Correct Data Types for Logic ---
+    # (Type conversion logic remains the same as previous version)
+    try:
+        path_cols = [COL_FILEPATH, COL_PROCESSED_PATH]
+        hash_cols = [COL_HASH]
+        for col in path_cols:
+             if col in processed_repo_df_subset.columns:
+                  processed_repo_df_subset[col] = processed_repo_df_subset[col].astype(str).fillna('')
+        for col in hash_cols:
+             if col in processed_repo_df_subset.columns:
+                  processed_repo_df_subset[col] = processed_repo_df_subset[col].astype(str).fillna('')
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Ensured necessary string types for paths/hashes.", main_logger=__name__)
+    except Exception as type_err:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error converting types in processed DF subset: {type_err}", main_logger=__name__)
+        return
+
+
+    # --- 3. Configuration and Tokenizer Initialization ---
+    # ... (remains the same as previous version) ...
+    try:
+        tokenizer_config = config.get('tokenizer', {})
+        model_name = tokenizer_config.get('model_name', 'bert-base-uncased')
+        max_workers = _get_max_workers(config)
+        output_dir = Path(f"{TOKENIZED_DATA_DIR}/{processed_repo_hash}") # Use constant and hash
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Token output directory set to: {output_dir}", main_logger=__name__)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if not hasattr(tokenizer, 'name_or_path'): tokenizer.name_or_path = model_name
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - AutoTokenizer initialized for '{model_name}'", main_logger=__name__)
+    except Exception as e:
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error initializing tokenizer '{model_name}' or setting up output dir: {e}", main_logger=__name__, exc_info=True)
+        print(f"Error setting up tokenizer or output directory: {e}")
+        return
+
+
+    # --- 4. Load Existing Tokenized Repository & Determine Files to Process ---
+    # ... (remains the same as previous version) ...
+    tokenized_repo_filename = DATA_REPO_DIR / f"tokenized_repository_{processed_repo_hash}.csv.zst" # Use constant and hash
+    existing_tokenized_df = pd.DataFrame()
+    compare_cols_existing = [COL_PROCESSED_PATH, COL_HASH, 'tokenizer_name'] # Use constants
+    if tokenized_repo_filename.exists():
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Existing tokenized repository found at {tokenized_repo_filename}. Loading for comparison.", main_logger=__name__)
+        try:
+            tokenized_repo = DataRepository(repo_path=tokenized_repo_filename)
+            loaded_df = tokenized_repo.df
+            if loaded_df is not None and not loaded_df.empty:
+                cols_to_select = [col for col in compare_cols_existing if col in loaded_df.columns]
+                missing_compare_cols = [col for col in compare_cols_existing if col not in loaded_df.columns]
+                if missing_compare_cols: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Loaded tokenized repo missing comparison columns: {missing_compare_cols}.", main_logger=__name__)
+                if cols_to_select:
+                    existing_tokenized_df = loaded_df[cols_to_select].copy()
+                    if COL_PROCESSED_PATH in existing_tokenized_df.columns: existing_tokenized_df[COL_PROCESSED_PATH] = existing_tokenized_df[COL_PROCESSED_PATH].astype(str).fillna('')
+                    if COL_HASH in existing_tokenized_df.columns: existing_tokenized_df[COL_HASH] = existing_tokenized_df[COL_HASH].astype(str).fillna('')
+                    if 'tokenizer_name' in existing_tokenized_df.columns: existing_tokenized_df['tokenizer_name'] = existing_tokenized_df['tokenizer_name'].astype(str).fillna('')
+                    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Loaded and prepared existing tokenized repository ({len(existing_tokenized_df)} entries) for comparison.", main_logger=__name__)
+                else: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - No usable comparison columns found in loaded tokenized repo. Will re-tokenize all.", main_logger=__name__)
+            else: log_statement(loglevel='info', logstatement=f"{LOG_INS} - Existing tokenized repository was empty or failed load. Tokenizing all files.", main_logger=__name__)
+        except Exception as e:
+            log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error loading/parsing tokenized repo {tokenized_repo_filename}: {e}. Retokenizing all.", main_logger=__name__, exc_info=True)
+            existing_tokenized_df = pd.DataFrame()
+    else:
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - No existing tokenized repository found. Tokenizing all files.", main_logger=__name__)
+
+    # Determine files needing tokenization via merge
+    files_to_tokenize_args = []
+    processed_subset_for_compare = processed_repo_df_subset[[COL_PROCESSED_PATH, COL_HASH]].copy()
+    # ... (Merge and comparison logic remains the same as previous version) ...
+    if not existing_tokenized_df.empty and all(col in existing_tokenized_df.columns for col in compare_cols_existing):
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Comparing processed files against existing tokenized records.", main_logger=__name__)
+        try:
+            comparison_df = pd.merge(processed_subset_for_compare, existing_tokenized_df, how='left', on=COL_PROCESSED_PATH, suffixes=('_current', '_repo'))
+            needs_tokenizing_mask = ( comparison_df[COL_HASH + '_repo'].isnull() | (comparison_df[COL_HASH + '_current'] != comparison_df[COL_HASH + '_repo']) | (comparison_df['tokenizer_name'].fillna('') != tokenizer.name_or_path) )
+            needs_tokenizing_df = comparison_df[needs_tokenizing_mask]
+            files_to_tokenize_args = [ (row[COL_PROCESSED_PATH], row[COL_HASH + '_current'], output_dir, tokenizer) for _, row in needs_tokenizing_df.iterrows() if row[COL_PROCESSED_PATH] and Path(row[COL_PROCESSED_PATH]).is_file() ]
+            num_invalid_paths = len(needs_tokenizing_df) - len(files_to_tokenize_args)
+            if num_invalid_paths > 0: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Skipped {num_invalid_paths} entries needing tokenization due to invalid/missing processed paths.", main_logger=__name__)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Comparison complete. Identified {len(files_to_tokenize_args)} files needing tokenization.", main_logger=__name__)
+        except Exception as merge_err:
+             log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error during comparison merge: {merge_err}. Retokenizing all valid processed files.", main_logger=__name__, exc_info=True)
+             existing_tokenized_df = pd.DataFrame()
+             files_to_tokenize_args = [ (row[COL_PROCESSED_PATH], row[COL_HASH], output_dir, tokenizer) for _, row in processed_subset_for_compare.iterrows() if row[COL_PROCESSED_PATH] and Path(row[COL_PROCESSED_PATH]).is_file() ]
+    else:
+         log_statement(loglevel='info', logstatement=f"{LOG_INS} - Tokenizing all valid processed files.", main_logger=__name__)
+         files_to_tokenize_args = [ (row[COL_PROCESSED_PATH], row[COL_HASH], output_dir, tokenizer) for _, row in processed_subset_for_compare.iterrows() if row[COL_PROCESSED_PATH] and Path(row[COL_PROCESSED_PATH]).is_file() ]
+         num_invalid_paths = len(processed_subset_for_compare) - len(files_to_tokenize_args)
+         if num_invalid_paths > 0: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Skipped {num_invalid_paths} processed entries due to invalid/missing paths.", main_logger=__name__)
+
+
+    # --- 5. Parallel Tokenization ---
+    # ... (remains the same as previous version) ...
+    tokenized_results_temp = []
+    if files_to_tokenize_args:
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Tokenizing {len(files_to_tokenize_args)} files (using up to {max_workers} workers)...", main_logger=__name__)
+        if not callable(globals().get('_process_file_wrapper')):
+            log_statement(loglevel='critical', logstatement=f"{LOG_INS} - Helper function '_process_file_wrapper' is not defined. Tokenization aborted.", main_logger=__name__)
+            return
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='Tokenizer') as executor:
+            future_to_args = {executor.submit(_process_file_wrapper, args): args for args in files_to_tokenize_args}
+            pbar = tqdm(as_completed(future_to_args), total=len(files_to_tokenize_args), desc="Tokenizing files", unit="file", leave=False)
+            for future in pbar:
+                args = future_to_args[future]; processed_path_arg = args[0]
+                try:
+                    result = future.result()
+                    if result: tokenized_results_temp.append(result)
+                    else: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Tokenization wrapper returned None for processed file: {Path(processed_path_arg).name}", main_logger=__name__)
+                except Exception as e: log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error processing tokenization future for {Path(processed_path_arg).name}: {e}", main_logger=__name__, exc_info=True)
+        tokenized_results = tokenized_results_temp
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Parallel tokenization finished. Collected {len(tokenized_results)} results.", main_logger=__name__)
+    else:
+        tokenized_results = []; log_statement(loglevel='info', logstatement=f"{LOG_INS} - No files require tokenization.", main_logger=__name__)
+
+
+    # --- 6. Update Repository DataFrame ---
+    # ... (remains the same as previous version) ...
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Updating tokenized repository DataFrame...", main_logger=__name__)
+    new_tokenized_df = pd.DataFrame(tokenized_results) if tokenized_results else pd.DataFrame()
+    final_tokenized_schema_cols = TOKENIZED_REPO_COLUMNS if 'TOKENIZED_REPO_COLUMNS' in globals() else MAIN_REPO_HEADER
+    if not new_tokenized_df.empty:
+        for col in final_tokenized_schema_cols:
+            if col not in new_tokenized_df.columns: new_tokenized_df[col] = pd.NA
+        new_tokenized_df = new_tokenized_df.reindex(columns=final_tokenized_schema_cols)
+    final_tokenized_df = pd.DataFrame(columns=final_tokenized_schema_cols)
+    if not existing_tokenized_df.empty:
+        newly_tokenized_processed_paths = set(new_tokenized_df[COL_PROCESSED_PATH]) if not new_tokenized_df.empty else set()
+        valid_processed_paths = set(processed_repo_df_subset[COL_PROCESSED_PATH])
+        cols_to_select_from_existing = [col for col in final_tokenized_schema_cols if col in tokenized_repo.df.columns] if 'tokenized_repo' in locals() and tokenized_repo.df is not None else []
+        if cols_to_select_from_existing:
+             existing_loaded_full = tokenized_repo.df[cols_to_select_from_existing]
+             existing_to_keep = existing_loaded_full[ existing_loaded_full[COL_PROCESSED_PATH].astype(str).isin(valid_processed_paths) & ~existing_loaded_full[COL_PROCESSED_PATH].astype(str).isin(newly_tokenized_processed_paths) ].copy()
+             log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Keeping {len(existing_to_keep)} existing tokenized entries.", main_logger=__name__)
+             if not new_tokenized_df.empty:
+                 existing_to_keep = existing_to_keep.reindex(columns=final_tokenized_schema_cols); new_tokenized_df = new_tokenized_df.reindex(columns=final_tokenized_schema_cols)
+                 final_tokenized_df = pd.concat([existing_to_keep, new_tokenized_df], ignore_index=True)
+                 log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Combined existing and new tokenized entries.", main_logger=__name__)
+             else: final_tokenized_df = existing_to_keep; log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Using only existing tokenized entries.", main_logger=__name__)
+        elif not new_tokenized_df.empty: final_tokenized_df = new_tokenized_df; log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Using only new tokenized results.", main_logger=__name__)
+    elif not new_tokenized_df.empty: final_tokenized_df = new_tokenized_df; log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Using only new tokenized results.", main_logger=__name__)
+    else: log_statement(loglevel='info', logstatement=f"{LOG_INS} - No existing or new tokenized results.", main_logger=__name__)
+    if not final_tokenized_df.empty:
+        final_tokenized_df = final_tokenized_df.reindex(columns=final_tokenized_schema_cols)
+        if COL_TOKENIZED_PATH in final_tokenized_df.columns:
+            final_tokenized_df = final_tokenized_df.drop_duplicates(subset=[COL_TOKENIZED_PATH], keep='last')
+            final_tokenized_df = final_tokenized_df.dropna(subset=[COL_TOKENIZED_PATH])
+            final_tokenized_df[COL_TOKENIZED_PATH] = final_tokenized_df[COL_TOKENIZED_PATH].astype(str)
+            final_tokenized_df = final_tokenized_df[final_tokenized_df[COL_TOKENIZED_PATH] != '']
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Final tokenized repository contains {len(final_tokenized_df)} entries.", main_logger=__name__)
+
+
+    # --- 7. Save & Update App State ---
+    # ... (remains the same as previous version) ...
+    if not final_tokenized_df.empty:
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Saving tokenized repository using DataRepository to {tokenized_repo_filename}", main_logger=__name__)
+        try:
+            tok_repo_saver = DataRepository(repo_path=tokenized_repo_filename)
+            temp_df_to_save = final_tokenized_df.copy()
+            schema = tok_repo_saver.columns_schema
+            for col in final_tokenized_schema_cols: # Use defined schema cols
+                if col in temp_df_to_save.columns and col in schema:
+                    target_dtype = schema[col]
+                    try: # Apply type conversions robustly
+                        if pd.api.types.is_datetime64_any_dtype(target_dtype) or 'datetime' in str(target_dtype): temp_df_to_save[col] = pd.to_datetime(temp_df_to_save[col], errors='coerce', utc=True)
+                        elif target_dtype == 'Int64': temp_df_to_save[col] = pd.to_numeric(temp_df_to_save[col], errors='coerce').astype('Int64')
+                        elif pd.api.types.is_string_dtype(target_dtype) or target_dtype == str: temp_df_to_save[col] = temp_df_to_save[col].astype(str).fillna('') # Save empty str for NA string
+                        elif pd.api.types.is_float_dtype(target_dtype): temp_df_to_save[col] = pd.to_numeric(temp_df_to_save[col], errors='coerce').astype('Float64')
+                        elif pd.api.types.is_bool_dtype(target_dtype): temp_df_to_save[col] = temp_df_to_save[col].astype('boolean')
+                    except Exception as type_e: log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Error applying type {target_dtype} to column {col} before save: {type_e}", main_logger=__name__)
+                elif col not in temp_df_to_save.columns: temp_df_to_save[col] = pd.NA
+            tok_repo_saver.df = temp_df_to_save.reindex(columns=final_tokenized_schema_cols)
+            tok_repo_saver.save()
+            if not tokenized_repo_filename.exists(): raise IOError(f"Save failed: {tokenized_repo_filename}")
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Tokenized repository saved successfully.", main_logger=__name__)
+            app_state['tokenized_repo_path'] = str(tokenized_repo_filename.resolve())
+            app_state['tokenized_repo_df'] = final_tokenized_df
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - App state updated. Active tokenized repo: {tokenized_repo_filename}", main_logger=__name__)
+        except Exception as e:
+             log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to save tokenized repo {tokenized_repo_filename}: {e}", main_logger=__name__, exc_info=True)
+             print(f"Error saving tokenized data: {e}")
+             app_state['tokenized_repo_path'] = None; app_state['tokenized_repo_df'] = None
+    else:
+        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Final tokenized repository is empty. Nothing to save. Clearing tokenized state.", main_logger=__name__)
+        app_state['tokenized_repo_path'] = None; app_state['tokenized_repo_df'] = None
+
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Data tokenization finished.", main_logger=__name__)
 
 def train_on_tokens():
     """Handles Option 4: Train On Tokenized Files using project constants."""
     global app_state
-    log_statement(loglevel='info', logstatement="Starting model training setup.", main_logger=str(__name__))
-
-    if app_state.get('tokenized_repo_df') is None: log_statement(loglevel='error', logstatement="Error: No tokenized data repository loaded.", main_logger=__name__, exc_info=True); return
-    if app_state.get('config') is None: app_state['config'] = load_config()
-    config = app_state['config']
-    tokenized_repo_df = app_state['tokenized_repo_df']
-    tokenized_repo_path = app_state['tokenized_repo_path']
-
-    if tokenized_repo_df.empty: log_statement(loglevel=str("error"), logstatement=str("Error: Tokenized repository is empty."), main_logger=str(__name__)); return
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Starting model training setup.", main_logger=__file__)
+    if app_state.get('tokenized_repo_df') is None or app_state.get('tokenized_repo_path') is None: log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error: No tokenized data repository loaded/path set.", main_logger=__file__, exc_info=True); return
+    config = app_state['config']; tokenized_repo_df = app_state['tokenized_repo_df']; tokenized_repo_path = app_state['tokenized_repo_path']
 
     try:
         # Configs - use imported constants for paths
-        train_config = config.get('training', {})
-        model_config = config.get('model', {})
-        data_loader_config = config.get('data_loader', {})
-        default_model = model_config.get('name', 'bert-base-uncased')
-        default_lr = train_config.get('learning_rate', 5e-5)
-        default_epochs = train_config.get('num_epochs', 3)
-        default_batch_size = train_config.get('batch_size', 16)
+        train_config = config.get('training', {}); model_config = config.get('model', {}); data_loader_config = config.get('data_loader', {})
+        default_model = model_config.get('name', 'bert-base-uncased'); default_lr = train_config.get('learning_rate', 5e-5)
+        default_epochs = train_config.get('num_epochs', 3); default_batch_size = train_config.get('batch_size', 16)
         # Use imported constants for dirs
-        checkpoint_dir = Path(train_config.get('checkpoint_dir', CHECKPOINT_DIR))
-        log_dir = Path(train_config.get('log_dir', LOG_DIR))
+        checkpoint_dir = Path(train_config.get('checkpoint_dir', CHECKPOINT_DIR)); log_dir = Path(train_config.get('log_dir', LOG_DIR))
         num_labels = model_config.get('num_labels', 2)
 
-        # Get Hyperparameters (same as before)
-        print("--- Training Hyperparameters ---")
+        # Get Hyperparameters
+        print(f"{LOG_INS} - --- Training Hyperparameters ---")
         model_name = input(f"Model name or path [{default_model}]: ") or default_model
         learning_rate = float(input(f"Learning Rate [{default_lr}]: ") or default_lr)
         epochs = int(input(f"Number of Epochs [{default_epochs}]: ") or default_epochs)
         batch_size = int(input(f"Batch Size [{default_batch_size}]: ") or default_batch_size)
         hyperparams = { 'model_name_or_path': model_name, 'learning_rate': learning_rate, 'num_epochs': epochs, 'batch_size': batch_size, 'num_labels': num_labels }
-        log_statement(loglevel='info', logstatement=f"Training hyperparameters set: {hyperparams}", main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Training hyperparameters set: {hyperparams}", main_logger=__file__)
 
         # Device and Logging Config - use imported LOG_DIR
         preferred_device = train_config.get('device', DEFAULT_DEVICE) # Use imported default
         device = set_compute_device(preferred_device)
-        log_statement(loglevel='info', logstatement=f"Compute device set to: {device}", main_logger=str(__name__))
-        _ensure_dir_exists(log_dir) # Use imported LOG_DIR
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Compute device set to: {device}", main_logger=__file__)
+        log_dir.mkdir(parents=True, exist_ok=True) # Use imported LOG_DIR
         config_log_filename = log_dir / f"training_config_{time.strftime('%Y%m%d%H%M%S')}.log"
-        log_statement(loglevel='info', logstatement=f"Logging training configuration to {config_log_filename} and terminal.", main_logger=__name__)
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Logging training configuration to {config_log_filename} and terminal.", main_logger=__file__)
         config_details = f""" --- Training Configuration ---
         Timestamp: {time.asctime()}
         Tokenized Data Source: {tokenized_repo_path or 'N/A'} ({len(tokenized_repo_df)} files)
@@ -838,64 +2022,66 @@ def train_on_tokens():
         Learning Rate: {learning_rate} Epochs: {epochs} Batch Size: {batch_size}
         Checkpoint Dir: {checkpoint_dir.resolve()} Log Dir: {log_dir.resolve()}
         --- End Configuration --- """
-        print(config_details)
+        print(f"{LOG_INS} - {config_details}")
         try:
             with open(config_log_filename, 'w') as f: f.write(config_details)
-            log_statement(loglevel='info', logstatement=f"Training config saved to {config_log_filename}", main_logger=str(__name__))
-        except Exception as log_e: log_statement(loglevel='error', logstatement=f"Failed to write training config log: {log_e}", main_logger=str(__name__))
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Training config saved to {config_log_filename}", main_logger=__file__)
+        except Exception as log_e: log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to write training config log: {log_e}", main_logger=__file__)
 
-        # Prepare Data - Use imported config for dataloader workers
-        log_statement(loglevel='info', logstatement="Preparing dataset and dataloader...", main_logger=str(__name__))
+        # Prepare Data
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Preparing dataset and dataloader...", main_logger=__file__)
         token_filepaths = tokenized_repo_df['tokenized_filepath'].tolist()
-        if 'TokenDataset' not in globals(): raise ImportError("TokenDataset not available.")
+        if 'TokenDataset' not in globals(): raise ImportError("TokenDataset class not available.")
         dataset = TokenDataset(token_files=token_filepaths) # Adjust if labels needed
         num_workers_loader = data_loader_config.get('num_workers', 0)
         persistent_workers = data_loader_config.get('persistent_workers', False) if num_workers_loader > 0 else False
+        if 'create_dataloader' not in globals(): raise ImportError("create_dataloader function not available.")
         dataloader = create_dataloader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers_loader, persistent_workers=persistent_workers)
-        log_statement(loglevel='info', logstatement=f"Dataset ({len(dataset)} items) and Dataloader created (num_workers={num_workers_loader}).", main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Dataset ({len(dataset)} items) and Dataloader created (num_workers={num_workers_loader}).", main_logger=__file__)
 
-        # Initialize Model (same as before)
-        log_statement(loglevel='info', logstatement=f"Initializing model: {model_name}", main_logger=str(__name__))
+        # Initialize Model
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Initializing model: {model_name}", main_logger=__file__)
         try:
             from transformers import AutoModelForSequenceClassification
             model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
             model.to(device)
-            log_statement(loglevel='info', logstatement="Model initialized successfully.", main_logger=str(__name__))
-        except Exception as e: log_statement(loglevel='error', logstatement=f"Error initializing model: {e}", main_logger=__name__, exc_info=True); return
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Model initialized successfully.", main_logger=__file__)
+        except Exception as e: log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error initializing model: {e}", main_logger=__file__, exc_info=True); return
 
         # Initialize Trainer - Ensure checkpoint_dir from config is used
-        log_statement(loglevel='info', logstatement="Initializing Trainer...", main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Initializing Trainer...", main_logger=__file__)
         try:
             if 'Trainer' not in globals(): raise ImportError("Trainer class not available.")
             # Pass checkpoint_dir explicitly if Trainer expects it
             trainer = Trainer(model=model, train_dataloader=dataloader, config=config, device=device, hyperparameters=hyperparams) # Assume Trainer gets checkpoint_dir from config
-            log_statement(loglevel='info', logstatement="Trainer initialized.", main_logger=str(__name__))
-        except Exception as e: log_statement(loglevel='error', logstatement=f"Error initializing Trainer: {e}", main_logger=__name__, exc_info=True); return
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Trainer initialized.", main_logger=__file__)
+        except Exception as e: log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error initializing Trainer: {e}", main_logger=__file__, exc_info=True); return
 
-        # Start Training (same as before)
-        log_statement(loglevel='info', logstatement="Starting training loop.", main_logger=str(__name__))
+        # Start Training
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Starting training loop.", main_logger=__file__)
         try:
             trainer.train()
-            log_statement(loglevel='info', logstatement="Training loop finished.", main_logger=str(__name__))
-        except Exception as e: print(f"Error during training: {e}"); return
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Training loop finished.", main_logger=__file__)
+        except Exception as e: print(f"{LOG_INS} - Error during training: {e}"); return
 
-        log_statement(loglevel='info', logstatement="Model training process finished successfully.", main_logger=str(__name__))
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Model training process finished successfully.", main_logger=__file__)
 
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Error during Train On Tokens function: {e}", main_logger=str(__name__), exc_info=True)
+        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Error during Train On Tokens function: {e}", main_logger=__file__, exc_info=True)
 
+# --- Load Model Submenu Functions ---
 def list_and_select_model_path():
     """Handles Option 5A: Scan for models using CHECKPOINT_DIR."""
-    print("\n--- Specify Model Folder Path ---")
+    print(f"{LOG_INS} - \n--- Specify Model Folder Path ---")
     try:
         # Use imported CHECKPOINT_DIR as default
         model_folder_path_str = input(f"Enter model folder path (default: {CHECKPOINT_DIR}): ") or str(CHECKPOINT_DIR)
         model_folder_path = Path(model_folder_path_str)
 
-        if not model_folder_path.is_dir(): print(f"Error: Not a valid directory."); return None
+        if not model_folder_path.is_dir(): print(f"{LOG_INS} - Error: Not a valid directory."); return None
 
-        print(f"Scanning '{model_folder_path}'...")
-        log_statement(loglevel='info', logstatement=f"Scanning for models in: {model_folder_path}", main_logger=str(__name__))
+        print(f"{LOG_INS} - Scanning '{model_folder_path}'...")
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Scanning for models in: {model_folder_path}", main_logger=__file__)
         found_models = []
         with tqdm(desc="Scanning for models", unit="item") as pbar: # Changed unit
             for root, dirs, files in os.walk(model_folder_path):
@@ -909,7 +2095,6 @@ def list_and_select_model_path():
                         pbar.update(1)
                     dirs[:] = [] # Don't recurse further into a detected HF model dir
                     continue # Move to next item in os.walk
-
                 # Check for individual model files in non-HF dirs
                 for filename in files:
                     filepath = root_path / filename
@@ -923,176 +2108,221 @@ def list_and_select_model_path():
                         found_models.append({'path': str(filepath.resolve()), 'type_code': type_code}); pbar.update(1)
                 # Update pbar even if no model file found in this dir's files list
                 # pbar.update(1) # This would inflate count, update only when model found
-
-        if not found_models: print("No models found."); return None
-
-        log_statement(loglevel='info', logstatement=f"Found {len(found_models)} potential models.", main_logger=str(__name__))
+        if not found_models: print(f"{LOG_INS} - No models found."); return None
+        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Found {len(found_models)} potential models.", main_logger=__file__)
         display_map = {}; found_models.sort(key=lambda x: x['path'])
         for i, model_info in enumerate(found_models):
             designator = f"{i+1}{model_info['type_code']}"; display_map[designator] = model_info['path']
-            print(f"{designator} - {model_info['path']}")
-
-        print("--- Model Scan Complete ---")
+            print(f"{LOG_INS} - {designator} - {model_info['path']}")
+        print(f"{LOG_INS} - --- Model Scan Complete ---")
         return display_map
-    except Exception as e: print(f"Error scanning models: {e}"); return None
+    except Exception as e: print(f"{LOG_INS} - Error scanning models: {e}"); return None
 
 def specify_model_for_loading(model_map):
     """Handles Option 5B: Specify File For Loading using project loader."""
     global app_state
-    print("\n--- Specify Model For Loading ---")
-    if not model_map: print("No models scanned."); return None
-
+    print(f"{LOG_INS} - \n--- Specify Model For Loading ---")
+    if not model_map: print(f"{LOG_INS} - No models scanned."); return None
     while True:
         designator = input("Enter designator to load: ").strip().upper()
         if designator in model_map:
-            selected_path_str = model_map[designator]
-            selected_path = Path(selected_path_str)
-            print(f"Loading model from: {selected_path}...")
-            log_statement(loglevel='info', logstatement=f"Attempting to load model from: {selected_path}", main_logger=str(__name__))
+            selected_path_str = model_map[designator]; selected_path = Path(selected_path_str)
+            print(f"{LOG_INS} - Loading model from: {selected_path}...")
+            log_statement(loglevel='info', logstatement=f"{LOG_INS} - Attempting to load model from: {selected_path}", main_logger=__file__)
             model, tokenizer = None, None
             try:
                 with tqdm(total=1, desc=f"Loading {designator}", unit="model") as pbar:
-                    # Prioritize using the project's model loader utility
                     if 'load_model_from_checkpoint' in globals():
-                        model, tokenizer = load_model_from_checkpoint(selected_path_str)
-                        if model is None:
-                            raise ValueError(f"load_model_from_checkpoint failed for {selected_path_str}")
-                        log_statement(loglevel='info', logstatement=f"Used project's load_model_from_checkpoint.", main_logger=str(__name__))
+                        model, tokenizer = load_model_from_checkpoint(device=set_compute_device(), checkpoint_path=selected_path_str)
+                        if model is None: raise ValueError(f"load_model_from_checkpoint failed for {selected_path_str}")
+                        log_statement(loglevel='info', logstatement=f"{LOG_INS} - Used project's load_model_from_checkpoint.", main_logger=__file__)
                     else:
-                        # Fallback logic (less robust)
-                        log_statement(loglevel='warning', logstatement="Project's load_model_from_checkpoint not found. Using basic loading.", main_logger=str(__name__))
+                        log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Project's load_model_from_checkpoint not found. Using basic loading.", main_logger=__file__)
                         if selected_path.is_dir() and (selected_path / 'config.json').exists():
-                            from transformers import AutoModel, AutoTokenizer # Late import
                             model = AutoModel.from_pretrained(selected_path_str)
                             tokenizer = AutoTokenizer.from_pretrained(selected_path_str)
-                        elif selected_path.is_file() and selected_path.suffix.lower() in ['.pt', '.pth']:
-                            raise NotImplementedError("Fallback loading for .pt/.pth not implemented. Requires config/architecture info.")
                         else: raise ValueError(f"Unsupported model type/structure for fallback loading: {selected_path}")
                     pbar.update(1)
 
                 if app_state.get('config') is None: app_state['config'] = load_config()
-                device = set_compute_device(app_state['config'].get('training',{}).get('device', DEFAULT_DEVICE))
+                # Assume set_compute_device is available
+                device = set_compute_device(app_state['config'].get('training',{}).get('device', str(DEFAULT_DEVICE)))
                 if model: model.to(device)
 
-                # Update State
-                app_state['loaded_model'] = model
-                app_state['loaded_model_path'] = selected_path_str
+                app_state['loaded_model'] = model; app_state['loaded_model_path'] = selected_path_str
                 app_state['loaded_tokenizer'] = tokenizer
-                log_statement(loglevel='info', logstatement=f"Model/Tokenizer loaded from {selected_path} to {device}.", main_logger=str(__name__))
+                log_statement(loglevel='info', logstatement=f"{LOG_INS} - Model/Tokenizer loaded from {selected_path} to {device}.", main_logger=__file__)
                 return selected_path_str
             except Exception as e:
-                log_statement(loglevel='error', logstatement=f"Failed to load model {selected_path}: {e}", main_logger=str(__name__), exc_info=True)
+                log_statement(loglevel='error', logstatement=f"{LOG_INS} - Failed to load model {selected_path}: {e}", main_logger=__file__, exc_info=True)
                 app_state['loaded_model'] = None; app_state['loaded_model_path'] = None; app_state['loaded_tokenizer'] = None
-        else: print("Invalid designator.")
+                # Ask user if they want to try again or return? For now, just log and loop.
+        else: print(f"{LOG_INS} - Invalid designator.")
 
 def execute_functions_on_loaded_model(loaded_model_path):
     """Handles Option 5C: Execute Functions on Loaded Model."""
     global app_state
-    print("\n--- Execute Functions on Loaded Model ---")
-    model = app_state.get('loaded_model')
-    tokenizer = app_state.get('loaded_tokenizer')
-    if not model: print("No model loaded."); return
-
-    print(f"Selected Model Path: {loaded_model_path}")
+    print(f"{LOG_INS} - \n--- Execute Functions on Loaded Model ---")
+    model = app_state.get('loaded_model'); tokenizer = app_state.get('loaded_tokenizer')
+    if not model: print(f"{LOG_INS} - No model loaded."); return
+    print(f"{LOG_INS} - Selected Model Path: {loaded_model_path}")
     try: device = next(model.parameters()).device
-    except: device = 'cpu' # Fallback
-    print(f"Model on Device: {device}")
+    except: device = 'cpu'
+    print(f"{LOG_INS} - Model on Device: {device}")
 
     while True:
-        print("\n--- Model Operations Submenu ---")
-        print("1. Inference")
-        print("2. Evaluate (Not Implemented)")
-        print("3. Continue Training (Not Implemented)")
-        print("4. View Model Details")
-        print("5. Return to Load Model Menu")
+        print(f"{LOG_INS} - \n--- Model Operations Submenu ---"); print(f"{LOG_INS} - 1. Inference"); print(f"{LOG_INS} - 2. Evaluate (Not Implemented)"); print(f"{LOG_INS} - 3. Continue Training (Not Implemented)"); print(f"{LOG_INS} - 4. View Model Details"); print(f"{LOG_INS} - 5. Return to Load Model Menu")
         choice = input("Enter choice: ")
-        log_statement(loglevel='debug', logstatement=f"Model Ops choice: {choice}", main_logger=str(__name__))
-
-        if choice == '1': # Inference
-            print("\n--- Inference ---")
-            if not tokenizer: print("Error: Tokenizer unavailable."); continue
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Model Ops choice: {choice}", main_logger=__file__)
+        if choice == '1':
+            print(f"{LOG_INS} - \n--- Inference ---")
+            if not tokenizer: print(f"{LOG_INS} - Error: Tokenizer unavailable."); continue
             try:
                 text = input("Enter text: ")
                 inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512).to(device)
                 model.eval();
                 with torch.no_grad(): outputs = model(**inputs)
-                # Simple output processing (same as before)
-                if hasattr(outputs, 'logits'):
-                    preds = torch.argmax(outputs.logits, dim=-1); print(f"Prediction Index: {preds.cpu().item()}")
-                else: print(f"Outputs:\n{outputs}")
-                log_statement(loglevel='info', logstatement="Inference successful.", main_logger=str(__name__))
-            except Exception as e: print(f"Inference error: {e}")
-        elif choice == '2': print("\nEvaluate not implemented.")
-        elif choice == '3': print("\nContinue Training not implemented.")
-        elif choice == '4': # View Details
-            print("\n--- Model Details ---"); print(f"Path: {loaded_model_path}\nDevice: {device}"); print("\nArchitecture:"); print(model)
-            try: num_params = sum(p.numel() for p in model.parameters() if p.requires_grad); print(f"\nTrainable Params: {num_params:,}")
+                if hasattr(outputs, 'logits'): preds = torch.argmax(outputs.logits, dim=-1); print(f"{LOG_INS} - Prediction Index: {preds.cpu().item()}")
+                else: print(f"{LOG_INS} - Outputs:\n{outputs}")
+                log_statement(loglevel='info', logstatement=f"{LOG_INS} - Inference successful.", main_logger=__file__)
+            except Exception as e: print(f"{LOG_INS} - Inference error: {e}")
+        elif choice == '2': print(f"{LOG_INS} - \nEvaluate not implemented.")
+        elif choice == '3': print(f"{LOG_INS} - \nContinue Training not implemented.")
+        elif choice == '4':
+            print(f"{LOG_INS} - \n--- Model Details ---"); print(f"{LOG_INS} - Path: {loaded_model_path}\nDevice: {device}"); print(f"{LOG_INS} - \nArchitecture:"); print(model)
+            try: num_params = sum(p.numel() for p in model.parameters() if p.requires_grad); print(f"{LOG_INS} - \nTrainable Params: {num_params:,}")
             except: pass
-        elif choice == '5': print("Returning..."); break
-        else: print("Invalid choice.")
+        elif choice == '5': print(f"{LOG_INS} - Returning..."); break
+        else: print(f"{LOG_INS} - Invalid choice.")
 
 def load_model_submenu():
     """Handles Option 5: Load/Manage Saved Model(s)."""
     global app_state
-    log_statement(loglevel='info', logstatement="Entered Load Model submenu.", main_logger=str(__name__))
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Entered Load Model submenu.", main_logger=__file__)
     model_map = None
     while True:
-        print("\n--- Load Model Submenu ---")
-        print("A) Scan folder for models")
-        print("B) Specify Model From Scan")
+        print(f"{LOG_INS} - \n--- Load Model Submenu ---")
+        print(f"{LOG_INS} - A) Scan folder for models"); print(f"{LOG_INS} - B) Specify Model From Scan")
         status = f"(Loaded: {Path(app_state['loaded_model_path']).name})" if app_state.get('loaded_model_path') else "(No model loaded)"
-        print(f"C) Execute Functions on Loaded Model {status}")
-        print("D) Return to Data Processing Menu")
+        print(f"{LOG_INS} - C) Execute Functions on Loaded Model {status}"); print(f"{LOG_INS} - D) Return to Data Processing Menu")
         choice = input("Enter choice (A/B/C/D): ").upper()
-        log_statement(loglevel='debug', logstatement=f"Load Model choice: {choice}", main_logger=str(__name__))
-
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Load Model choice: {choice}", main_logger=__file__)
         if choice == 'A': model_map = list_and_select_model_path()
         elif choice == 'B':
             if model_map: specify_model_for_loading(model_map)
-            else: print("Run Option A first.")
+            else: print(f"{LOG_INS} - Run Option A first.")
         elif choice == 'C':
             if app_state.get('loaded_model'): execute_functions_on_loaded_model(app_state['loaded_model_path'])
-            else: print("Load model via Option B first.")
-        elif choice == 'D': print("Returning..."); break
-        else: print("Invalid choice.")
-
-# --- Main Submenu Function ---
-def data_processing_submenu():
-    """Displays the main Data Processing and Tokenization submenu."""
-    global app_state
-    log_statement(loglevel='info', logstatement="Entered Data Processing submenu.", main_logger=str(__name__))
-    print(f"{app_state.get('config')}")
-    if app_state.get('config') is None: # Load config once
-        try:
-            app_state['config'] = load_config()
-            log_statement(loglevel='info', logstatement="Config loaded.", main_logger=str(__name__))
-        except Exception as e: app_state['config'] = {} # Fallback
+            else: print(f"{LOG_INS} - Load model via Option B first.")
+        elif choice == 'D': print(f"{LOG_INS} - Returning..."); break
+        else: print(f"{LOG_INS} - Invalid choice.")
 
     while True:
-        # Display status dynamically
         status_main = f"(Set: {Path(app_state['main_repo_path']).name})" if app_state.get('main_repo_path') else "(No repo set)"
         status_proc = f"(Set: {Path(app_state['processed_repo_path']).name})" if app_state.get('processed_repo_path') else "(Not run)"
         status_tok = f"(Set: {Path(app_state['tokenized_repo_path']).name})" if app_state.get('tokenized_repo_path') else "(Not run)"
-        status_model = f"(Loaded: Path(app_state['loaded_model_path']).name)" if app_state.get('loaded_model_path') else "(None)"
+        status_model = f"(Loaded: {Path(app_state['loaded_model_path']).name})" if app_state.get('loaded_model_path') else "(None)"
 
-        print("\n--- Data Processing & Tokenization Menu ---")
-        print(f"1. Set Data Directory {status_main}")
-        print(f"2. Process Linguistic Data {status_proc}")
-        print(f"3. Data Tokenization {status_tok}")
-        print(f"4. Train On Tokenized Files")
-        print(f"5. Load/Manage Saved Model(s) {status_model}")
-        print("6. Exit to Main Menu")
+        print(f"{LOG_INS}"
+              "\n--- Data Processing & Tokenization Menu ---")
+        print(f"1. Set Data Directory {status_main}"
+              f"2. Process Linguistic Data {status_proc}"
+              f"3. Data Tokenization {status_tok}"
+              f"4. Train On Tokenized Files"
+              f"5. Load/Manage Saved Model(s) {status_model}"
+              f"6. Exit to Main Menu")
         print("-" * 40)
         choice = input("Enter choice (1-6): ")
-        log_statement(loglevel='debug', logstatement=f"Data Processing choice: {choice}", main_logger=str(__name__))
+        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Data Processing choice: {choice}", main_logger=__file__)
 
-        # Call functions
         if choice == '1': set_data_directory()
         elif choice == '2': process_linguistic_data()
         elif choice == '3': tokenize_data()
         elif choice == '4': train_on_tokens()
         elif choice == '5': load_model_submenu()
-        elif choice == '6': print("Returning..."); break
-        else: print("Invalid choice.")
+        elif choice == '6': print(f"{LOG_INS} - Returning..."); break
+        else: print(f"{LOG_INS} - Invalid choice.")
+        input("\nPress Enter to continue...") # Pause for user
 
-        input("\nPress Enter to continue...")
+# --- Main Submenu Function ---
+def data_processing_submenu():
+    """Displays the main Data Processing and Tokenization submenu."""
+    global app_state
+    if not essential_imports_available:
+        log_statement("ERROR: Core modules not loaded. Cannot proceed with data processing.", "error")
+        input("Press Enter to return...")
+        return
+    log_statement(loglevel='info', logstatement=f"{LOG_INS} - Entered Data Processing submenu.", main_logger=__file__)
+    print(f"{LOG_INS}" 
+          "----- CURRENT app_state['config'] CONTENTS"
+          f"{app_state.get('config')}"
+          " ----- END OUTPUT ----- "
+          )
+    if app_state.get('config') is None:
+        try:
+            app_state['config'] = load_config()
+            log_statement(loglevel='info',
+                          logstatement=f"{LOG_INS}"
+                          ">>>> Config loaded. <<<<",
+                          main_logger=__file__)
+        except Exception as e:
+            app_state['config'] = {}
+            log_statement(loglevel='error',
+                          logstatement=f"{LOG_INS}"
+                          f" >>>> Failed to load config: {e} <<<< ",
+                          main_logger=__file__)
+    if app_state.get('config') is None: # Load config once
+        try:
+            app_state['config'] = load_config()
+            log_statement(loglevel='info',
+                          logstatement=f"{LOG_INS}"
+                          " >>>> Config loaded. <<<< ",
+                          main_logger=__file__)
+        except Exception as e:
+            app_state['config'] = {} # Fallback
+            log_statement(loglevel='error',
+                          logstatement=f"{LOG_INS}"
+                          " >>>> EMPTY CONFIG FILE BELOW LOADED <<<< "
+                          f"{app_state['config']}",
+                          main_logger=__file__)
+
+    while True:
+        print_welcome_message()
+        print("\n--- Data Processing & Model Training ---")
+        repo_status = app_state.get('repository_path', 'Not Set')
+        repo_instance = app_state.get('repository', None)
+        repo_info = "Loaded" if repo_instance else "Not Loaded"
+        print(f"Current Repository: {repo_status} ({repo_info})")
+        print("--------------------------------------")
+        print("1. Set/Scan Data Directory & Load Repository")
+        print("2. Process Linguistic Data (Raw Files -> Processed)")
+        print("3. Tokenize Processed Data (Processed -> Tokens)")
+        print("4. Train Model on Tokenized Data")
+        print("5. Load Saved Model / View Checkpoints")
+        print("0. Back to Main Menu")
+        print("--------------------------------------")
+
+        choice = input("Enter your choice: ")
+
+        try:
+            if choice == '1':
+                set_data_directory()
+            elif choice == '2':
+                process_linguistic_data()
+            elif choice == '3':
+                tokenize_data()
+            elif choice == '4':
+                train_on_tokens()
+            elif choice == '5':
+                load_model_submenu()
+            elif choice == '0':
+                log_statement("Returning to main menu.", "info")
+                break
+            else:
+                print("Invalid choice. Please try again.")
+                time.sleep(1)
+        except Exception as e:
+            log_statement('error', f"ERROR in data processing submenu option '{choice}': {e}", __file__)
+            log_statement('error', f"Traceback: {traceback.format_exc()}", __file__)
+            input("An unexpected error occurred. Press Enter to continue...")
+

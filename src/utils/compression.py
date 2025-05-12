@@ -1,13 +1,10 @@
 # src/utils/compression.py
 import zstandard as zstd
 import os
-import shutil
 import io
 
 # Basic logger setup - adjust as needed or integrate with your main logger
-import logging
-from ..utils.logger import configure_logging, log_statement
-configure_logging()
+from src.utils.logger import configure_logging, log_statement
 
 # Zstandard compression level (1-22, default 3). Higher is slower but better compression.
 # Use zstd.max_compress_level() for the absolute highest.
