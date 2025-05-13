@@ -38,6 +38,12 @@ INDEX_KEY_PATH = "path"
 INDEX_KEY_METADATA = "metadata"
 INDEX_KEY_CHILDREN = "children"
 
+# --- Hashing Configuration ---
+# WARNING: Keep this key secure and manage it properly (e.g., env variables, secrets manager)
+# For demonstration, we derive a key from a password. In production, generate and store safely.
+PASSWORD = b"f3rngu11y" # CHANGE THIS!
+SALT = os.urandom(128) # Store this salt alongside the encrypted data or derive consistently
+
 # --- Checkpoint & Log Paths ---
 CHECKPOINT_DIR = PROJECT_ROOT / 'checkpoints'
 LOG_DIR = PROJECT_ROOT / 'logs' # Consistent with logger.py

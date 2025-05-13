@@ -7,25 +7,17 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from typing import Union, Optional
 from pathlib import Path
-from .logger import configure_logging, log_statement
-configure_logging()
-
-# --- Configuration ---
-# WARNING: Keep this key secure and manage it properly (e.g., env variables, secrets manager)
-# For demonstration, we derive a key from a password. In production, generate and store safely.
-PASSWORD = b"your-secure-password-for-filepath-encryption" # CHANGE THIS!
-SALT = os.urandom(16) # Store this salt alongside the encrypted data or derive consistently
-
-# Constants
-HASH_BUFFER_SIZE = 65536  # 64k buffer
-
+from src.utils.logger import log_statement
+from pydantic import BaseModel, Field, field_validator as validator
+from src.data.constants import *
+from src.utils.config import *
 
 # --- Key Derivation ---
 kdf = PBKDF2HMAC(
     algorithm=hashes.SHA256(),
     length=32,
     salt=SALT,
-    iterations=480000, # OWASP recommendation as of 2023
+    iterations=9600000, # OWASP recommendation as of 2023
 )
 # Derive a key and encode it for Fernet
 ENCRYPTION_KEY = base64.urlsafe_b64encode(kdf.derive(PASSWORD))
@@ -42,6 +34,19 @@ def unhash_filepath(hashed_path: str) -> str:
         # This can happen if the key is wrong, data is corrupt, or not valid base64/fernet token
         log_statement(loglevel=str("error"), logstatement=str(f"Error decrypting filepath hash '{hashed_path[:20]}...': {e}"), main_logger=str(__name__))
         return "" # Return empty string or handle error as appropriate
+
+# Model for individual custom hashes within FileVersion or if custom_hashes in FileMetadataEntry becomes complex
+class HashInfo(BaseModel):
+    """Model for storing individual hash information."""
+    hash_type: str = Field("blake2b", description="Type of the hash algorithm (e.g., 'md5', 'sha256').")
+    value: str = Field(..., description="The hexadecimal hash value.")
+
+    @validator('hash_type')
+    def hash_type_supported(cls, v_hash_type: str):
+        processed_v_hash_type = v_hash_type.lower()
+        if processed_v_hash_type not in SUPPORTED_HASH_TYPES_FOR_CUSTOM:
+            raise ValueError(f"Unsupported hash type: '{v_hash_type}'. Supported: {SUPPORTED_HASH_TYPES_FOR_CUSTOM}")
+        return processed_v_hash_type
 
 # --- Data Hashing (Content-based) ---
 def generate_data_hash(file_path: Union[str, Path]) -> Optional[str]:

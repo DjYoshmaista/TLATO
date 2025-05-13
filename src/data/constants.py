@@ -6,6 +6,9 @@ import dotenv
 
 dotenv.load_dotenv()
 
+# Version Number
+VER_NO = '1.000a'
+
 # Repository file constants
 _project_folder_str = os.getenv("TLATO41DIR")
 if not _project_folder_str:
@@ -34,6 +37,7 @@ INDEX_META_FILE_COUNT = "file_count"
 INDEX_META_TOTAL_SIZE = "total_size_bytes"
 INDEX_META_MIN_MTIME = "min_mtime_utc"
 INDEX_META_MAX_MTIME = "max_mtime_utc"
+METADATA_FILENAME = "metadata.json.zst"
 
 # --- Core File Metadata ---
 COL_FILEPATH = 'filepath'         # Absolute path to the original file
@@ -50,8 +54,26 @@ COL_ERROR = 'error_message'     # Error message if status is 'error'
 COL_PROCESSED_PATH = 'processed_path' # Relative path to processed output
 COL_TOKENIZED_PATH = 'tokenized_path' # Relative path to tokenized output
 COL_LAST_UPDATED = 'last_updated_ts' # Timestamp of last repo update for this row
+COL_DTYPE = 'dtype'
 COL_DATA_CLASSIFICATION = 'data_classification'
 COL_FINAL_CLASSIFICATION = 'final_classification'
+
+# --- Constants that might be used by these models or for validation ---
+DEFAULT_APPLICATION_STATUS = "new" # Example default status
+
+# Hashing Algorithms
+HASH_MD5 = "md5"
+HASH_SHA256 = "sha256"
+HASH_SHA1 = "sha1" 
+# Default list of hash algorithms to calculate for the 'custom_hashes' field in metadata
+DEFAULT_CONTENT_HASH_ALGORITHMS = [HASH_MD5, HASH_SHA256] 
+# General list of supported algorithms by the hashing utilities (broader than what's stored in metadata by default)
+SUPPORTED_HASH_ALGORITHMS = [HASH_MD5, HASH_SHA1, HASH_SHA256, "sha512", "blake2b", "ed25591"] # Example
+SUPPORTED_HASH_TYPES_FOR_CUSTOM = ["md5", "sha256", "sha1", "sha512", "blake2b", "ed25591"] # Align with what your hashing utility produces
+HASH_BUFFER_SIZE = 65536  # 64k buffer
+DEFAULT_HASH_ALGORITHM = HASH_SHA1
+
+ROOT_DIR = os.getenv("TLATO41ROOTDIR")
 
 # --- Optional/Additional Metadata (Add if used) ---
 COL_DESIGNATION = 'designation'     # Unique integer ID (if needed)
@@ -68,6 +90,8 @@ COL_LINGUISTIC_METADATA = 'linguistic_metadata' # Example column for other metad
 # --- Compression Constants ---
 COMPRESSION_ENABLED = True
 COMPRESSION_LEVEL = 22
+COMPRESSION_USED = "zstd"
+COMPRESSION_USED_GZ = "gzip"
 
 # Constants for process_file
 CONTENT_SNIPPET_BYTES = 1024  # Read first 1KB for snippet
@@ -87,6 +111,7 @@ MAIN_REPO_HEADER = [
     COL_MTIME,
     COL_CTIME,
     COL_EXTENSION,
+    COL_DTYPE,
     COL_STATUS,
     COL_PROCESSED_PATH,
     COL_TOKENIZED_PATH,
@@ -112,6 +137,7 @@ COL_SCHEMA = {
     COL_CTIME: 'datetime64[ns, UTC]',
     COL_HASH: str,
     COL_EXTENSION: str,
+    COL_DTYPE: str,
     COL_STATUS: str,
     COL_PROCESSED_PATH: str,
     COL_TOKENIZED_PATH: str,
@@ -263,3 +289,4 @@ SUPPORTED_EXTENSIONS = ACCEPTED_FILE_TYPES
 # Output directories
 OUTPUT_DIR_BASE = "data/output" # Mirrored structure will be created under this
 MODEL_DIR = "src/models"
+PROGRESS_DIR = "data/progress"

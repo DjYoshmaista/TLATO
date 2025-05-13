@@ -1,0 +1,3352 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{sectsty} % For custom section font sizes if needed
+\usepackage{array} % For better table column definitions
+\usepackage{enumitem} % For itemize customization
+\usepackage{xcolor}
+\usepackage{caption} % For better captions, if needed with listings
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+    pdftitle={Project Code Analysis},
+    pdfpagemode=FullScreen,
+}
+
+\sectionfont{\large} % Makes \section font size Large
+\subsectionfont{\normalsize\bfseries} % Makes \subsection font size Normal and bold
+\subsubsectionfont{\normalsize\itshape} % Makes \subsubsection font size Normal and italic
+
+% Define a listings style
+\lstdefinestyle{PythonStyle}{
+    language=Python,
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!40!black},
+    stringstyle=\color{purple},
+    showstringspaces=false,
+    breaklines=true,
+    frame=none, % No frame for inline-like appearance
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b, % caption below
+    tabsize=4,
+    breakatwhitespace=false, % allow breaking at non-whitespace
+    escapeinside={\%*}{*)} % Allow LaTeX comments within code
+}
+\lstset{style=PythonStyle}
+
+\newcommand{\mathformulabox}[1]{%
+    \par\noindent\fbox{\begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}
+    \vspace{0.5ex} %
+    \begin{lstlisting}[language={},basicstyle=\ttfamily\footnotesize,frame=none,breaklines=true]
+#1
+    \end{lstlisting}
+    \vspace{0.5ex} %
+    \end{minipage}}%
+    \par
+}
+
+\title{Project Code Analysis}
+\author{Git Repository Handler AI}
+\date{2025-05-12} % Updated to current date
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{File: \texttt{src/utils/logger.py}}
+\subsection{Overall Purpose}
+This module provides a centralized logging facility for the application. It allows for configurable logging to both the console and rotating/timed-rotating log files. It aims to standardize log formatting and management across different parts of the project, ensuring that loggers can be easily obtained and used with consistent behavior. It also includes a global `log_statement` function to simplify logging calls.
+
+
+\subsection{Major Code Elements}
+
+
+\subsubsection{Element: Global Constants and Variables}
+\paragraph{Description:} Defines module-level constants for log formatting, default log paths, and global state variables for logger caching and configuration status.
+\begin{itemize}
+    \item \texttt{LOG\_LEVELS}: Dictionary mapping string log levels (e.g., "DEBUG", "INFO") to \texttt{logging} module constants.
+    \item \texttt{LOG\_FORMAT\_CONSOLE}: String defining the format for console log messages.
+    \item \texttt{LOG\_FORMAT\_FILE}: String defining the format for file log messages.
+    \item \texttt{DEFAULT\_LOG\_DIR}: \texttt{Path} object for the default directory for log files (\texttt{logs/}).
+    \item \texttt{DEFAULT\_LOG\_FILE}: \texttt{Path} object for the default log file path (\texttt{logs/app.log}).
+    \item \texttt{\_loggers}: Dictionary used as a cache for logger instances, keyed by logger name.
+    \item \texttt{\_default\_configured}: Boolean flag indicating if the default "app" logger has been configured.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Provide predefined formats and paths for logging.
+    \item Maintain a cache of initialized loggers to avoid redundant configurations.
+    \item Track the configuration state of the default logger.
+\end{itemize}
+\paragraph{Algorithm/Process:} These are primarily definitions. \texttt{DEFAULT\_LOG\_DIR} and \texttt{DEFAULT\_LOG\_FILE} involve path construction using \texttt{pathlib.Path}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+LOG_LEVELS \leftarrow \{
+  "DEBUG": logging.DEBUG,
+  "INFO": logging.INFO,
+  %*... other levels ...*%)
+\}
+LOG_FORMAT_CONSOLE \leftarrow \text{"\%(asctime)s - ..."}
+LOG_FORMAT_FILE \leftarrow \text{"\%(asctime)s - ..."}
+DEFAULT_LOG_DIR \leftarrow PathOp(construct, "logs")
+DEFAULT_LOG_FILE \leftarrow PathOp(join, DEFAULT_LOG_DIR, "app.log")
+_loggers \leftarrow \{\}
+_default_configured \leftarrow False
+}
+
+\subsubsection{Element: Function \texttt{configure\_logging}}
+\paragraph{Description:} Configures and returns a logger instance. It sets up handlers (console, file), formatters, and log levels. It supports both standard rotating file handlers and timed rotating file handlers.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{log\_name}: \texttt{str} - Name of the logger.
+    \item \texttt{log\_level\_console}: \texttt{str} - Desired log level for console output.
+    \item \texttt{log\_level\_file}: \texttt{str} - Desired log level for file output.
+    \item \texttt{log\_file}: \texttt{Path} - Path to the log file; defaults to \texttt{DEFAULT\_LOG\_FILE}.
+    \item \texttt{use\_timed\_rotating}: \texttt{bool} - Whether to use \texttt{TimedRotatingFileHandler}.
+    \item \texttt{when}, \texttt{interval}, \texttt{backup\_count}: Parameters for \texttt{TimedRotatingFileHandler}.
+    \item \texttt{max\_bytes}: Parameter for \texttt{RotatingFileHandler}.
+    \item \texttt{console\_output}: \texttt{bool} - Whether to enable console output.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Retrieves an existing logger or creates a new one if it doesn't exist for the given \texttt{log\_name}.
+    \item Avoids re-configuring an already configured logger with handlers.
+    \item Creates the log directory if it doesn't exist.
+    \item Sets the overall logger level to the more verbose of console or file levels.
+    \item Clears existing handlers if any (to prevent duplication on re-call, though re-call for an existing logger with handlers is typically skipped).
+    \item Configures and adds a \texttt{StreamHandler} for console output if \texttt{console\_output} is true.
+    \item Configures and adds either a \texttt{TimedRotatingFileHandler} or \texttt{RotatingFileHandler} for file output.
+    \item Caches the configured logger instance in the global \texttt{\_loggers} dictionary.
+    \item Updates \texttt{\_default\_configured} if \texttt{log\_name} is "app".
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Check if logger \texttt{log\_name} is in \texttt{\_loggers} cache and already has handlers; if so, return cached logger.
+    \item Get logger instance: $L \leftarrow logging.getLogger(log\_name)$.
+    \item Determine actual log file path: $p_{file} \leftarrow log\_file \text{ or } DEFAULT\_LOG\_FILE$.
+    \item Ensure log directory exists: $PathOp(mkdir, PathOp(parent, p_{file}), \{parents: True, exist\_ok: True\})$.
+    \item Convert string levels to \texttt{logging} constants: $lvl_{console} \leftarrow LOG\_LEVELS[log\_level\_console]$, $lvl_{file} \leftarrow LOG\_LEVELS[log\_level\_file]$.
+    \item Set logger level: $L.setLevel(min(lvl_{console}, lvl_{file}))$.
+    \item If $L$ has handlers, clear them: $L.handlers.clear()$.
+    \item If \texttt{console\_output} is true:
+    \begin{enumerate}
+        \item Create \texttt{StreamHandler}: $H_{console} \leftarrow New \ StreamHandler(sys.stdout)$.
+        \item Set level: $H_{console}.setLevel(lvl_{console})$.
+        \item Create formatter: $F_{console} \leftarrow New \ Formatter(LOG\_FORMAT\_CONSOLE)$.
+        \item Set formatter: $H_{console}.setFormatter(F_{console})$.
+        \item Add handler: $L.addHandler(H_{console})$.
+    \end{enumerate}
+    \item If \texttt{use\_timed\_rotating} is true:
+    \begin{enumerate}
+        \item Create \texttt{TimedRotatingFileHandler}: $H_{file} \leftarrow New \ TimedRotatingFileHandler(p_{file}, when, interval, backup\_count)$.
+    \end{enumerate}
+    \item Else (use \texttt{RotatingFileHandler}):
+    \begin{enumerate}
+        \item Create \texttt{RotatingFileHandler}: $H_{file} \leftarrow New \ RotatingFileHandler(p_{file}, maxBytes, backup\_count)$.
+    \end{enumerate}
+    \item Set file handler level: $H_{file}.setLevel(lvl_{file})$.
+    \item Create file formatter: $F_{file} \leftarrow New \ Formatter(LOG_FORMAT_FILE)$.
+    \item Set file formatter: $H_{file}.setFormatter(F_{file})$.
+    \item Add file handler: $L.addHandler(H_{file})$.
+    \item Cache logger: $\_loggers[log\_name] \leftarrow L$.
+    \item If $log\_name == \text{"app"}$, set $\_default\_configured \leftarrow True$.
+    \item Return $L$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+configure_logging(log_name, lvl_c_str, lvl_f_str, p_f, use_timed, ...) \rightarrow Logger
+\{
+  IF (log_name \in _loggers \land _loggers[log_name].hasHandlers()) THEN RETURN(_loggers[log_name]);
+  L \leftarrow logging.getLogger(log_name);
+  actual_p_f \leftarrow IF(p_f \neq Null, p_f, DEFAULT_LOG_FILE);
+  PathOp(mkdir, PathOp(parent, actual_p_f), \{parents: True, exist_ok: True\});
+  lvl_c \leftarrow LOG_LEVELS[lvl_c_str.lower()];
+  lvl_f \leftarrow LOG_LEVELS[lvl_f_str.lower()];
+  L.setLevel(min(lvl_c, lvl_f));
+  IF (L.hasHandlers()) THEN L.handlers.clear();
+  
+  IF (console_output) THEN \{
+    H_c \leftarrow New StreamHandler(sys.stdout);
+    H_c.setLevel(lvl_c);
+    F_c \leftarrow New Formatter(LOG_FORMAT_CONSOLE);
+    H_c.setFormatter(F_c);
+    L.addHandler(H_c);
+  \};
+  
+  IF (use_timed) THEN \{
+    H_f \leftarrow New TimedRotatingFileHandler(actual_p_f, when, interval, backup_count);
+  \} ELSE \{
+    H_f \leftarrow New RotatingFileHandler(actual_p_f, max_bytes, backup_count);
+  \};
+  H_f.setLevel(lvl_f);
+  F_f \leftarrow New Formatter(LOG_FORMAT_FILE);
+  H_f.setFormatter(F_f);
+  L.addHandler(H_f);
+  
+  _loggers[log_name] \leftarrow L;
+  IF (log_name == "app") THEN _default_configured \leftarrow True;
+  RETURN(L);
+\}
+}
+
+\subsubsection{Element: Function \texttt{log\_statement}}
+\paragraph{Description:} A wrapper function to log messages using a logger obtained (and possibly configured) via its name. This is the primary function intended for use throughout the application for logging.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{loglevel}: \texttt{str} - The level of the log message (e.g., "INFO", "DEBUG").
+    \item \texttt{logstatement}: \texttt{str} - The message to log.
+    \item \texttt{main\_logger\_name}: \texttt{str} - The name of the logger to use; defaults to "app".
+    \item \texttt{exc\_info}: \texttt{bool} - Whether to include exception information (stack trace).
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Retrieves a logger instance based on \texttt{main\_logger\_name}.
+    \item If the logger is not found in the cache (\texttt{\_loggers}), it calls \texttt{configure\_logging} with default parameters to set it up.
+    \item Converts the string \texttt{loglevel} to its uppercase equivalent.
+    \item Calls the appropriate logging method on the logger instance (e.g., \texttt{logger.info()}, \texttt{logger.error()}) based on the \texttt{loglevel}.
+    \item Handles a special "EXCEPTION" loglevel by logging at ERROR and ensuring \texttt{exc\_info} is true.
+    \item If an unknown loglevel is provided, logs the message at INFO level with a prefix indicating the unknown level.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Check if \texttt{main\_logger\_name} is in \texttt{\_loggers} cache: $L \leftarrow \_loggers[main\_logger\_name]$.
+    \item Else (logger not cached): Call $L \leftarrow configure\_logging(log\_name=main\_logger\_name)$ to get/create the logger.
+    \item Convert loglevel to uppercase: $lvl_{upper} \leftarrow loglevel.upper()$.
+    \item Based on $lvl_{upper}$:
+        \begin{itemize}
+            \item If "DEBUG": $L.debug(logstatement, exc\_info=exc\_info)$.
+            \item If "INFO": $L.info(logstatement, exc\_info=exc\_info)$.
+            \item If "WARNING": $L.warning(logstatement, exc\_info=exc\_info)$.
+            \item If "ERROR": $L.error(logstatement, exc\_info=exc\_info)$.
+            \item If "CRITICAL": $L.critical(logstatement, exc\_info=exc\_info)$.
+            \item If "EXCEPTION": $L.error(logstatement, exc\_info=True)$.
+            \item Else: $L.info(f"(Unknown log level: \{loglevel\}) \{logstatement\}", exc\_info=exc\_info)$.
+        \end{itemize}
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+log_statement(loglevel_str, log_msg, logger_name_str, exc_info_bool) \rightarrow void
+\{
+  L \leftarrow Null;
+  IF (logger_name_str \in _loggers) THEN \{
+    L \leftarrow _loggers[logger_name_str];
+  \} ELSE \{
+    L \leftarrow configure_logging(log_name=logger_name_str); %* Use defaults for other params *%)
+  \};
+  
+  lvl \leftarrow StringOp(to_upper, loglevel_str);
+  
+  CASE lvl OF
+    "DEBUG":    L.debug(log_msg, exc_info=exc_info_bool);
+    "INFO":     L.info(log_msg, exc_info=exc_info_bool);
+    "WARNING":  L.warning(log_msg, exc_info=exc_info_bool);
+    "ERROR":    L.error(log_msg, exc_info=exc_info_bool);
+    "CRITICAL": L.critical(log_msg, exc_info=exc_info_bool);
+    "EXCEPTION":L.error(log_msg, exc_info=True); %* Override exc_info_bool *%)
+    DEFAULT:    L.info(StringOp(concat, "(Unknown log level: ", loglevel_str, ") ", log_msg), exc_info=exc_info_bool);
+  END CASE;
+\}
+}
+
+\newpage
+\section{File: \texttt{src/data/constants.py}}
+\subsection{Overall Purpose}
+This module centralizes constant values used throughout the application. This includes path definitions, standard file names, logging helper functions/constants, data processing status strings, hashing algorithm identifiers, default configuration values, versioning information, and other miscellaneous constants. Its purpose is to provide a single source of truth for these values, promoting consistency and ease of maintenance.
+
+\subsection{Major Code Elements}
+
+\subsubsection{Element: Path Constants}
+\paragraph{Description:} Defines various directory and file paths using \texttt{pathlib.Path} for robust and OS-agnostic path manipulation. These are typically rooted from a \texttt{BASE\_DIR}.
+\paragraph{Constituent Constants (Examples):}
+\begin{itemize}
+    \item \texttt{BASE\_DIR}: Project root directory.
+    \item \texttt{DATA\_DIR}, \texttt{RAW\_DATA\_DIR}, \texttt{PROCESSED\_DATA\_DIR}, \texttt{MODELS\_DIR}, \texttt{LOGS\_DIR}, \texttt{CONFIG\_DIR}, \texttt{SYNTHETIC\_DATA\_DIR}, etc.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Provide standardized absolute paths to key project directories.
+\end{itemize}
+\paragraph{Algorithm/Process:} \texttt{BASE\_DIR} is determined by resolving the path of the \texttt{constants.py} file and navigating to its parent's parent's parent. Other path constants are derived by joining \texttt{BASE\_DIR} (or another path constant) with specific directory/file names.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+BASE_DIR \leftarrow PathOp(resolve, PathOp(parent, PathOp(parent, PathOp(parent, PathOp(abspath, __file__)))));
+DATA_DIR \leftarrow PathOp(join, BASE_DIR, "data");
+%*... similar for other path constants ...*%)
+}
+
+\subsubsection{Element: File Names \& Extensions Constants}
+\paragraph{Description:} Defines default names and templates for frequently used files.
+\paragraph{Constituent Constants (Examples):}
+\begin{itemize}
+    \item \texttt{DEFAULT\_CONFIG\_FILE}: Path to the default configuration file.
+    \item \texttt{REPO\_INDEX\_FILENAME}: Standard name for the repository index JSON (from `repo_handlerORIG`).
+    \item \texttt{METADATA\_FILENAME}: Standard name for the metadata JSON file (from `repo_handler`).
+    \item \texttt{PROGRESS\_FILENAME\_TEMPLATE}: String template for progress file names.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Standardize filenames across the application.
+\end{itemize}
+\paragraph{Algorithm/Process:} Direct string assignments or path constructions.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DEFAULT_CONFIG_FILE \leftarrow PathOp(join, CONFIG_DIR, "config.ini");
+REPO_INDEX_FILENAME \leftarrow "repository_index.json";
+PROGRESS_FILENAME_TEMPLATE \leftarrow "progress_\{name\}.json";
+}
+
+\subsubsection{Element: Function \texttt{LOG\_INS}}
+\paragraph{Description:} A helper function to generate a structured prefix string for log messages, including module name, class name (if provided), function name, and line number.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{frame}: The current execution frame, obtained via \texttt{inspect.currentframe()}.
+    \item \texttt{class\_name}: \texttt{Optional[str]} - The name of the class if logging from within a class method.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Extracts module name, function name, and line number from the provided frame.
+    \item Formats these details into a consistent string prefix.
+    \item Includes the class name in the prefix if it's provided.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item If \texttt{frame} is null, return a default "unknown" string.
+    \item Extract \texttt{co\_filename}, \texttt{co\_name}, \texttt{f\_lineno} from \texttt{frame.f\_code} and \texttt{frame}.
+    \item Get the module name from \texttt{co\_filename} (stem of the path).
+    \item If \texttt{class\_name} is provided, format string as: "\{module\_name\}::\{class\_name\}::\{func\_name\}::\{line\_no\}".
+    \item Else, format string as: "\{module\_name\}::\{func\_name\}::\{line\_no\}".
+    \item Return the formatted string.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+LOG_INS(frame, class_name_opt) \rightarrow str
+\{
+  IF (frame == Null) THEN RETURN("unknown_module::unknown_func");
+  
+  file_path \leftarrow frame.f_code.co_filename;
+  func_name \leftarrow frame.f_code.co_name;
+  line_no \leftarrow frame.f_lineno;
+  module_name \leftarrow PathOp(stem, file_path);
+  
+  IF (class_name_opt \neq Null) THEN \{
+    RETURN(StringOp(format, "\{m\}::\{c\}::\{f\}::\{l\}", \{m: module_name, c: class_name_opt, f: func_name, l: line_no\}));
+  \} ELSE \{
+    RETURN(StringOp(format, "\{m\}::\{f\}::\{l\}", \{m: module_name, f: func_name, l: line_no\}));
+  \}
+\}
+}
+
+\subsubsection{Element: Data Processing \& Status Constants}
+\paragraph{Description:} Defines string constants for various statuses a data item or process can have. Also includes a list of all valid statuses.
+\paragraph{Constituent Constants (Examples):}
+\begin{itemize}
+    \item \texttt{STATUS\_NEW}, \texttt{STATUS\_PROCESSING}, \texttt{STATUS\_COMPLETED}, \texttt{STATUS\_ERROR}, \texttt{STATUS\_ARCHIVED}, etc.
+    \item \texttt{VALID\_STATUSES}: A list containing all defined status strings.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Provide a controlled vocabulary for status tracking.
+    \item Allow for validation of status values.
+\end{itemize}
+\paragraph{Algorithm/Process:} Direct string assignments and list creation.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+STATUS_NEW \leftarrow "new";
+%*... other status strings ...*%)
+VALID_STATUSES \leftarrow [STATUS_NEW, STATUS_PROCESSING, ...];
+}
+
+\subsubsection{Element: Hashing Algorithm Constants}
+\paragraph{Description:} Defines string constants for supported hashing algorithms and sets a default.
+\paragraph{Constituent Constants:}
+\begin{itemize}
+    \item \texttt{HASH\_MD5}, \texttt{HASH\_SHA256}.
+    \item \texttt{DEFAULT\_HASH\_ALGORITHM}.
+    \item \texttt{SUPPORTED\_HASH\_ALGORITHMS}.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Standardize identifiers for hash algorithms.
+\end{itemize}
+\paragraph{Algorithm/Process:} Direct string assignments and list creation.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+HASH_MD5 \leftarrow "md5";
+DEFAULT_HASH_ALGORITHM \leftarrow HASH_SHA256;
+SUPPORTED_HASH_ALGORITHMS \leftarrow [HASH_MD5, HASH_SHA256];
+}
+
+\subsubsection{Element: Default Configuration Values}
+\paragraph{Description:} Provides default values for configurations that might be overridden by external config files.
+\paragraph{Constituent Constants (Examples):}
+\begin{itemize}
+    \item \texttt{DEFAULT\_ENCODING}.
+    \item \texttt{DEFAULT\_MAX\_WORKERS}.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Ensure the application has fallback values if configurations are missing.
+\end{itemize}
+\paragraph{Algorithm/Process:} Direct assignments.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DEFAULT_ENCODING \leftarrow "utf-8";
+DEFAULT_MAX_WORKERS \leftarrow 4;
+}
+
+\subsubsection{Element: Miscellaneous Constants}
+\paragraph{Description:} Includes other constants like schema versions, ML defaults, timestamp formats, synthetic data parameters, common DataFrame column names, and lock timeouts.
+\paragraph{Constituent Constants (Examples):}
+\begin{itemize}
+    \item \texttt{CURRENT\_SCHEMA\_VERSION}.
+    \item \texttt{DEFAULT\_TEST\_SIZE}, \texttt{DEFAULT\_RANDOM\_STATE}.
+    \item \texttt{TIMESTAMP\_FORMAT\_ISO8601\_UTC}.
+    \item \texttt{SYNTHETIC\_BATCH\_SIZE}.
+    \item \texttt{COL\_FILEPATH}, \texttt{COL\_HASH}.
+    \item \texttt{METADATA\_FILE\_LOCK\_TIMEOUT}.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Provide standardized values for various specific functionalities.
+\end{itemize}
+\paragraph{Algorithm/Process:} Direct assignments.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+CURRENT_SCHEMA_VERSION \leftarrow "1.0.0";
+TIMESTAMP_FORMAT_ISO8601_UTC \leftarrow "\%Y-\%m-\%dT\%H:\%M:\%S.\%fZ";
+METADATA_FILE_LOCK_TIMEOUT \leftarrow 10;
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == '\_\_main\_\_':} block}
+\paragraph{Description:} Contains example usage of some constants, particularly the \texttt{LOG\_INS} function, and prints some path constants. This block is executed only when the script is run directly.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Demonstrates how to use \texttt{LOG\_INS} from a class method and a standalone function.
+    \item Prints some of the defined path constants to the console.
+\end{itemize}
+\paragraph{Algorithm/Process:} Defines a dummy class and function, calls \texttt{LOG\_INS} within them, and uses \texttt{print()} statements.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MainBlock() \rightarrow void
+\{
+  Print(StringOp(format, "Base Directory: \{d\}", \{d: BASE_DIR\}));
+  
+  Define Class TestClass \{
+    Method test_method(self) \{ Print(LOG_INS(Inspect(currentframe), self.__class__.__name__)); \}
+  \};
+  Define Function test_function() \{ Print(LOG_INS(Inspect(currentframe))); \};
+  
+  obj \leftarrow New TestClass();
+  obj.test_method();
+  test_function();
+  Print(StringOp(format, "Supported statuses: \{s\}", \{s: VALID_STATUSES\}));
+\}
+}
+
+\newpage
+\section{File: \texttt{src/utils/config.py}}
+\subsection{Overall Purpose}
+This module manages application configuration settings loaded from INI files. It supports a main configuration file and an optional secrets file, where values in the secrets file can override those in the main file. It provides functions to load configurations and retrieve specific values with type casting and fallback options. It also allows direct retrieval of secrets.
+
+\subsection{Major Code Elements}
+
+\subsubsection{Element: Global Variables and Default Paths}
+\paragraph{Description:} Defines global variables to store loaded configuration objects (\texttt{\_config}, \texttt{\_secrets}) and paths from which they were loaded. It attempts to import default file paths from \texttt{src.data.constants} or uses fallback paths if the import fails.
+\paragraph{Constituent Variables/Constants:}
+\begin{itemize}
+    \item \texttt{DEFAULT\_CONFIG\_FILE}, \texttt{DEFAULT\_SECRETS\_FILE}: Default paths for configuration files.
+    \item \texttt{\_config}: \texttt{configparser.ConfigParser} instance holding the merged configuration (main + secrets).
+    \item \texttt{\_secrets}: \texttt{configparser.ConfigParser} instance holding only the secrets configuration.
+    \item \texttt{\_config\_loaded\_path}, \texttt{\_secrets\_loaded\_path}: Paths from which the current configurations were loaded.
+    \item \texttt{CONSTANTS\_LOADED}: Boolean indicating if constants were successfully imported.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Provide default locations for configuration files.
+    \item Store loaded configuration state globally within the module.
+\end{itemize}
+\paragraph{Algorithm/Process:} Uses a try-except block to import from \texttt{src.data.constants}. If import fails, \texttt{BASE\_DIR}, \texttt{DEFAULT\_CONFIG\_FILE}, and \texttt{DEFAULT\_SECRETS\_FILE} are defined with fallback values. Global variables \texttt{\_config}, \texttt{\_secrets}, etc., are initialized to \texttt{None}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+TRY \{
+  IMPORT \{DEFAULT_CONFIG_FILE, DEFAULT_SECRETS_FILE, BASE_DIR\} FROM src.data.constants;
+  CONSTANTS_LOADED \leftarrow True;
+\} CATCH (ImportError) \{
+  BASE_DIR \leftarrow PathOp(resolve, PathOp(parent, PathOp(parent, PathOp(parent, PathOp(abspath, __file__)))));
+  DEFAULT_CONFIG_FILE \leftarrow PathOp(join, BASE_DIR, "config", "config.ini");
+  DEFAULT_SECRETS_FILE \leftarrow PathOp(join, BASE_DIR, "config", "secrets.ini");
+  CONSTANTS_LOADED \leftarrow False;
+\};
+_config \leftarrow Null;
+_secrets \leftarrow Null;
+_config_loaded_path \leftarrow Null;
+_secrets_loaded_path \leftarrow Null;
+}
+
+\subsubsection{Element: Function \texttt{load\_config}}
+\paragraph{Description:} Loads configurations from specified INI files. It reads a main configuration file and an optional secrets file. If both are provided, settings in the secrets file override those in the main configuration for the primary \texttt{\_config} object.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{config\_file\_path}: \texttt{Optional[Union[str, Path]]} - Path to the main config file.
+    \item \texttt{secrets\_file\_path}: \texttt{Optional[Union[str, Path]]} - Path to the secrets config file.
+    \item \texttt{force\_reload}: \texttt{bool} - If true, reloads even if paths match cached loaded paths.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Determines actual paths for config and secrets files (using defaults if not provided).
+    \item Avoids reloading if configurations are already loaded from the same paths and \texttt{force\_reload} is false.
+    \item Initializes new \texttt{ConfigParser} instances.
+    \item Reads the main configuration file into a \texttt{ConfigParser} instance. This instance will then also read the secrets file, achieving the override.
+    \item Reads the secrets file separately into another \texttt{ConfigParser} instance for direct secret access.
+    \item Updates global \texttt{\_config}, \texttt{\_secrets}, \texttt{\_config\_loaded\_path}, and \texttt{\_secrets\_loaded\_path}.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $p_{cfg} \leftarrow Path(config\_file\_path) \text{ or } DEFAULT\_CONFIG\_FILE$.
+    \item $p_{sec} \leftarrow Path(secrets\_file\_path) \text{ or } DEFAULT\_SECRETS\_FILE$.
+    \item If $\neg force\_reload \land (\_config \neq Null \land \_config\_loaded\_path == p_{cfg}) \land (p_{sec} == Null \lor (\_secrets \neq Null \land \_secrets\_loaded\_path == p_{sec}))$, then $RETURN()$.
+    \item $current\_cfg\_parser \leftarrow New \ ConfigParser(\{interpolation: ExtendedInterpolation\}) $.
+    \item $current\_sec\_parser \leftarrow New \ ConfigParser(\{interpolation: ExtendedInterpolation\}) $.
+    \item If $PathOp(exists, p_{cfg})$: $current\_cfg\_parser.read(p_{cfg})$; $\_config\_loaded\_path \leftarrow p_{cfg}$. Else $\_config\_loaded\_path \leftarrow Null$.
+    \item If $p_{sec} \land PathOp(exists, p_{sec})$: $current\_cfg\_parser.read(p_{sec})$ (for override); $current\_sec\_parser.read(p_{sec})$; $\_secrets\_loaded\_path \leftarrow p_{sec}$. Else $\_secrets\_loaded\_path \leftarrow Null$.
+    \item $\_config \leftarrow current\_cfg\_parser$.
+    \item $\_secrets \leftarrow current\_sec\_parser$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+load_config(cfp_opt, sfp_opt, force_reload_bool) \rightarrow void
+\{
+  p_cfg \leftarrow IF(cfp_opt \neq Null, Path(cfp_opt), DEFAULT_CONFIG_FILE);
+  p_sec \leftarrow IF(sfp_opt \neq Null, Path(sfp_opt), DEFAULT_SECRETS_FILE);
+
+  IF (\neg force_reload_bool \land _config \neq Null \land _config_loaded_path == p_cfg \land 
+     (p_sec == Null \lor (_secrets \neq Null \land _secrets_loaded_path == p_sec)))
+  THEN RETURN();
+
+  cfg_parser \leftarrow New ConfigParser(\{interp: Extended\});
+  sec_parser \leftarrow New ConfigParser(\{interp: Extended\});
+
+  IF (PathOp(exists, p_cfg)) THEN \{
+    cfg_parser.read(p_cfg);
+    GLOBAL._config_loaded_path \leftarrow p_cfg;
+  \} ELSE \{ GLOBAL._config_loaded_path \leftarrow Null; \};
+  
+  IF (p_sec \land PathOp(exists, p_sec)) THEN \{
+    cfg_parser.read(p_sec); %* Secrets override main config values *%)
+    sec_parser.read(p_sec);
+    GLOBAL._secrets_loaded_path \leftarrow p_sec;
+  \} ELSE \{ GLOBAL._secrets_loaded_path \leftarrow Null; \};
+  
+  GLOBAL._config \leftarrow cfg_parser;
+  GLOBAL._secrets \leftarrow sec_parser;
+\}
+}
+
+\subsubsection{Element: Function \texttt{get\_config}}
+\paragraph{Description:} Retrieves a specific configuration value from the merged configuration (\texttt{\_config}). Supports type casting and a fallback value.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{section}: \texttt{str} - The INI section name.
+    \item \texttt{key}: \texttt{str} - The key within the section.
+    \item \texttt{fallback}: \texttt{Any} - Default value if key is not found.
+    \item \texttt{data\_type}: \texttt{type} - Expected data type (\texttt{bool}, \texttt{int}, \texttt{float}, \texttt{str}).
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Attempts a lazy load of configuration using default paths if \texttt{\_config} is not already loaded.
+    \item Retrieves the value from \texttt{\_config} using appropriate \texttt{ConfigParser} methods (\texttt{getboolean}, \texttt{getint}, \texttt{getfloat}, \texttt{get}).
+    \item Returns the fallback value if the key/section is not found or if a type conversion error occurs (and fallback is provided).
+    \item Raises \texttt{ValueError} or \texttt{KeyError} if issues occur and no fallback is specified.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item If $\_config == Null$: Call $load\_config()$. If $\_config$ still $Null$: if $fallback \neq Null$, $RETURN(fallback)$; else $RAISE \ ValueError$.
+    \item $TRY$:
+    \begin{enumerate}
+        \item If $data\_type == bool$: $value \leftarrow \_config.getboolean(section, key)$.
+        \item Else if $data\_type == int$: $value \leftarrow \_config.getint(section, key)$.
+        \item Else if $data\_type == float$: $value \leftarrow \_config.getfloat(section, key)$.
+        \item Else: $value \leftarrow \_config.get(section, key)$.
+        \item $RETURN(value)$.
+    \end{enumerate}
+    \item $CATCH (NoSectionError, NoOptionError)$: If $fallback \neq Null$, $RETURN(fallback)$; else $RAISE \ KeyError$.
+    \item $CATCH (ValueError \ as \ ve)$: If $fallback \neq Null$, $RETURN(fallback)$; else $RAISE \ ValueError(ve)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+get_config(section_str, key_str, fallback_val, type_id) \rightarrow Any
+\{
+  IF (GLOBAL._config == Null) THEN \{
+    load_config(); %* Uses default paths *%)
+    IF (GLOBAL._config == Null) THEN \{
+      IF (fallback_val \neq Null) THEN RETURN(fallback_val);
+      ELSE RAISE ValueError("Config not loaded");
+    \}
+  \};
+
+  TRY \{
+    val \leftarrow Null;
+    CASE type_id OF
+      bool:  val \leftarrow GLOBAL._config.getboolean(section_str, key_str);
+      int:   val \leftarrow GLOBAL._config.getint(section_str, key_str);
+      float: val \leftarrow GLOBAL._config.getfloat(section_str, key_str);
+      str:   val \leftarrow GLOBAL._config.get(section_str, key_str); %* Default *%)
+    END CASE;
+    RETURN(val);
+  \} CATCH (configparser.NoSectionError, configparser.NoOptionError) \{
+    IF (fallback_val \neq Null) THEN RETURN(fallback_val);
+    ELSE RAISE KeyError("Key/Section not found");
+  \} CATCH (ValueError ve) \{
+    IF (fallback_val \neq Null) THEN RETURN(fallback_val);
+    ELSE RAISE ValueError(ve_message);
+  \}
+\}
+}
+
+\subsubsection{Element: Function \texttt{get\_config\_section}}
+\paragraph{Description:} Retrieves an entire section from the merged configuration (\texttt{\_config}) as a dictionary.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{section}: \texttt{str} - The INI section name.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Attempts a lazy load of configuration if not already loaded.
+    \item Returns a dictionary of key-value pairs for the specified section if it exists.
+    \item Returns \texttt{None} if the section is not found or configuration isn't loaded.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item If $\_config == Null$: Call $load\_config()$. If $\_config$ still $Null$, $RETURN(None)$.
+    \item If $\_config.has\_section(section)$: $RETURN(dict(\_config.items(section)))$.
+    \item Else: $RETURN(None)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+get_config_section(section_str) \rightarrow Optional[Dict[str, str]]
+\{
+  IF (GLOBAL._config == Null) THEN \{
+    load_config();
+    IF (GLOBAL._config == Null) THEN RETURN(Null);
+  \};
+  IF (GLOBAL._config.has_section(section_str)) THEN \{
+    RETURN(Dict(GLOBAL._config.items(section_str)));
+  \} ELSE \{
+    RETURN(Null);
+  \}
+\}
+}
+
+\subsubsection{Element: Function \texttt{get\_secret}}
+\paragraph{Description:} Retrieves a specific configuration value directly from the secrets configuration (\texttt{\_secrets}). This ensures the value originates from the secrets file.
+\paragraph{Parameters:} Similar to \texttt{get\_config} (\texttt{section}, \texttt{key}, \texttt{fallback}, \texttt{data\_type}).
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Attempts a lazy load of configuration (which loads secrets too) if \texttt{\_secrets} is not loaded.
+    \item Retrieves value from \texttt{\_secrets} using type-specific methods.
+    \item Handles missing keys/sections and type errors with fallbacks or exceptions, similar to \texttt{get\_config}.
+\end{itemize}
+\paragraph{Algorithm/Process:} Analogous to \texttt{get\_config}, but operates on the \texttt{\_secrets} global variable instead of \texttt{\_config}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+get_secret(section_str, key_str, fallback_val, type_id) \rightarrow Any
+\{
+  IF (GLOBAL._secrets == Null) THEN \{
+    load_config(); %* Loads both config and secrets *%)
+    IF (GLOBAL._secrets == Null) THEN \{
+      IF (fallback_val \neq Null) THEN RETURN(fallback_val);
+      ELSE RAISE ValueError("Secrets not loaded");
+    \}
+  \};
+  %* ... rest of logic is similar to get_config but using GLOBAL._secrets ... *%)
+  TRY \{
+    val \leftarrow Null;
+    CASE type_id OF
+      bool:  val \leftarrow GLOBAL._secrets.getboolean(section_str, key_str);
+      %* ... other types ... *%)
+      str:   val \leftarrow GLOBAL._secrets.get(section_str, key_str);
+    END CASE;
+    RETURN(val);
+  \} CATCH (configparser.NoSectionError, configparser.NoOptionError) \{
+    %* ... fallback or raise ... *%)
+  \} CATCH (ValueError ve) \{
+    %* ... fallback or raise ... *%)
+  \}
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == '\_\_main\_\_':} block}
+\paragraph{Description:} Contains example usage of the configuration loading and retrieval functions. It creates dummy \texttt{dummy\_config.ini} and \texttt{dummy\_secrets.ini} files for testing purposes.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Creates temporary configuration and secrets files with sample data.
+    \item Calls \texttt{load\_config} to load these dummy files.
+    \item Calls \texttt{get\_config}, \texttt{get\_secret}, and \texttt{get\_config\_section} to demonstrate their functionality and prints the results.
+    \item Shows examples of type casting, fallbacks, and how secrets override main config values.
+\end{itemize}
+\paragraph{Algorithm/Process:} Uses standard file I/O to write INI content to dummy files. Then, it invokes the module's own functions to parse these files and retrieve values, printing outputs to demonstrate behavior. Dummy files are not automatically removed, allowing for inspection.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MainBlock() \rightarrow void
+\{
+  dummy_cfg_path \leftarrow PathOp(join, PathOp(parent, PathOp(parent, PathOp(parent, __file__))), "config", "dummy_config.ini");
+  dummy_sec_path \leftarrow PathOp(join, PathOp(parent, PathOp(parent, PathOp(parent, __file__))), "config", "dummy_secrets.ini");
+  FileWrite(dummy_cfg_path, "[General]\napp_name = MyTestApp\n...");
+  FileWrite(dummy_sec_path, "[Database]\nuser = secret_user\n...");
+  
+  load_config(dummy_cfg_path, dummy_sec_path);
+  
+  Print(get_config("General", "app_name", "DefaultApp"));
+  Print(get_config("Database", "user")); %* Should show override from secrets *%)
+  Print(get_secret("Database", "password"));
+  Print(get_config_section("General"));
+  %* ... other print statements demonstrating features ... *%)
+\}
+}
+
+\newpage
+\section{File: \texttt{src/utils/helpers.py}}
+\subsection{Overall Purpose}
+This module provides a collection of general-purpose helper functions used across various parts of the application. These include utilities for determining maximum worker threads, generating file paths, gathering file metadata (including OS statistics and custom hashes), and a placeholder for file processing logic. It also includes fallback mechanisms for logging and hashing if primary dependencies are unavailable.
+
+\subsection{Major Code Elements}
+
+\subsubsection{Element: Module Imports and Fallbacks}
+\paragraph{Description:} Imports standard libraries like \texttt{hashlib}, \texttt{pathlib}, \texttt{typing}, and \texttt{inspect}. It attempts to import project-specific utilities (\texttt{log\_statement}, \texttt{LOG\_INS}, \texttt{DEFAULT\_HASH\_ALGORITHM}, \texttt{SUPPORTED\_HASH\_ALGORITHMS}) and defines basic fallbacks if these imports fail.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Make standard hashing and path manipulation libraries available.
+    \item Integrate with project-specific logging and constants.
+    \item Provide resilience with fallback constants and logging for standalone usability.
+\end{itemize}
+\paragraph{Algorithm/Process:} Uses \texttt{try-except ImportError} blocks. Fallback constants provide basic hashing algorithm support. Fallback logging prints to console.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+_hashing_deps_loaded \leftarrow False;
+TRY \{
+  IMPORT \{log_statement\} FROM .logger;
+  IMPORT \{LOG_INS, DEFAULT_HASH_ALGORITHM, SUPPORTED_HASH_ALGORITHMS\} FROM ..data.constants;
+  _hashing_deps_loaded \leftarrow True;
+\} CATCH (ImportError) \{
+  DEFINE log_statement_fallback(...) \{ Print(...); \};
+  DEFINE LOG_INS_fallback(...) \{ RETURN("fallback_log_ins"); \};
+  DEFAULT_HASH_ALGORITHM \leftarrow "sha256";
+  SUPPORTED_HASH_ALGORITHMS \leftarrow ["md5", "sha256", "sha1"];
+\};
+CHUNK_SIZE \leftarrow 8192;
+}
+
+\subsubsection{Element: Function \texttt{calculate\_hash\_for\_file} (First Definition - Single Hash)}
+\paragraph{Description:} Calculates a single cryptographic hash for a given file using a specified algorithm. (Note: This function is shadowed by a subsequent definition with the same name but different signature, designed for multiple hashes. This analysis treats its original intent.)
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{file\_path}: \texttt{Union[str, Path]} - Path to the file.
+    \item \texttt{algorithm}: \texttt{str} - The hashing algorithm to use (e.g., 'md5', 'sha256'). Defaults to \texttt{DEFAULT\_HASH\_ALGORITHM}.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Validates the requested hash algorithm against supported and available algorithms.
+    \item Initializes a hasher object using \texttt{hashlib.new()}.
+    \item Checks if the file path points to an existing file.
+    \item Reads the file in chunks (\texttt{CHUNK\_SIZE}) and updates the hasher.
+    \item Returns the hexadecimal digest of the hash.
+    \item Returns \texttt{None} if errors occur (unsupported algorithm, file not found, OS error).
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $algo_{lower} \leftarrow algorithm.lower()$.
+    \item If $algo_{lower} \notin SUPPORTED\_HASH\_ALGORITHMS \land algo_{lower} \notin hashlib.algorithms\_available$, Log error, $RETURN(None)$.
+    \item $TRY$: $hasher \leftarrow hashlib.new(algo_{lower})$. $CATCH (ValueError)$: Log error, $RETURN(None)$.
+    \item $p \leftarrow Path(file\_path)$.
+    \item If $\neg p.is\_file()$, Log error, $RETURN(None)$.
+    \item $TRY$: Open $p$ in binary read mode ("rb") as $f$.
+        \begin{enumerate}
+            \item $WHILE True$: $chunk \leftarrow f.read(CHUNK\_SIZE)$. If $\neg chunk$, $BREAK$. $hasher.update(chunk)$.
+        \end{enumerate}
+        $RETURN(hasher.hexdigest())$.
+    \item $CATCH (OSError, Exception \text{ as } e)$: Log error $e$, $RETURN(None)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+_calculate_single_hash_for_file(fp_str_or_Path, algo_str) \rightarrow Optional[str]
+\{
+  algo \leftarrow StringOp(to_lower, algo_str);
+  IF (\neg (algo \in SUPPORTED_HASH_ALGORITHMS \lor algo \in hashlib.algorithms_available)) THEN \{
+    Log(error, "Unsupported algo: " + algo); RETURN(Null);
+  \};
+  h \leftarrow Null;
+  TRY \{ h \leftarrow HashLib_New(algo); \} CATCH (ValueError ve) \{ Log(error, ve); RETURN(Null); \};
+
+  p_obj \leftarrow Path(fp_str_or_Path);
+  IF (\neg PathOp(is_file, p_obj)) THEN \{ Log(error, "Not a file: " + fp_str_or_Path); RETURN(Null); \};
+
+  TRY \{
+    file_stream \leftarrow FileReadBinary(p_obj);
+    LOOP (chunk \leftarrow FileStreamReadChunk(file_stream, CHUNK_SIZE); chunk \neq Empty) \{
+      h.update(chunk);
+    \};
+    FileStreamClose(file_stream);
+    RETURN(h.hexdigest());
+  \} CATCH (OSException oe) \{ Log(error, oe); RETURN(Null); \}
+    CATCH (Exception e) \{ Log(error, e); RETURN(Null); \};
+\}
+%* Note: This function definition is shadowed in the provided Python file. *%)
+}
+
+\subsubsection{Element: Function \texttt{calculate\_hashes\_for\_file} (Second Definition - Multiple Hashes)}
+\paragraph{Description:} Calculates multiple cryptographic hashes for a given file using a list of specified algorithms. This function effectively replaces the previous function with the same name.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{file\_path}: \texttt{Union[str, Path]} - Path to the file.
+    \item \texttt{algorithms}: \texttt{Optional[List[str]]} - A list of hashing algorithms (e.g., `['md5', 'sha256']`). Defaults to \texttt{SUPPORTED\_HASH\_ALGORITHMS} if \texttt{None}.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Validates the file path.
+    \item Determines the list of algorithms to run (passed list or defaults).
+    \item Filters these algorithms to ensure they are supported/available in \texttt{hashlib}.
+    \item Initializes multiple hasher objects, one for each valid algorithm.
+    \item Reads the file in chunks, updating all active hashers simultaneously.
+    \item Returns a dictionary mapping algorithm names to their hex digests (or \texttt{None} for errors specific to an algorithm or overall file reading).
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $p \leftarrow Path(file\_path)$.
+    \item If $\neg p.is\_file()$, Log error, $RETURN(\{algo: None \text{ for } algo \text{ in } (algorithms \text{ or } SUPPORTED\_HASH\_ALGORITHMS)\})$.
+    \item $algos\_to\_run \leftarrow algorithms \text{ or } SUPPORTED\_HASH\_ALGORITHMS$.
+    \item $valid\_algos \leftarrow [a.lower() \text{ for } a \text{ in } algos\_to\_run \text{ if } a.lower() \in SUPPORTED\_HASH\_ALGORITHMS \lor a.lower() \in hashlib.algorithms\_available]$.
+    \item If $\neg valid\_algos$, Log warning, $RETURN(\{\})$.
+    \item $hashers \leftarrow \{\}$. For $algo \text{ in } valid\_algos$: $TRY$: $hashers[algo] \leftarrow hashlib.new(algo)$. $CATCH (ValueError)$: Log warning, skip $algo$.
+    \item $final\_algos \leftarrow [a \text{ for } a \text{ in } valid\_algos \text{ if } a \in hashers]$. If $\neg final\_algos$, Log warning, $RETURN(\{\})$.
+    \item $results \leftarrow \{algo: None \text{ for } algo \text{ in } algorithms \text{ or } SUPPORTED\_HASH\_ALGORITHMS\}$. (Initializes results for all *requested* algorithms).
+    \item $TRY$: Open $p$ in binary read mode ("rb") as $f$.
+        \begin{enumerate}
+            \item $WHILE True$: $chunk \leftarrow f.read(CHUNK\_SIZE)$. If $\neg chunk$, $BREAK$. For $algo \text{ in } final\_algos$: $hashers[algo].update(chunk)$.
+        \end{enumerate}
+        For $algo \text{ in } final\_algos$: $results[algo] \leftarrow hashers[algo].hexdigest()$.
+    \item $CATCH (OSError, Exception \text{ as } e)$: Log error $e$. (Results for some/all algos will remain \texttt{None}).
+    \item $RETURN(results)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+calculate_hashes_for_file(fp_str_or_Path, algos_opt_list) \rightarrow Dict[str, Optional[str]]
+\{
+  p_obj \leftarrow Path(fp_str_or_Path);
+  requested_algos \leftarrow IF(algos_opt_list \neq Null, algos_opt_list, SUPPORTED_HASH_ALGORITHMS);
+  results_dict \leftarrow \{algo_name: Null FOR algo_name IN requested_algos\};
+
+  IF (\neg PathOp(is_file, p_obj)) THEN \{ Log(error, ...); RETURN(results_dict); \};
+
+  runnable_algos_str \leftarrow Set();
+  FOR algo_str IN requested_algos DO \{
+    IF (StringOp(to_lower, algo_str) \in SUPPORTED_HASH_ALGORITHMS \lor StringOp(to_lower, algo_str) \in hashlib.algorithms_available) THEN \{
+      ListOp(add, runnable_algos_str, StringOp(to_lower, algo_str));
+    \}
+  \};
+  IF (IsEmpty(runnable_algos_str)) THEN \{ Log(warn, ...); RETURN(\{\}); \};
+
+  active_hashers_map \leftarrow Map();
+  FOR algo_name_str IN runnable_algos_str DO \{
+    TRY \{
+      active_hashers_map[algo_name_str] \leftarrow HashLib_New(algo_name_str);
+    \} CATCH (ValueError ve) \{ Log(warn, "Algo " + algo_name_str + " failed init: " + ve); \}
+  \};
+  
+  final_active_algos \leftarrow Keys(active_hashers_map);
+  IF (IsEmpty(final_active_algos)) THEN \{ Log(warn, ...); RETURN(\{\}); \};
+
+  TRY \{
+    file_stream \leftarrow FileReadBinary(p_obj);
+    LOOP (chunk \leftarrow FileStreamReadChunk(file_stream, CHUNK_SIZE); chunk \neq Empty) \{
+      FOR algo_n IN final_active_algos DO \{
+        active_hashers_map[algo_n].update(chunk);
+      \}
+    \};
+    FileStreamClose(file_stream);
+    FOR algo_n IN final_active_algos DO \{
+      results_dict[algo_n] \leftarrow active_hashers_map[algo_n].hexdigest();
+    \}
+  \} CATCH (OSException oe) \{ Log(error, oe); \}
+    CATCH (Exception e) \{ Log(error, e); \};
+  
+  RETURN(results_dict);
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == '\_\_main\_\_':} block}
+\paragraph{Description:} Contains test code that is executed when the script is run directly. It demonstrates the hashing functions with a dummy file.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Creates a temporary directory and a sample text file (\texttt{./temp\_hashing\_test/sample.txt}).
+    \item Calls the (shadowed) single-hash \texttt{calculate\_hash\_for\_file} for MD5, SHA256, SHA1, and an unsupported algorithm, logging the results.
+    \item Calls the multi-hash \texttt{calculate\_hashes\_for\_file} with a specific list of algorithms (including one potentially only in \texttt{hashlib.algorithms\_available} like 'blake2b') and with default algorithms, logging the results.
+    \item Tests both functions with a non-existent file path.
+    \item Cleans up the created dummy file and directory.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Log script entry.
+    \item Test environment setup: $dummy\_dir \leftarrow Path("./temp\_hashing\_test")$; $PathOp(mkdir, dummy\_dir, \{exist\_ok:True\})$; $dummy\_fp \leftarrow PathOp(join, dummy\_dir, "sample.txt")$; $FileWrite(dummy\_fp, "Test content...")$.
+    \item Test single hash function (Note: calls the multi-hash version due to shadowing):
+        Call $h1 \leftarrow calculate\_hash\_for\_file(dummy\_fp, "md5")$; Log $h1$. (This will actually return a dict)
+        Call $h2 \leftarrow calculate\_hash\_for\_file(dummy\_fp, "sha256")$; Log $h2$.
+        ...
+    \item Test multi-hash function: Call $hashes1 \leftarrow calculate\_hashes\_for\_file(dummy\_fp, ["md5", "sha256", "sha1", "blake2b"])$; Log $hashes1$. Call $hashes2 \leftarrow calculate\_hashes\_for\_file(dummy\_fp)$; Log $hashes2$.
+    \item Test with non-existent file: $non\_exist\_fp \leftarrow PathOp(join, dummy\_dir, "non\_existent.txt")$; Call and log results for both (shadowed) single and multi-hash functions.
+    \item Cleanup: $TRY$: $PathOp(unlink, dummy\_fp)$; $PathOp(rmdir, dummy\_dir)$. $CATCH (OSError \text{ as } e)$: Log error $e$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MainBlock_Hashing() \rightarrow void
+\{
+  Log(info, "Running hashing.py tests");
+  
+  %* Setup test directory and file *%)
+  tmp_dir \leftarrow Path("./temp_hashing_test");
+  PathOp(mkdir, tmp_dir, \{exist_ok: True\});
+  sample_fp \leftarrow PathOp(join, tmp_dir, "sample.txt");
+  FileWrite(sample_fp, "This is a test file...");
+
+  %* Test calculate_hash_for_file (single - actually calls multi due to shadowing) *%)
+  %* Example: md5_res_dict \leftarrow calculate_hashes_for_file(sample_fp, ["md5"]); Log(info, md5_res_dict); *%)
+  %* This would be testing the multi-hash version that returns a dict. *%)
+  %* To test the single hash logic, it would need a different name. *%)
+  %* For the current file structure, calls to calculate_hash_for_file(path, algo_str) will effectively *%)
+  %* pass algo_str as a list with one element to the multi-hash version if it were modified to handle it,*%)
+  %* or error if type hints are strict. The current multi-hash expects Optional[List[str]]. *%)
+  %* Assuming test calls are adapted or the first definition is renamed and called explicitly. *%)
+  %* For example, if the first was _calculate_single_hash: *%)
+  %* md5_single_hash \leftarrow _calculate_single_hash_for_file(sample_fp, "md5"); Log(info, md5_single_hash); *%)
+
+  %* Test calculate_hashes_for_file (multiple) *%)
+  multi_h_res1 \leftarrow calculate_hashes_for_file(sample_fp, ["md5", "sha256", "blake2b"]); Log(info, multi_h_res1);
+  multi_h_res2 \leftarrow calculate_hashes_for_file(sample_fp, Null); Log(info, multi_h_res2);
+
+  %* Test with non-existent file *%)
+  non_exist_p \leftarrow PathOp(join, tmp_dir, "no.txt");
+  %* Example: res_ne_multi \leftarrow calculate_hashes_for_file(non_exist_p, ["md5"]); Log(info, res_ne_multi); *%)
+  
+  %* Cleanup *%)
+  TRY \{
+    PathOp(unlink, sample_fp); PathOp(rmdir, tmp_dir); Log(info, "Cleanup OK");
+  \} CATCH (OSException e) \{ Log(error, e); \};
+\}
+}
+
+\subsubsection{Element: Function \texttt{\_generate\_file\_paths}}
+\paragraph{Description:} Generates an iterator of \texttt{Path} objects for files within a given directory, supporting recursive search and filtering by file extensions. It skips hidden files/directories and symbolic links.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{directory}: \texttt{Union[str, Path]} - The base directory to scan.
+    \item \texttt{file\_extensions}: \texttt{Optional[List[str]]} - A list of file extensions to include (e.g., `['.txt', '.log']`).
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Converts the input directory to a \texttt{Path} object.
+    \item Validates if the path is a directory.
+    \item Recursively iterates through all entries in the directory using \texttt{Path.rglob("*")}.
+    \item Skips entries whose names start with a dot ('.').
+    \item Yields a path if it is a file, not a symbolic link, and (if \texttt{file\_extensions} is provided) its extension matches one in the list.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $base\_path \leftarrow Path(directory)$.
+    \item If $\neg base\_path.is\_dir()$, log error and $RETURN(iter([]))$.
+    \item For $entry \text{ in } base\_path.rglob("*"):$
+    \begin{enumerate}
+        \item If $entry.name.startswith('.') $, $CONTINUE$.
+        \item If $entry.is\_file() \land \neg entry.is\_symlink()$:
+        \begin{enumerate}
+            \item If $file\_extensions$:
+                \begin{enumerate}
+                    \item $norm\_exts \leftarrow [f".\{ext.lstrip('.')\}".lower() \text{ for } ext \text{ in } file\_extensions]$.
+                    \item If $entry.suffix.lower() \in norm\_exts$: $YIELD \ entry$.
+                \end{enumerate}
+            \item Else: $YIELD \ entry$.
+        \end{enumerate}
+    \end{enumerate}
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+_generate_file_paths(dir_path_str_or_Path, exts_opt_list) \rightarrow Iterator[Path]
+\{
+  base_p \leftarrow Path(dir_path_str_or_Path);
+  IF (\neg PathOp(is_dir, base_p)) THEN \{ Log(error, ...); RETURN(EmptyIterator()); \};
+  
+  normalized_exts \leftarrow Null;
+  IF (exts_opt_list \neq Null) THEN \{
+    normalized_exts \leftarrow Set(\{StringOp(to_lower, StringOp(concat, ".", StringOp(lstrip, ext, "."))) FOR ext IN exts_opt_list\});
+  \};
+  
+  FOR entry_p IN PathOp(rglob, base_p, "*") DO \{
+    IF (StringOp(startswith, PathOp(name, entry_p), ".")) THEN CONTINUE;
+    IF (PathOp(is_file, entry_p) \land \neg PathOp(is_symlink, entry_p)) THEN \{
+      IF (normalized_exts \neq Null) THEN \{
+        IF (StringOp(to_lower, PathOp(suffix, entry_p)) \in normalized_exts) THEN YIELD entry_p;
+      \} ELSE \{
+        YIELD entry_p;
+      \}
+    \}
+  \}
+\}
+}
+
+\subsubsection{Element: Function \texttt{\_get\_file\_metadata}}
+\paragraph{Description:} Gathers various metadata for a specified file, including OS-level statistics (size, modification times, etc.) and optionally calculates custom file hashes.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{abs\_path}: \texttt{Path} - Absolute path to the file.
+    \item \texttt{hash\_algorithms}: \texttt{Optional[List[str]]} - List of hash algorithms to compute (e.g., `['md5', 'sha256']`). Used if `calculate\_custom\_hashes` is true.
+    \item \texttt{calculate\_custom\_hashes}: \texttt{bool} - Flag to control custom hash calculation (defaults to True).
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Validates the input path.
+    \item Retrieves file statistics using \texttt{abs\_path.stat()}.
+    \item Populates a dictionary with metadata: filename, absolute path, extension, size, OS timestamps (modified, accessed, created - all UTC ISO format), and symlink status.
+    \item If \texttt{calculate\_custom\_hashes} is true and the hashing module is loaded, calculates hashes for specified algorithms (defaults to 'md5', 'sha256') using \texttt{calculate\_hashes\_for\_file} and adds them to the metadata under the "custom\_hashes" key.
+    \item Handles \texttt{OSError} and other exceptions gracefully, logging errors and returning an empty or partial dictionary.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Ensure $abs\_path$ is a \texttt{Path} object.
+    \item $metadata \leftarrow \{\}$.
+    \item $TRY$:
+    \begin{enumerate}
+        \item If $\neg abs\_path.exists() \lor \neg abs\_path.is\_file()$, log warning and $RETURN(\{\})$.
+        \item $stat\_info \leftarrow abs\_path.stat()$.
+        \item Populate $metadata$ with: $filename, filepath\_abs, extension, size\_bytes, os\_last\_modified\_utc, os\_last\_accessed\_utc, os\_created\_utc, is\_symlink$. (Timestamps converted to ISO8601 UTC strings).
+        \item If $calculate\_custom\_hashes$:
+            \begin{enumerate}
+                \item If $\_hashing\_loaded$: $algos \leftarrow hash\_algorithms \text{ or } ["md5", "sha256"]$; $metadata["custom\_hashes"] \leftarrow calculate\_hashes\_for\_file(abs\_path, algos)$.
+                \item Else: Log warning; $metadata["custom\_hashes"] \leftarrow \{\}$.
+            \end{enumerate}
+        \item Else: $metadata["custom\_hashes"] \leftarrow \{\}$.
+    \end{enumerate}
+    \item $CATCH (OSError, Exception \text{ as } e)$: Log error; $RETURN(\{\})$.
+    \item $RETURN(metadata)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+_get_file_metadata(abs_p, hash_algos_opt, calc_hashes_bool) \rightarrow Dict[str, Any]
+\{
+  IF (\neg Type(abs_p) == Path) THEN abs_p \leftarrow Path(abs_p);
+  meta \leftarrow \{\};
+  TRY \{
+    IF (\neg PathOp(exists, abs_p) \lor \neg PathOp(is_file, abs_p)) THEN \{ Log(warn,...); RETURN(\{\}); \};
+    stat \leftarrow PathOp(stat, abs_p);
+    meta["filename"] \leftarrow PathOp(name, abs_p);
+    meta["filepath_abs"] \leftarrow String(PathOp(resolve, abs_p));
+    meta["extension"] \leftarrow StringOp(to_lower, PathOp(suffix, abs_p));
+    meta["size_bytes"] \leftarrow stat.st_size;
+    meta["os_last_modified_utc"] \leftarrow FormatISO8601UTC(FromTimestamp(stat.st_mtime));
+    %* ... other OS stats ... *%)
+    meta["is_symlink"] \leftarrow PathOp(is_symlink, abs_p);
+    
+    IF (calc_hashes_bool) THEN \{
+      IF (_hashing_loaded) THEN \{
+        algos_to_run \leftarrow IF(hash_algos_opt \neq Null, hash_algos_opt, ["md5", "sha256"]);
+        meta["custom_hashes"] \leftarrow calculate_hashes_for_file(abs_p, algos_to_run);
+      \} ELSE \{ Log(warn,...); meta["custom_hashes"] \leftarrow \{\}; \}
+    \} ELSE \{
+      meta["custom_hashes"] \leftarrow \{\};
+    \}
+  \} CATCH (OSException e1) \{ Log(error, e1); RETURN(\{\}); \}
+    CATCH (Exception e2) \{ Log(error, e2); RETURN(\{\}); \};
+  RETURN(meta);
+\}
+}
+
+\subsubsection{Element: Function \texttt{process\_file}}
+\paragraph{Description:} A placeholder/dummy function intended to simulate the processing of a single file. It is imported by `repo_handler.py`.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{filepath}: \texttt{Union[str, Path]} - Path to the file to be processed.
+    \item \texttt{settings}: \texttt{Optional[Dict]} - Optional dictionary of settings for processing.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Logs the simulation of processing.
+    \item Checks if the file exists.
+    \item Retrieves some basic file metadata (using \texttt{\_get\_file\_metadata} without custom hash calculation).
+    \item Returns a dictionary with simulated processing results, including status and some derived information.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $file\_obj \leftarrow Path(filepath)$.
+    \item Log start of simulation.
+    \item If $\neg file\_obj.exists()$, log error and $RETURN(\{"status": "error\_file\_not\_found", ...\})$.
+    \item $file\_info \leftarrow \_get\_file\_metadata(file\_obj, calculate\_custom\_hashes=False)$.
+    \item $result \leftarrow \{$ "input\_filename": $file\_obj.name$, "input\_size\_bytes": $file\_info.get("size\_bytes")$, "status": "processed\_successfully", "output\_feature\_count": $settings.get("num\_features") \text{ or } 10$, "message": "..." $\}$.
+    \item Log end of simulation.
+    \item $RETURN(result)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+process_file(fp_str_or_Path, settings_opt_dict) \rightarrow Dict[str, Any]
+\{
+  p_obj \leftarrow Path(fp_str_or_Path);
+  Log(info, "Simulating processing for " + PathOp(name, p_obj));
+  IF (\neg PathOp(exists, p_obj)) THEN \{
+    Log(error, ...);
+    RETURN(\{"filename": PathOp(name, p_obj), "status": "error_file_not_found", ...\});
+  \};
+  info_meta \leftarrow _get_file_metadata(p_obj, calc_hashes_bool=False);
+  num_feat \leftarrow IF(settings_opt_dict \neq Null \land "num_features" \in settings_opt_dict, settings_opt_dict["num_features"], 10);
+  
+  res_dict \leftarrow \{
+    "input_filename": PathOp(name, p_obj),
+    "input_size_bytes": IF("size_bytes" \in info_meta, info_meta["size_bytes"], 0),
+    "status": "processed_successfully",
+    "output_feature_count": num_feat,
+    "message": "File processed successfully (simulated)."
+  \};
+  Log(info, "Finished simulating processing for " + PathOp(name, p_obj));
+  RETURN(res_dict);
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == '\_\_main\_\_':} block}
+\paragraph{Description:} Contains test code that is executed only when the \texttt{helpers.py} script is run directly. It demonstrates the usage of the primary functions defined within this module.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Logs an informational message indicating the script is being run for testing.
+    \item Calls \texttt{\_get\_max\_workers} with default parameters and with an explicit configuration, logging the results.
+    \item Creates a temporary directory (\texttt{./temp\_helpers\_test\_dir}) and populates it with sample files, including a hidden file and a hidden subdirectory with a file inside, to test path generation and metadata retrieval.
+    \item Calls \texttt{\_generate\_file\_paths} to list all files in the test directory and then to list only \texttt{.txt} files, logging the findings.
+    \item Calls \texttt{\_get\_file\_metadata} for one of the created test files, requesting custom hash calculation, and logs the retrieved metadata.
+    \item Calls the dummy \texttt{process\_file} function with a test file and sample settings, logging the simulated processing information.
+    \item Attempts to clean up (remove) the temporary test directory and its contents using \texttt{shutil.rmtree}. Logs success or error of cleanup.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Log script entry.
+    \item Test \texttt{\_get\_max\_workers}: Call $w_1 \leftarrow \_get\_max\_workers()$; Call $w_2 \leftarrow \_get\_max\_workers(4)$; Log $w_1, w_2$.
+    \item Test environment setup: $test\_dir \leftarrow Path("./temp\_helpers\_test\_dir")$; $PathOp(mkdir, test\_dir, \{exist\_ok:True\})$; Create files: $FileWrite(PathOp(join, test\_dir, "file1.txt"), "content1")$; $FileWrite(PathOp(join, test\_dir, "file2.log"), "content2")$; $FileWrite(PathOp(join, test\_dir, ".hiddenfile"), "hidden")_text})$; $hidden\_subdir \leftarrow PathOp(join, test\_dir, ".hiddensub")$; $PathOp(mkdir, hidden\_subdir, \{exist\_ok:True\})$; $FileWrite(PathOp(join, hidden\_subdir, "file\_in\_hidden.txt"), "secret")$.
+    \item Test \texttt{\_generate\_file\_paths}: Iterate $p \text{ in } \_generate\_file\_paths(test\_dir)$, Log $p$. Iterate $p \text{ in } \_generate_file\_paths(test\_dir, file\_extensions=[".txt"])$, Log $p$.
+    \item Test \texttt{\_get\_file\_metadata}: $test\_fp \leftarrow PathOp(join, test\_dir, "file1.txt")$; If $PathOp(exists, test\_fp)$: $meta \leftarrow \_get\_file\_metadata(test\_fp, calculate\_custom\_hashes=True)$; Log $meta$.
+    \item Test \texttt{process\_file}: If $PathOp(exists, test\_fp)$: $proc\_info \leftarrow process\_file(test\_fp, \{"num\_features": 5\})$; Log $proc\_info$.
+    \item Cleanup: $TRY$: Call $shutil.rmtree(test\_dir)$; Log success. $CATCH (OSError \text{ as } e)$: Log error $e$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MainBlock_Helpers() \rightarrow void
+\{
+  Log(info, "Running helpers.py tests");
+  
+  %* Test _get_max_workers *%)
+  w1 \leftarrow _get_max_workers(Null); Log(info, w1);
+  w2 \leftarrow _get_max_workers(4); Log(info, w2);
+  
+  %* Setup test directory and files *%)
+  tmp_dir \leftarrow Path("./temp_helpers_test_dir");
+  PathOp(mkdir, tmp_dir, \{exist_ok: True\});
+  FileWrite(PathOp(join, tmp_dir, "f1.txt"), "text1");
+  FileWrite(PathOp(join, tmp_dir, "f2.log"), "text2");
+  FileWrite(PathOp(join, tmp_dir, ".hidden"), "text_hidden");
+  hidden_sub \leftarrow PathOp(join, tmp_dir, ".hsub"); PathOp(mkdir, hidden_sub, \{exist_ok: True\});
+  FileWrite(PathOp(join, hidden_sub, "f_in_h.txt"), "text_in_hidden");
+
+  %* Test _generate_file_paths *%)
+  FOR p_item IN _generate_file_paths(tmp_dir, Null) DO Log(info, p_item);
+  FOR p_item IN _generate_file_paths(tmp_dir, [".txt"]) DO Log(info, p_item);
+
+  %* Test _get_file_metadata *%)
+  f1_path \leftarrow PathOp(join, tmp_dir, "f1.txt");
+  IF (PathOp(exists, f1_path)) THEN \{
+    metadata_f1 \leftarrow _get_file_metadata(f1_path, True);
+    Log(info, metadata_f1);
+  \};
+
+  %* Test process_file *%)
+  IF (PathOp(exists, f1_path)) THEN \{
+    processed_f1 \leftarrow process_file(f1_path, \{"num_features": 5\});
+    Log(info, processed_f1);
+  \};
+
+  %* Cleanup *%)
+  TRY \{
+    OS_RemoveTree(tmp_dir); Log(info, "Cleanup OK");
+  \} CATCH (OSException e) \{ Log(error, e); \};
+\}
+}
+
+\subsection{Task 1.1: Import Statements}
+\subsubsection{Standard Library Imports}
+\begin{itemize}
+    \item \texttt{csv}: For CSV file operations (e.g., \texttt{export\_index\_to\_csv}).
+    \item \texttt{hashlib}: Underlying library for hash calculations (used via \texttt{src.utils.hashing}).
+    \item \texttt{collections}: Provides \texttt{defaultdict} used in \texttt{find\_duplicate\_files}. (Appears twice in imports).
+    \item \texttt{io}: General I/O stream utilities. (Appears twice in imports). Not directly used in prominent methods but available.
+    \item \texttt{inspect}: Used for obtaining caller information for logging via \texttt{LOG\_INS}.
+    \item \texttt{json}: For serializing/deserializing the \texttt{repository\_index.json} file.
+    \item \texttt{os}: Operating system interfaces (e.g., path manipulations, environment variables).
+    \item \texttt{random}: Used in the \texttt{if \_\_name\_\_ == "\_\_main\_\_":} block for example data generation.
+    \item \texttt{shutil}: High-level file operations (e.g., \texttt{rmtree} in main example).
+    \item \texttt{time}: Time-related functions (e.g., \texttt{sleep} for simulating work).
+    \item \texttt{concurrent.futures}: Provides \texttt{ThreadPoolExecutor} and \texttt{as\_completed} for concurrent batch operations.
+    \item \texttt{datetime} (as \texttt{dt}, specifically \texttt{timezone}): For timestamp generation and manipulation, ensuring UTC.
+    \item \texttt{pathlib.Path}: For object-oriented file system path operations.
+    \item \texttt{typing}: Provides type hints (\texttt{Any, Dict, List, Optional, Union, Set, Tuple}).
+    \item \texttt{sys}: System-specific parameters and functions (e.g., checking if \texttt{psutil} is in \texttt{sys.modules}).
+    \item \texttt{psutil}: For system utilities like CPU count (used via \texttt{src.utils.helpers}).
+    \item \texttt{threading.Lock}: For synchronizing access to the repository index.
+\end{itemize}
+
+\subsubsection{Third-Party Library Imports}
+\begin{itemize}
+    \item \texttt{numpy} (as \texttt{np}): Numerical Python library, potentially for data manipulation if extended, or used by pandas.
+    \item \texttt{pandas} (as \texttt{pd}): Data analysis and manipulation library, used for \texttt{load\_index\_to\_dataframe}.
+    \item \texttt{tqdm}: For progress bar display during iterative tasks like batch processing.
+    \item \texttt{zstandard} (as \texttt{zstd}): For Zstandard compression/decompression, used optionally for the index file and potentially for data files. Imported within a try-except block.
+    \item \texttt{cudf}, \texttt{cupy}: GPU-accelerated data frame and array libraries. Imported within a try-except block to check for GPU availability. Not directly used by core \texttt{DataRepository} methods but indicates potential for GPU-accelerated processing in the broader application context.
+\end{itemize}
+
+\subsubsection{Project-Specific Imports}
+\begin{itemize}
+    \item \texttt{from src.utils.helpers import \_get\_max\_workers, \_generate\_file\_paths, \_get\_file\_metadata}: Utility functions for worker management, path generation, and file metadata extraction.
+    \item \texttt{from src.utils.logger import configure\_logging, log\_statement}: For application-wide logging.
+    \item \texttt{from src.utils.hashing import *}: Imports all hashing utilities (e.g., \texttt{calculate\_hashes\_for\_file}).
+    \item \texttt{from src.utils.config import load\_config}: For loading application configuration.
+    \item \texttt{from src.data.constants import *}: Imports all constants (e.g., status strings, default paths, \texttt{LOG\_INS}).
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  StdLib_Core(csv, hashlib, ...),
+  StdLib_Concurrency(concurrent.futures, threading),
+  StdLib_Typing(Any, Dict, ...),
+  ThirdParty_Data(numpy, pandas),
+  ThirdParty_Util(tqdm, psutil),
+  ThirdParty_Compression(zstandard) \text{ (optional)},
+  ThirdParty_GPU(cudf, cupy) \text{ (optional)},
+  Project_Utils(src.utils.helpers, src.utils.logger, src.utils.hashing, src.utils.config),
+  Project_Data(src.data.constants)
+\}
+}
+
+\subsection{Task 1.2: Global Constants and Configurations Setup}
+\paragraph{Description:} At the module level, before the class definition, several setup actions occur: checking for \texttt{psutil} availability, configuring logging, loading application configuration, checking for GPU support (\texttt{cudf}, \texttt{cupy}), checking for project constants availability, and attempting to import \texttt{zstandard}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item \texttt{PSUTIL\_AVAILABLE}: Boolean flag set based on whether \texttt{psutil} was successfully imported and is in \texttt{sys.modules}.
+    \item \texttt{configure\_logging()}: Calls the function from \texttt{src.utils.logger} to initialize the logging system.
+    \item \texttt{load\_config()}: Calls the function from \texttt{src.utils.config} to load configurations.
+    \item GPU Availability (\texttt{GPU\_AVAILABLE}): Attempts to import \texttt{cudf} and \texttt{cupy}. If successful, \texttt{GPU\_AVAILABLE} is \texttt{True}.
+    \item \texttt{CONSTANTS\_AVAILABLE}: Boolean flag set based on successful import of constants from \texttt{src.data.constants}. \texttt{LOG\_INS} is expected from here for log formatting.
+    \item \texttt{ZSTD\_AVAILABLE} (implicit through \texttt{zstd} object): Attempts to import \texttt{zstandard as zstd}. If successful, compression features can be used.
+\end{itemize}
+\paragraph{Algorithm/Process:} Sequential execution of import attempts (often within try-except blocks) and function calls to set up the module's operating environment.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+GlobalSetup() \rightarrow State_{GlobalEnv}
+\{
+  PSUTIL_AVAILABLE \leftarrow (psutil \in sys.modules);
+  Invoke(configure_logging());
+  Invoke(load_config());
+  
+  GPU_AVAILABLE \leftarrow False;
+  TRY \{ IMPORT cudf; IMPORT cupy; GPU_AVAILABLE \leftarrow True; \} CATCH (ImportError) \{ cudf \leftarrow Null; \};
+  
+  CONSTANTS_AVAILABLE \leftarrow False;
+  TRY \{ IMPORT * FROM src.data.constants; CONSTANTS_AVAILABLE \leftarrow True; \} CATCH (ImportError) \{ Log(exception, ...); \};
+  
+  zstd_module \leftarrow Null;
+  TRY \{ IMPORT zstandard AS zstd_module; \} CATCH (ImportError) \{ Log(warn, "zstd not found"); \};
+  
+  RETURN (\{ PSUTIL_AVAILABLE, ..., zstd_module \});
+\}
+}
+
+\subsection{Task 1.3: Class \texttt{DataRepository}}
+\subsubsection{Element: \texttt{\_\_init\_\_(self, repository\_path: Union[str, Path], index\_filename: str = REPO\_INDEX\_FILENAME, app\_state: Optional[Dict[str, Any]] = None, use\_zstd\_compression: bool = False)}}
+\paragraph{Description:} Constructor for the \texttt{DataRepository} class. Initializes the repository by setting up paths, loading the index, and preparing for operations.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{repository\_path}: Path to the root directory of the data repository.
+    \item \texttt{index\_filename}: Name of the JSON file used as the index. Defaults to \texttt{REPO\_INDEX\_FILENAME} from constants.
+    \item \texttt{app\_state}: Optional dictionary to pass application-wide state or configurations.
+    \item \texttt{use\_zstd\_compression}: Boolean flag to enable Zstandard compression for the index file.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initializes \texttt{LOG\_INS} for instance method logging.
+    \item Validates and resolves the \texttt{repository\_path}. Creates the directory if it doesn't exist.
+    \item Sets up the full path to the index file (\texttt{self.index\_file\_path}).
+    \item Initializes \texttt{self.index} as an empty dictionary.
+    \item Initializes a \texttt{threading.Lock()} for concurrent access control to the index.
+    \item Sets \texttt{self.use\_zstd\_compression} based on parameter and \texttt{zstd} availability.
+    \item Loads the repository index by calling \texttt{self.\_load\_index()}.
+    \item Determines \texttt{self.max\_workers} using \texttt{\_get\_max\_workers} helper, potentially using \texttt{app\_state} for configuration.
+    \item Stores \texttt{app\_state}.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Set up \texttt{self.LOG\_INS}.
+    \item Convert \texttt{repository\_path} to \texttt{Path} object and resolve it.
+    \item Create \texttt{self.repository\_path} directory if it doesn't exist ($PathOp(mkdir, self.repository\_path, \{parents:True, exist\_ok:True\})$).
+    \item $self.index\_file\_path \leftarrow self.repository\_path / index\_filename$.
+    \item $self.index \leftarrow \{\}$.
+    \item $self.index\_lock \leftarrow New \ threading.Lock()$.
+    \item $self.use\_zstd\_compression \leftarrow use\_zstd\_compression \land (zstd\_module \neq Null)$.
+    \item Call $self.\_load\_index()$.
+    \item $max\_workers\_cfg \leftarrow app\_state['config']['ThreadPoolConfig']['max\_workers']$ if $app\_state$ and config path exists, else $Null$.
+    \item $self.max\_workers \leftarrow \_get\_max\_workers(max\_workers\_cfg)$.
+    \item $self.app\_state \leftarrow app\_state$.
+    \item Log repository initialization.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DataRepository.__init__(repo_p, idx_fn, app_st_opt, use_zstd_bool) \rightarrow Instance
+\{
+  instance.LOG_INS \leftarrow LOG_INS(inspect.currentframe(), "DataRepository"); %* Simplified *%)
+  instance.repository_path \leftarrow PathOp(resolve, Path(repo_p));
+  PathOp(mkdir, instance.repository_path, \{parents:True, exist_ok:True\});
+  instance.index_file_path \leftarrow PathOp(join, instance.repository_path, idx_fn);
+  instance.index \leftarrow \{\};
+  instance.index_lock \leftarrow Lock_Create();
+  instance.use_zstd_compression \leftarrow use_zstd_bool \land (zstd_module \neq Null);
+  instance._load_index();
+  
+  mw_cfg \leftarrow Null;
+  IF (app_st_opt \land "config" \in app_st_opt \land "ThreadPoolConfig" \in app_st_opt["config"] \land "max_workers" \in app_st_opt["config"]["ThreadPoolConfig"]) THEN \{
+    mw_cfg \leftarrow app_st_opt["config"]["ThreadPoolConfig"]["max_workers"];
+  \};
+  instance.max_workers \leftarrow _get_max_workers(mw_cfg);
+  instance.app_state \leftarrow app_st_opt;
+  Log(info, "Repository initialized at " + instance.repository_path);
+  RETURN instance;
+\}
+}
+
+% --- Analysis for other DataRepository methods will follow a similar pattern ---
+% --- This will be very long. I will provide a few key method analyses and then indicate ---
+% --- that other methods would be analyzed similarly to keep this response manageable. ---
+% --- The user's previous outlines (orig_repo_handler_outtline.txt, etc.) can be referenced ---
+% --- for the list of methods. ---
+
+\subsubsection{Element: Method \texttt{\_ensure\_index\_file(self)}}
+\paragraph{Description:} Ensures the JSON index file exists. If not, it creates an empty one (empty JSON object {}).
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Checks if \texttt{self.index\_file\_path} exists.
+    \item If not, it calls \texttt{self.\_save\_index()} which, if \texttt{self.index} is empty, will write an empty JSON object.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $acquire(self.index\_lock)$.
+    \item If $\neg PathOp(exists, self.index\_file\_path)$:
+        \begin{enumerate}
+            \item Log "Index file not found, creating."
+            \item Call $self.\_save\_index()$. % This will write current self.index (likely empty initially)
+        \end{enumerate}
+    \item $release(self.index\_lock)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DataRepository._ensure_index_file(self) \rightarrow void
+\{
+  Lock_Acquire(self.index_lock);
+  TRY \{
+    IF (\neg PathOp(exists, self.index_file_path)) THEN \{
+      Log(info, "Creating index file: " + self.index_file_path);
+      self._save_index(); %* self.index is {} if just initialized and _load_index found nothing *%)
+    \}
+  \} FINALLY \{
+    Lock_Release(self.index_lock);
+  \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_load\_index(self)}}
+\paragraph{Description:} Loads the repository index from the JSON file into \texttt{self.index}. Handles potential errors like file not found or JSON decoding issues. Supports Zstandard decompression if enabled.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Acquires the index lock.
+    \item Ensures the index file exists by calling \texttt{self.\_ensure\_index\_file()}.
+    \item If the file exists:
+        \begin{itemize}
+            \item Reads the file content (binary mode if compressed, text mode otherwise).
+            \item If \texttt{self.use\_zstd\_compression} is true, decompresses content using \texttt{zstd.decompress()}.
+            \item Parses the JSON content into \texttt{self.index}.
+            \item Handles \texttt{FileNotFoundError}, \texttt{json.JSONDecodeError}, \texttt{zstd.ZstdError}, and other exceptions.
+        \end{itemize}
+    \item Releases the index lock.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $acquire(self.index\_lock)$.
+    \item Call $self.\_ensure\_index\_file()$.
+    \item $TRY$:
+        \begin{enumerate}
+            \item If $PathOp(exists, self.index\_file\_path) \land PathOp(getsize, self.index\_file\_path) > 0$:
+                \begin{enumerate}
+                    \item If $self.use\_zstd\_compression$:
+                        $content_{bytes} \leftarrow FileReadBinary(self.index\_file\_path)$;
+                        $json\_str \leftarrow zstd\_module.decompress(content_{bytes}).decode('utf-8')$.
+                    \item Else:
+                        $json\_str \leftarrow FileReadText(self.index\_file\_path, encoding='utf-8')$.
+                    \item $self.index \leftarrow JSONParse(json\_str)$.
+                \end{enumerate}
+            \item Else: $self.index \leftarrow \{\}$ (empty if file is empty or doesn't exist after ensure).
+        \end{enumerate}
+    \item $CATCH (FileNotFoundError)$: Log info "Index file not found, starting with an empty index." $self.index \leftarrow \{\}$.
+    \item $CATCH (json.JSONDecodeError, zstd.ZstdError, Exception \text{ as } e)$: Log error $e$. $self.index \leftarrow \{\}$ (or handle more gracefully, e.g., load backup).
+    \item $FINALLY$: $release(self.index\_lock)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DataRepository._load_index(self) \rightarrow void
+\{
+  Lock_Acquire(self.index_lock);
+  TRY \{
+    self._ensure_index_file();
+    IF (PathOp(exists, self.index_file_path) \land PathOp(getsize, self.index_file_path) > 0) THEN \{
+      raw_content \leftarrow Null; json_text \leftarrow Null;
+      TRY \{
+        IF (self.use_zstd_compression) THEN \{
+          binary_data \leftarrow FileReadBinary(self.index_file_path);
+          json_text \leftarrow ZSTD_Decompress(binary_data).decode("utf-8");
+        \} ELSE \{
+          json_text \leftarrow FileReadText(self.index_file_path, encoding="utf-8");
+        \};
+        self.index \leftarrow JSONParse(json_text);
+      \} CATCH (JSONDecodeException jde) \{
+        Log(error, "JSON decode error: " + jde); self.index \leftarrow \{\};
+      \} CATCH (ZstdException ze) \{
+        Log(error, "Zstd decompress error: " + ze); self.index \leftarrow \{\};
+      \} CATCH (Exception e) \{
+        Log(error, "Failed to load index: " + e); self.index \leftarrow \{\};
+      \}
+    \} ELSE \{
+      self.index \leftarrow \{\}; %* File is empty or was just created empty *%)
+    \}
+  \} FINALLY \{
+    Lock_Release(self.index_lock);
+  \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_save\_index(self)}}
+\paragraph{Description:} Saves the current state of \texttt{self.index} to the JSON index file. Supports Zstandard compression if enabled.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Acquires the index lock.
+    \item Serializes \texttt{self.index} to a JSON string (with indentation for readability).
+    \item If \texttt{self.use\_zstd\_compression} is true, compresses the JSON string using \texttt{zstd.compress()} and writes bytes.
+    \item Otherwise, writes the JSON string as text.
+    \item Handles \texttt{IOError}, \texttt{zstd.ZstdError}, and other exceptions.
+    \item Releases the index lock.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $acquire(self.index\_lock)$.
+    \item $TRY$:
+        \begin{enumerate}
+            \item $json\_str \leftarrow JSONSerialize(self.index, \{indent:4\})$.
+            \item If $self.use\_zstd\_compression$:
+                $compressed\_data \leftarrow zstd\_module.compress(json\_str.encode('utf-8'))$.
+                $FileWriteBinary(self.index\_file\_path, compressed\_data)$.
+            \item Else:
+                $FileWriteText(self.index\_file_path, json\_str, encoding='utf-8')$.
+        \end{enumerate}
+    \item $CATCH (IOError, zstd.ZstdError, Exception \text{ as } e)$: Log error $e$.
+    \item $FINALLY$: $release(self.index\_lock)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DataRepository._save_index(self) \rightarrow void
+\{
+  Lock_Acquire(self.index_lock);
+  TRY \{
+    json_text_output \leftarrow JSONSerialize(self.index, \{indent: 4, sort_keys: True\}); %* sort_keys for consistency *%)
+    IF (self.use_zstd_compression) THEN \{
+      data_to_write_bytes \leftarrow ZSTD_Compress(StringOp(encode, json_text_output, "utf-8"));
+      FileWriteBinary(self.index_file_path, data_to_write_bytes);
+    \} ELSE \{
+      FileWriteText(self.index_file_path, json_text_output, encoding="utf-8");
+    \};
+  \} CATCH (IOException ioe) \{ Log(error, "IOError saving index: " + ioe); \}
+    CATCH (ZstdException ze) \{ Log(error, "Zstd compress error: " + ze); \}
+    CATCH (Exception e) \{ Log(error, "Failed to save index: " + e); \}
+  FINALLY \{
+    Lock_Release(self.index_lock);
+  \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{add\_file\_to\_index(self, filepath: Union[str, Path], status: str = STATUS\_NEW, user\_metadata: Optional[Dict[str, Any]] = None, version: int = 1, history\_log: Optional[str] = None, process\_immediately: bool = False, compression\_settings: Optional[Dict[str, Any]] = None)}}
+\paragraph{Description:} Adds a new file or updates an existing file's entry in the repository index. It gathers metadata, calculates hashes, and records status and version information.
+\paragraph{Parameters:} Many, including file path, initial status, user metadata, version, history log, etc. `process_immediately` and `compression_settings` suggest hooks for more complex workflows.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Converts filepath to an absolute path and then to a relative path with respect to \texttt{self.repository\_path}.
+    \item Calls \texttt{self.\_get\_file\_metadata} (which in turn uses \texttt{src.utils.helpers.\_get\_file_metadata} and potentially \texttt{src.utils.hashing}) to gather OS stats and hashes (MD5, SHA256).
+    \item If metadata retrieval fails or file doesn't exist, logs error and returns \texttt{False}.
+    \item Acquires index lock.
+    \item Checks if file already exists in index. If so, updates history and increments version. If not, creates new entry.
+    \item Constructs the index entry dictionary with all metadata, status, version, timestamps, user metadata, etc.
+    \item Updates \texttt{self.index} and calls \texttt{self.\_save\_index()}.
+    \item Releases lock.
+    \item Optionally triggers immediate processing (not fully detailed in snippet).
+\end{itemize}
+\paragraph{Algorithm/Process:} (Simplified - actual method is complex)
+\begin{enumerate}
+    \item $abs\_p \leftarrow PathOp(resolve, Path(filepath))$.
+    \item $rel\_p\_str \leftarrow self.\_get\_relative\_path(abs\_p)$. If $Null$, $RETURN(False)$.
+    \item $file\_meta \leftarrow self.\_get\_file\_metadata(abs\_p, ["md5", "sha256"])$. If $Null$ or empty, $RETURN(False)$.
+    \item $acquire(self.index\_lock)$.
+    \item $current\_time\_iso \leftarrow FormatISO8601UTC(NowUTC())$.
+    \item $entry \leftarrow \{\}$. If $rel\_p\_str \in self.index$: $existing\_entry \leftarrow self.index[rel\_p\_str]$. Update $entry$ with new version, add old to history.
+    \item Else: $entry["date\_added"] \leftarrow current\_time\_iso$.
+    \item Populate $entry$ with $file\_meta$, status, version, user\_metadata, timestamps, etc.
+    \item $self.index[rel\_p\_str] \leftarrow entry$.
+    \item $self.\_save\_index()$.
+    \item $release(self.index\_lock)$.
+    \item Log success. $RETURN(True)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:} (High-level)
+\mathformulabox{
+DataRepository.add_file_to_index(self, fp, stat, u_meta, ver, ...) \rightarrow bool
+\{
+  abs_path \leftarrow PathOp(resolve, Path(fp));
+  rel_path_str \leftarrow self._get_relative_path(abs_path);
+  IF (rel_path_str == Null) THEN RETURN(False);
+  
+  os_meta_and_hashes \leftarrow self._get_file_metadata(abs_path, ["md5", "sha256"]);
+  IF (os_meta_and_hashes == Null OR IsEmpty(os_meta_and_hashes)) THEN RETURN(False);
+  
+  Lock_Acquire(self.index_lock);
+  TRY \{
+    timestamp_now \leftarrow GetCurrentTimestampISOUTC();
+    new_entry \leftarrow os_meta_and_hashes; %* base *%)
+    new_entry["status"] \leftarrow stat;
+    new_entry["user_metadata"] \leftarrow u_meta;
+    new_entry["last_updated"] \leftarrow timestamp_now;
+    
+    IF (rel_path_str \in self.index) THEN \{ %* Update existing *%)
+      old_entry \leftarrow self.index[rel_path_str];
+      new_entry["version"] \leftarrow old_entry.get("version", 0) + 1;
+      new_entry["date_added"] \leftarrow old_entry.get("date_added", timestamp_now);
+      history_list \leftarrow old_entry.get("history", []);
+      ListOp(append, history_list, \{ "version": old_entry.get("version"), "timestamp": old_entry.get("last_updated"), "details": history_log \});
+      new_entry["history"] \leftarrow history_list;
+    \} ELSE \{ %* New file *%)
+      new_entry["version"] \leftarrow ver;
+      new_entry["date_added"] \leftarrow timestamp_now;
+      new_entry["history"] \leftarrow IF(history_log \neq Null, [\{"version": ver, "details": history_log, "timestamp":timestamp_now\}], []);
+    \};
+    self.index[rel_path_str] \leftarrow new_entry;
+    self._save_index();
+  \} FINALLY \{ Lock_Release(self.index_lock); \};
+  Log(info, "Added/Updated file: " + rel_path_str);
+  RETURN(True);
+\}
+}
+
+% The full analysis of DataRepository would continue with other methods like:
+% _get_relative_path, _calculate_hashes (if distinct from imported),
+% add_files_batch, update_file_status, update_file_entry_in_index,
+% remove_file_from_index, get_file_entry, get_all_files, get_files_by_status,
+% find_duplicate_files, get_file_history, verify_repository_integrity,
+% scan_repository_for_new_files, clear_index, load_index_to_dataframe, export_index_to_csv,
+% compress_file_zstd, decompress_file_zstd, _get_processed_filename, _determine_processed_path, etc.
+% Each would follow the same detailed structure: Description, Parameters, Actions, Algorithm, Formula.
+
+\subsubsection{Element: Method \texttt{find\_duplicate\_files(self, hash\_type: str = "md5")}}
+\paragraph{Description:} Finds files with duplicate content in the repository based on a specified hash type.
+\paragraph{Parameters:}
+\begin{itemize}
+    \item \texttt{hash\_type}: \texttt{str} - The hash algorithm (e.g., "md5", "sha256") to use for comparison.
+\end{itemize}
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initializes a \texttt{collections.defaultdict(list)} to store hashes and corresponding file paths.
+    \item Iterates through all entries in \texttt{self.index}.
+    \item For each entry, retrieves the specified hash from the 'hashes' dictionary (or 'custom\_hashes').
+    \item Appends the file path (key of the index entry) to the list associated with its hash value in the defaultdict.
+    \item Filters the defaultdict to find entries where the list of file paths has more than one item (indicating duplicates).
+    \item Returns a dictionary where keys are hashes and values are lists of duplicate file paths.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $hash\_map \leftarrow New \ collections.defaultdict(List)$.
+    \item $acquire(self.index\_lock)$.
+    \item $current\_index \leftarrow Copy(self.index)$.
+    \item $release(self.index\_lock)$.
+    \item $FOR (filepath\_str, entry\_dict) \text{ in } current\_index.items()$:
+        \begin{enumerate}
+            \item $hash\_val \leftarrow entry\_dict.get("hashes", \{\}).get(hash\_type) \text{ or } entry\_dict.get("custom\_hashes", \{\}).get(hash\_type)$.
+            \item If $hash\_val \neq Null$: $ListOp(append, hash\_map[hash\_val], filepath\_str)$.
+        \end{enumerate}
+    \item $duplicates \leftarrow \{h: paths \text{ for } (h, paths) \text{ in } hash\_map.items() \text{ if } Length(paths) > 1\}$.
+    \item $RETURN(duplicates)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DataRepository.find_duplicate_files(self, hash_algo_str) \rightarrow Dict[str, List[str]]
+\{
+  map_hash_to_paths \leftarrow DefaultDict_List_Create();
+  Lock_Acquire(self.index_lock);
+  idx_copy \leftarrow DeepCopy(self.index);
+  Lock_Release(self.index_lock);
+
+  FOR (rel_fp, entry) IN idx_copy.items() DO \{
+    file_hash \leftarrow Null;
+    IF ("hashes" \in entry \land hash_algo_str \in entry["hashes"]) THEN file_hash \leftarrow entry["hashes"][hash_algo_str];
+    ELSE IF ("custom_hashes" \in entry \land hash_algo_str \in entry["custom_hashes"]) THEN file_hash \leftarrow entry["custom_hashes"][hash_algo_str];
+    
+    IF (file_hash \neq Null) THEN ListOp(append, map_hash_to_paths[file_hash], rel_fp);
+  \};
+  
+  result_duplicates \leftarrow \{\};
+  FOR (h_val, path_list) IN map_hash_to_paths.items() DO \{
+    IF (Length(path_list) > 1) THEN result_duplicates[h_val] \leftarrow path_list;
+  \};
+  RETURN(result_duplicates);
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Contains example usage of the \texttt{DataRepository} class. It demonstrates repository creation, adding files, updating status, finding duplicates, and other functionalities.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Sets up a temporary repository path.
+    \item Initializes a \texttt{DataRepository} instance.
+    \item Creates dummy files with varying content.
+    \item Adds these files to the repository index using \texttt{add\_file\_to\_index}.
+    \item Demonstrates updating file status and adding user metadata.
+    \item Shows how to find duplicate files.
+    \item Loads the index into a Pandas DataFrame and prints it.
+    \item Exports the index to a CSV file.
+    \item Potentially cleans up the temporary repository (commented out in the original).
+\end{itemize}
+\paragraph{Algorithm/Process:}
+Sequential calls to \texttt{DataRepository} methods with sample data. File I/O for creating dummy files. Uses \texttt{Path} for path manipulations.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MainBlock_RepoORIG() \rightarrow void
+\{
+  Log(info, "Starting DataRepository main example");
+  tmp_repo_path \leftarrow Path("./temp_data_repository_orig");
+  PathOp(mkdir, tmp_repo_path, \{exist_ok:True, parents:True\});
+  
+  repo_instance \leftarrow New DataRepository(tmp_repo_path);
+  
+  %* Create dummy files f1, f2 (identical), f3 (unique) *%)
+  FileWrite(PathOp(join, tmp_repo_path, "file1.txt"), "content A");
+  FileWrite(PathOp(join, tmp_repo_path, "file2.txt"), "content A"); %* Duplicate of file1 *%)
+  FileWrite(PathOp(join, tmp_repo_path, "file3.dat"), "content B" + RandomString());
+  
+  file_paths_to_add \leftarrow [
+    PathOp(join, tmp_repo_path, "file1.txt"),
+    PathOp(join, tmp_repo_path, "file2.txt"),
+    PathOp(join, tmp_repo_path, "file3.dat")
+  ];
+  
+  FOR fp_item IN file_paths_to_add DO \{
+    repo_instance.add_file_to_index(fp_item, user_metadata=\{"source": "main_test"\});
+  \};
+  
+  repo_instance.update_file_status(PathOp(join, tmp_repo_path, "file1.txt"), STATUS_PROCESSED);
+  
+  duplicates_found \leftarrow repo_instance.find_duplicate_files("md5");
+  Log(info, "Duplicates: " + duplicates_found);
+  
+  df_index \leftarrow repo_instance.load_index_to_dataframe();
+  Print(df_index);
+  
+  repo_instance.export_index_to_csv(PathOp(join, tmp_repo_path, "index_export.csv"));
+  
+  %* shutil.rmtree(tmp_repo_path) - cleanup commented out *%)
+  Log(info, "DataRepository main example finished.");
+\}
+}
+
+\subsection{I. Import Statements}
+\subsubsection{I-1. Standard Library Imports}
+\begin{itemize}
+    \item \texttt{json}: For JSON serialization/deserialization, used by helper classes for metadata and progress files.
+    \item \texttt{logging}: Provides basic logging capabilities, primarily as a fallback if the custom logger from \texttt{src.utils.logger} is unavailable.
+    \item \texttt{os}: Operating system interfaces, used for path operations (e.g., \texttt{os.walk}, \texttt{os.path.join}, \texttt{os.path.relpath}).
+    \item \texttt{re}: Regular expression operations, used by \texttt{GitignoreHandler} for pattern matching and manipulation.
+    \item \texttt{shutil}: High-level file operations, used in the \texttt{if \_\_name\_\_ == "\_\_main\_\_":} block for cleaning up example repositories (commented out).
+    \item \texttt{inspect}: Used by the global \texttt{\_get\_log\_ins} function to get caller information for structured logging.
+    \item \texttt{concurrent.futures}: Provides \texttt{ThreadPoolExecutor} for concurrent execution of tasks, used in \texttt{RepoHandler.process\_tracked\_files\_concurrently}.
+    \item \texttt{pathlib.Path}: For object-oriented file system path operations.
+    \item \texttt{typing}: Provides type hints (\texttt{Any, Dict, List, Optional, Union, Tuple}).
+\end{itemize}
+\subsubsection{I-2. Third-Party Library Imports}
+\begin{itemize}
+    \item \texttt{git} (from \texttt{GitPython}): Library for interacting with Git repositories. Central to this module's operation.
+    \item \texttt{pandas} (as \texttt{pd}): Data analysis and manipulation library, used for loading metadata into DataFrames (\texttt{RepoHandler.load\_metadata\_to\_dataframe}) and saving DataFrames back to metadata (\texttt{RepoHandler.save\_dataframe\_to\_metadata}).
+\end{itemize}
+\subsubsection{I-3. Project-Specific Imports}
+\begin{itemize}
+    \item \texttt{from src.utils.config import *}: Imports all configuration utilities (though not explicitly used in the provided snippet, implies availability).
+    \item \texttt{from src.data.constants import *}: Imports all constants (e.g., \texttt{METADATA\_FILENAME}, \texttt{PROGRESS\_DIR\_NAME}).
+    \item \texttt{from src.utils.helpers import process\_file}: Imports a function for processing files, used in \texttt{RepoHandler.process\_tracked\_files\_concurrently}.
+    \item \texttt{from src.utils.logger import log\_statement as actual\_log\_statement}: Attempts to import the project's standard logging function. A fallback is defined if this fails.
+    \item (Conditional import) \texttt{from src.utils.helpers import \_get\_file\_metadata}: Attempts to import a helper for metadata extraction. A placeholder is defined if this fails.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  StdLib_Core(json, logging, os, re, shutil, inspect, concurrent.futures, pathlib, typing),
+  ThirdParty_VCS(git),
+  ThirdParty_Data(pandas),
+  Project_Utils(src.utils.config, src.utils.helpers.process_file, src.utils.logger.actual_log_statement),
+  Project_Data(src.data.constants),
+  Project_Conditional_Utils(src.utils.helpers._get_file_metadata)
+\}
+}
+
+\subsection{II. Global Logging Setup and Utility Function}
+\subsubsection{II-1. Placeholder Logging Setup}
+\paragraph{Description:} Defines \texttt{LOG\_LEVELS} and attempts to import \texttt{actual\_log\_statement} from \texttt{src.utils.logger}. If the import fails, it defines a basic fallback \texttt{actual\_log\_statement} that prints to the console and a simple \texttt{logging.basicConfig} setup.
+\paragraph{Actions Undertaken:} Ensure a logging function (\texttt{actual\_log\_statement}) is available, either the project's standard or a basic fallback.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+_log_statement_defined \leftarrow False;
+TRY \{
+  IMPORT \{log_statement AS actual_log_statement\} FROM src.utils.logger;
+  _log_statement_defined \leftarrow True;
+\} CATCH (ImportError) \{
+  DEFINE actual_log_statement_fallback(lvl, msg, logger_name, exc_info) \{ Print(lvl, msg); IF (exc_info) THEN Print(StackTrace()); \};
+  Invoke(logging.basicConfig(level=logging.INFO)); %* Fallback config *%)
+  actual_log_statement \leftarrow actual_log_statement_fallback;
+\};
+}
+
+\subsubsection{II-2. Function \texttt{\_get\_log\_ins(frame, class\_name: Optional[str] = None) -> str}}
+\paragraph{Description:} A utility function to generate a structured log prefix string: "module::[class\_name::]function\_name::line\_number".
+\paragraph{Parameters:} \texttt{frame} (from \texttt{inspect.currentframe()}), \texttt{class\_name} (optional).
+\paragraph{Actions Undertaken:} Extracts module, class (if provided), function, and line number from the frame.
+\paragraph{Algorithm/Process:} Similar to \texttt{LOG\_INS} in \texttt{src.data.constants.py}.
+\paragraph{Mathematical/Logical Formula:} (Identical to \texttt{LOG\_INS} in constants.py, refer there)
+
+\subsection{III. Helper Class: \texttt{MetadataFileHandler}}
+\paragraph{Overall Purpose:} Manages reading from and writing to the \texttt{metadata.json} file within the repository, including locking for concurrent access and optionally committing changes to Git.
+\subsubsection{III-1. Method: \texttt{\_\_init\_\_(self, repo\_path: Path, metadata\_filename: str = METADATA\_FILENAME)}}
+\paragraph{Description:} Constructor.
+\paragraph{Parameters:} Repository path, metadata filename (defaults to \texttt{METADATA\_FILENAME} from constants).
+\paragraph{Actions Undertaken:} Stores paths, initializes a \texttt{threading.RLock} for file access.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MetadataFileHandler.__init__(self, p_repo, fn_meta) \rightarrow Instance
+\{
+  instance.repo_path \leftarrow p_repo;
+  instance.metadata_filepath \leftarrow PathOp(join, p_repo, fn_meta);
+  instance.lock \leftarrow Lock_Create(type=RLock);
+  RETURN instance;
+\}
+}
+\subsubsection{III-2. Method: \texttt{ensure\_metadata\_file\_exists(self, repo\_instance: Optional[git.Repo] = None, initial\_commit: bool = False) -> None}}
+\paragraph{Description:} Creates an empty \texttt{metadata.json} (with \texttt{\{\}}) if it doesn't exist. Optionally makes an initial Git commit if \texttt{repo\_instance} and \texttt{initial\_commit} are provided.
+\paragraph{Actions Undertaken:} Checks existence, writes empty JSON, optionally commits via \texttt{repo\_instance}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MetadataFileHandler.ensure_metadata_file_exists(self, git_repo_opt, commit_bool) \rightarrow void
+\{
+  Lock_Acquire(self.lock);
+  TRY \{
+    IF (\neg PathOp(exists, self.metadata_filepath)) THEN \{
+      FileWriteText(self.metadata_filepath, JSONSerialize(\{\}), encoding="utf-8");
+      Log(info, "Created metadata file: " + self.metadata_filepath);
+      IF (git_repo_opt \neq Null \land commit_bool) THEN \{
+        GitOp(add, git_repo_opt, [self.metadata_filepath]);
+        GitOp(commit, git_repo_opt, \{message: "Initial commit: Add metadata file"\});
+      \}
+    \}
+  \} FINALLY \{ Lock_Release(self.lock); \}
+\}
+}
+% ... (Other MetadataFileHandler methods: read_metadata, write_metadata, update_metadata_entry, remove_metadata_entry, get_metadata_entry analyzed similarly) ...
+
+\subsection{IV. Helper Class: \texttt{GitOperationsHelper}}
+\paragraph{Overall Purpose:} Encapsulates Git operations using the \texttt{GitPython} library.
+\subsubsection{IV-1. Method: \texttt{\_\_init\_\_(self, repo: git.Repo)}}
+\paragraph{Description:} Constructor.
+\paragraph{Parameters:} An initialized \texttt{git.Repo} object.
+\paragraph{Actions Undertaken:} Stores the \texttt{git.Repo} object.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+GitOperationsHelper.__init__(self, git_repo_obj) \rightarrow Instance
+\{
+  instance.repo \leftarrow git_repo_obj;
+  RETURN instance;
+\}
+}
+% ... (Other GitOperationsHelper methods: commit_changes, get_git_status, get_file_blob_hash, get_last_commit_for_file, clean_repository_workspace analyzed similarly) ...
+
+\subsection{V. Helper Class: \texttt{ProgressFileHandler}}
+\paragraph{Overall Purpose:} Manages saving, loading, and deleting progress files for long-running tasks. Progress files are stored as JSON in a dedicated subdirectory.
+\subsubsection{V-1. Method: \texttt{\_\_init\_\_(self, repo\_path: Path, progress\_dir\_name: str = PROGRESS\_DIR\_NAME)}}
+\paragraph{Description:} Constructor.
+\paragraph{Parameters:} Repository path, progress directory name (defaults to \texttt{PROGRESS\_DIR\_NAME} from constants).
+\paragraph{Actions Undertaken:} Sets up the progress directory path and ensures it exists.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+ProgressFileHandler.__init__(self, p_repo, dir_prog_name) \rightarrow Instance
+\{
+  instance.progress_dir \leftarrow PathOp(join, p_repo, dir_prog_name);
+  PathOp(mkdir, instance.progress_dir, \{parents:True, exist_ok:True\});
+  RETURN instance;
+\}
+}
+% ... (Other ProgressFileHandler methods: _get_progress_filepath, save_progress, load_progress, delete_progress analyzed similarly) ...
+
+\subsection{VI. Helper Class: \texttt{GitignoreHandler}}
+\paragraph{Overall Purpose:} Manages entries in the \texttt{.gitignore} file of the repository.
+\subsubsection{VI-1. Method: \texttt{\_\_init\_\_(self, repo: git.Repo, gitignore\_path: Optional[Path] = None)}}
+\paragraph{Description:} Constructor.
+\paragraph{Parameters:} An initialized \texttt{git.Repo} object, optional path to \texttt{.gitignore} (defaults to repo root).
+\paragraph{Actions Undertaken:} Stores repo object and \texttt{.gitignore} path. Ensures \texttt{.gitignore} file exists.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+GitignoreHandler.__init__(self, git_repo_obj, p_gitignore_opt) \rightarrow Instance
+\{
+  instance.repo \leftarrow git_repo_obj;
+  instance.gitignore_path \leftarrow IF(p_gitignore_opt \neq Null, p_gitignore_opt, PathOp(join, git_repo_obj.working_dir, ".gitignore"));
+  PathOp(touch, instance.gitignore_path, \{exist_ok:True\}); %* Ensures file exists *%)
+  RETURN instance;
+\}
+}
+% ... (Other GitignoreHandler methods: _read_gitignore, _write_gitignore, add_to_gitignore, remove_from_gitignore, get_gitignore_content analyzed similarly) ...
+
+\subsection{VII. Main Class: \texttt{RepoHandler}}
+\paragraph{Overall Purpose:} Orchestrates all repository operations, utilizing the helper classes for specific tasks like metadata management, Git actions, progress tracking, and .gitignore handling. This is the primary interface for interacting with the Git-based data repository.
+\subsubsection{VII-1. Method: \texttt{\_\_init\_\_(self, repository\_path: Union[str, Path], metadata\_filename: str = METADATA\_FILENAME, progress\_dir\_name: str = PROGRESS\_DIR\_NAME, create\_repo\_if\_not\_exists: bool = True)}}
+\paragraph{Description:} Constructor for the main \texttt{RepoHandler}.
+\paragraph{Parameters:} Repository path, names for metadata file and progress directory, flag to create repo if it doesn't exist.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initializes paths.
+    \item Initializes the \texttt{git.Repo} object (creating the repo on disk if \texttt{create\_repo\_if\_not\_exists} is true and path is not a repo).
+    \item Instantiates all helper classes: \texttt{GitOperationsHelper}, \texttt{MetadataFileHandler}, \texttt{ProgressFileHandler}, \texttt{GitignoreHandler}.
+    \item Calls \texttt{self.metadata\_handler.ensure\_metadata\_file\_exists(self.repo, initial\_commit=True)} to create and commit an initial empty \texttt{metadata.json} if it's a new repository.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:} (High-level)
+\mathformulabox{
+RepoHandler.__init__(self, p_repo_str_or_Path, fn_meta, dir_prog_name, create_bool) \rightarrow Instance
+\{
+  instance.repo_path \leftarrow PathOp(resolve, Path(p_repo_str_or_Path));
+  TRY \{ %* Open existing repo *%)
+    instance.repo \leftarrow GitRepo_Open(instance.repo_path);
+  \} CATCH (git.InvalidGitRepositoryError, git.NoSuchPathError) \{
+    IF (create_bool) THEN \{
+      PathOp(mkdir, instance.repo_path, \{parents:True, exist_ok:True\});
+      instance.repo \leftarrow GitRepo_Init(instance.repo_path);
+      is_new_repo \leftarrow True;
+    \} ELSE \{ RAISE; \}
+  \};
+  instance.git_ops_helper \leftarrow New GitOperationsHelper(instance.repo);
+  instance.metadata_handler \leftarrow New MetadataFileHandler(instance.repo_path, fn_meta);
+  instance.progress_handler \leftarrow New ProgressFileHandler(instance.repo_path, dir_prog_name);
+  instance.gitignore_handler \leftarrow New GitignoreHandler(instance.repo);
+  instance.metadata_handler.ensure_metadata_file_exists(instance.repo, initial_commit=(is_new_repo \lor \neg PathOp(exists, instance.metadata_handler.metadata_filepath)));
+  RETURN instance;
+\}
+}
+% ... (RepoHandler methods like _get_relative_path, _scan_directory_for_metadata, commit_all_metadata_changes, get_repository_summary, load_metadata_to_dataframe, save_dataframe_to_metadata, process_tracked_files_concurrently, and the placeholder _get_file_metadata would be analyzed here. The current _scan_directory_for_metadata is a key area of divergence from repo_handlerORIG.py's rich metadata.) ...
+
+\subsubsection{Element: Method \texttt{\_scan\_directory\_for\_metadata(self, directory: Union[str, Path] = ".", specific\_extensions: Optional[List[str]] = None, force\_rescan\_all: bool = False) -> Dict[str, Any]}}
+\paragraph{Description:} Scans a directory (defaulting to repo root) for files, collects basic metadata, and updates \texttt{metadata.json}. This is significantly simpler than \texttt{repo\_handlerORIG.py}'s file addition logic.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Walks the specified directory.
+    \item For each file, gathers OS stats (size, mtime), filename, extension.
+    \item Calculates a relative path for the file.
+    \item Stores this basic metadata in a dictionary keyed by the relative path.
+    \item If \texttt{force\_rescan\_all} is true, overwrites existing metadata. Otherwise, it only adds new files (current implementation in file seems to overwrite always).
+    \item Calls \texttt{self.metadata\_handler.write\_metadata} to save changes.
+\end{itemize}
+\paragraph{Current Divergence from \texttt{repo\_handlerORIG.py}:} Lacks custom hash calculation, detailed version history, application status, user metadata fields, Git blob hash integration within this scan. The metadata collected is minimal.
+\paragraph{Mathematical/Logical Formula:} (High-level for current simple version)
+\mathformulabox{
+RepoHandler._scan_directory_for_metadata(self, dir_scan, exts_opt, force_bool) \rightarrow Dict
+\{
+  scan_path_abs \leftarrow PathOp(resolve, PathOp(join, self.repo_path, dir_scan));
+  new_metadata_dict \leftarrow IF(force_bool, \{\}, self.metadata_handler.read_metadata());
+  
+  FOR (root_str, dirs_list, files_list) IN OS_Walk(scan_path_abs) DO \{
+    FOR file_n IN files_list DO \{
+      abs_fp \leftarrow PathOp(join, root_str, file_n);
+      rel_fp_str \leftarrow self._get_relative_path(abs_fp);
+      IF (exts_opt \neq Null \land PathOp(suffix, abs_fp) \notin exts_opt) THEN CONTINUE;
+      
+      stat_info \leftarrow PathOp(stat, abs_fp);
+      new_metadata_dict[rel_fp_str] \leftarrow \{
+        "filename": file_n,
+        "size_bytes": stat_info.st_size,
+        "last_modified_os": stat_info.st_mtime, %* Timestamp, not ISO string *%)
+        "extension": PathOp(suffix, abs_fp)
+      \};
+    \}
+  \};
+  self.metadata_handler.write_metadata(new_metadata_dict, "Update metadata from directory scan");
+  RETURN new_metadata_dict;
+\}
+}
+
+\subsection{VIII. \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Provides an example usage scenario for the \texttt{RepoHandler} class.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Sets up an example repository path and initializes \texttt{RepoHandler}.
+    \item Creates dummy files and directories.
+    \item Demonstrates committing files (though current \texttt{RepoHandler} doesn't have a direct `add_and_commit_file` method; this part of the example might be conceptual or rely on manual Git operations followed by metadata scan).
+    \item Calls \texttt{\_scan\_directory\_for\_metadata} and \texttt{get\_repository\_summary}.
+    \item Demonstrates loading metadata to a DataFrame and saving it back.
+    \item Shows usage of \texttt{ProgressFileHandler} and \texttt{GitignoreHandler}.
+    \item Includes error handling and a commented-out cleanup step.
+\end{itemize}
+\paragraph{Algorithm/Process:} Instantiates \texttt{RepoHandler}, creates files, calls various methods of \texttt{RepoHandler} and its helper instances, logs outputs.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MainBlock_RepoHandler() \rightarrow void
+\{
+  Log(info, "RepoHandler main example start");
+  ex_repo_p \leftarrow Path("./example_git_repo");
+  %* Cleanup old if exists (shutil.rmtree) *%)
+  PathOp(mkdir, ex_repo_p, \{exist_ok:True, parents:True\});
+  
+  repo_h_instance \leftarrow New RepoHandler(ex_repo_p);
+  
+  %* Create dummy files like file1.txt, data/file2.csv *%)
+  FileWrite(PathOp(join, ex_repo_p, "file1.txt"), "content1");
+  PathOp(mkdir, PathOp(join, ex_repo_p, "data"));
+  FileWrite(PathOp(join, ex_repo_p, "data", "file2.csv"), "col1,col2\n1,2");
+  
+  %* Conceptual commit (actual method not fully shown for this in RepoHandler for individual files) *%)
+  %* repo_h_instance.git_ops_helper.commit_changes(["file1.txt"], "Add file1.txt"); *%)
+  
+  meta_after_scan \leftarrow repo_h_instance._scan_directory_for_metadata();
+  summary \leftarrow repo_h_instance.get_repository_summary();
+  Log(info, "Summary: " + summary);
+  
+  df \leftarrow repo_h_instance.load_metadata_to_dataframe();
+  %* Modify df conceptually *%)
+  %* repo_h_instance.save_dataframe_to_metadata(df, "Update from DataFrame"); *%)
+  
+  repo_h_instance.progress_handler.save_progress("my_process", \{"step": 5, "total": 10\});
+  repo_h_instance.gitignore_handler.add_to_gitignore("*.log");
+  
+  %* Cleanup commented out: shutil.rmtree(ex_repo_p); *%)
+  Log(info, "RepoHandler main example end");
+\}
+}
+
+\newpage
+\section{File: \texttt{src/core/repo\_handlerSKEL.py}}
+\subsection{Overall Purpose}
+This module provides a skeleton implementation, \texttt{RepoHandlerSKEL}, for a Git-based data repository manager. It focuses on initializing a Git repository, managing a simple JSON-based metadata file (\texttt{metadata\_skel.json}) that is also version-controlled with Git, and providing basic functionalities to add/update file metadata, retrieve metadata, and list tracked files. It uses the standard Python \texttt{logging} module and \texttt{GitPython} for Git interactions. It is a simpler, more direct implementation compared to \texttt{repo\_handler.py} (which uses helper classes) and lacks the rich, custom indexing features of \texttt{repo\_handlerORIG.py}.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{os}, \texttt{json}, \texttt{pathlib.Path}, \texttt{typing} (\texttt{Dict, Any, List, Optional, Union}), \texttt{logging}, \texttt{inspect}, \texttt{datetime} (\texttt{datetime, timezone}).
+    \item \texttt{git} (from \texttt{GitPython}).
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  StdLib_Core(os, json, pathlib, typing, logging, inspect, datetime),
+  ThirdParty_VCS(git)
+\}
+}
+
+\subsection{Global Constants and Logging Setup}
+\paragraph{Description:} Basic logging is configured directly using \texttt{logging.basicConfig}. Module-level constants \texttt{METADATA\_FILENAME} and \texttt{DEFAULT\_COMMIT\_MESSAGE} are defined. A utility function \texttt{\_get\_log\_ins} is defined for structured log prefixes.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initialize basic logging.
+    \item Define fixed name for the metadata file and a default commit message.
+    \item Provide a log prefix generator function.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+Invoke(logging.basicConfig(level=INFO, format=...));
+METADATA_FILENAME \leftarrow "metadata_skel.json";
+DEFAULT_COMMIT_MESSAGE \leftarrow "repo_handlerSKEL: Automated metadata update.";
+%* _get_log_ins definition (refer to previous analyses for its formula) *%)
+}
+
+\subsection{Class \texttt{RepoHandlerSKEL}}
+\subsubsection{Element: \texttt{\_\_init\_\_(self, repository\_path: Union[str, Path])}}
+\paragraph{Description:} Constructor for \texttt{RepoHandlerSKEL}.
+\paragraph{Parameters:} \texttt{repository\_path}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initializes \texttt{LOG\_INS\_CLASS} for instance method logging prefixes.
+    \item Resolves \texttt{repository\_path} and sets \texttt{self.metadata\_file\_path}.
+    \item Creates the repository directory if it doesn't exist.
+    \item Initializes a \texttt{git.Repo} object, either by opening an existing repository at the path or initializing a new one if none exists.
+    \item Calls \texttt{self.\_ensure\_metadata\_file()} to create and commit an initial metadata file if necessary.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Set up logging prefix helpers.
+    \item $self.repository\_path \leftarrow PathOp(resolve, Path(repository\_path))$.
+    \item $self.metadata\_file\_path \leftarrow PathOp(join, self.repository\_path, METADATA\_FILENAME)$.
+    \item If $\neg PathOp(exists, self.repository\_path)$: $PathOp(mkdir, self.repository\_path, \{parents:True, exist\_ok:True\})$.
+    \item $TRY$: $self.repo \leftarrow GitRepo\_Open(self.repository\_path)$.
+    \item $CATCH (git.InvalidGitRepositoryError, git.NoSuchPathError)$: $self.repo \leftarrow GitRepo\_Init(self.repository\_path)$.
+    \item Call $self.\_ensure\_metadata\_file()$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL.__init__(self, repo_p_str_or_Path) \rightarrow Instance
+\{
+  instance.LOG_INS_CLASS \leftarrow self.__class__.__name__;
+  instance.repository_path \leftarrow PathOp(resolve, Path(repo_p_str_or_Path));
+  instance.metadata_file_path \leftarrow PathOp(join, instance.repository_path, METADATA_FILENAME);
+  
+  IF (\neg PathOp(exists, instance.repository_path)) THEN PathOp(mkdir, instance.repository_path, \{parents:True, exist_ok:True\});
+  
+  TRY \{ instance.repo \leftarrow GitRepo_Open(instance.repository_path); \}
+  CATCH (GitInvalidRepoException, GitNoSuchPathException) \{
+    instance.repo \leftarrow GitRepo_Init(instance.repository_path);
+  \};
+  instance._ensure_metadata_file();
+  RETURN instance;
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_ensure\_metadata\_file(self)}}
+\paragraph{Description:} Ensures the metadata file exists. If not, it creates an empty JSON file (\texttt{\{\}}) and commits it to the Git repository.
+\paragraph{Actions Undertaken:} Checks file existence, creates file with empty JSON, uses \texttt{self.repo.index.add} and \texttt{self.repo.index.commit}.
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item If $\neg PathOp(exists, self.metadata\_file\_path)$:
+        \begin{enumerate}
+            \item $FileWriteText(self.metadata\_file\_path, JSONSerialize(\{\}), encoding='utf-8')$.
+            \item If $self.repo$: $TRY$: $GitOp(add, self.repo, [self.metadata\_file\_path])$; $GitOp(commit, self.repo, \{message: "repo\_handlerSKEL: Initial commit..."\})$. $CATCH (Exception \text{ as } e)$: Log error $e$.
+        \end{enumerate}
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL._ensure_metadata_file(self) \rightarrow void
+\{
+  IF (\neg PathOp(exists, self.metadata_file_path)) THEN \{
+    FileWriteText(self.metadata_file_path, JSONSerialize(\{\}), encoding="utf-8");
+    IF (self.repo \neq Null) THEN \{
+      TRY \{
+        GitOp(add, self.repo, [String(self.metadata_file_path)]);
+        GitOp(commit, self.repo, \{message: "repo_handlerSKEL: Initial commit..."\});
+      \} CATCH (Exception e) \{ Log(error, e); \}
+    \}
+  \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_load\_metadata(self) -> Dict[str, Any]}}
+\paragraph{Description:} Loads and parses the JSON metadata file.
+\paragraph{Actions Undertaken:} Reads file content, uses \texttt{json.load}. Handles \texttt{JSONDecodeError} and other exceptions by returning an empty dictionary.
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item If $PathOp(exists, self.metadata\_file\_path)$:
+        \begin{enumerate}
+            \item $TRY$: Open $self.metadata\_file\_path$ (read, utf-8) as $f$. $RETURN(JSONParseStream(f))$.
+            \item $CATCH (json.JSONDecodeError, Exception \text{ as } e)$: Log error $e$. $RETURN(\{\})$.
+        \end{enumerate}
+    \item Else: $RETURN(\{\})$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL._load_metadata(self) \rightarrow Dict
+\{
+  IF (PathOp(exists, self.metadata_file_path)) THEN \{
+    TRY \{
+      file_stream \leftarrow FileReadTextStream(self.metadata_file_path, encoding="utf-8");
+      data \leftarrow JSONParseStream(file_stream);
+      FileStreamClose(file_stream);
+      RETURN(data);
+    \} CATCH (JSONDecodeException jde) \{ Log(error, jde); RETURN(\{\}); \}
+      CATCH (Exception e) \{ Log(error, e); RETURN(\{\}); \}
+  \} ELSE \{
+    RETURN(\{\});
+  \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_save\_metadata(self, metadata: Dict[str, Any], commit\_message: Optional[str] = None)}}
+\paragraph{Description:} Saves the provided metadata dictionary to the JSON file and optionally commits the change to Git.
+\paragraph{Actions Undertaken:} Writes to file using \texttt{json.dump}. If \texttt{commit\_message} provided and \texttt{self.repo} exists, uses \texttt{self.repo.index.add} and \texttt{self.repo.index.commit}.
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $TRY$: Open $self.metadata\_file\_path$ (write, utf-8) as $f$. $JSONWriteStream(metadata, f, \{indent:4, sort\_keys:True\})$.
+        \begin{enumerate}
+            \item If $self.repo \land commit\_message$: $TRY$: $GitOp(add, self.repo, [self.metadata\_file\_path])$; $GitOp(commit, self.repo, \{message: commit\_message\})$. $CATCH (Exception \text{ as } e)$: Log error $e$.
+        \end{enumerate}
+    \item $CATCH (Exception \text{ as } e)$: Log error $e$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL._save_metadata(self, meta_dict, msg_opt_str) \rightarrow void
+\{
+  TRY \{
+    file_stream \leftarrow FileWriteTextStream(self.metadata_file_path, encoding="utf-8");
+    JSONWriteStream(meta_dict, file_stream, \{indent:4, sort_keys:True\});
+    FileStreamClose(file_stream);
+
+    IF (self.repo \neq Null \land msg_opt_str \neq Null) THEN \{
+      TRY \{
+        GitOp(add, self.repo, [String(self.metadata_file_path)]);
+        GitOp(commit, self.repo, \{message: msg_opt_str\});
+      \} CATCH (Exception e) \{ Log(error, e); \}
+    \}
+  \} CATCH (Exception e_outer) \{ Log(error, e_outer); \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{get\_relative\_path(self, abs\_file\_path: Union[str, Path]) -> Optional[str]}}
+\paragraph{Description:} Converts an absolute file path to a path string relative to the repository root.
+\paragraph{Actions Undertaken:} Uses \texttt{Path.resolve()} and \texttt{Path.relative\_to()}. Handles \texttt{ValueError} if path is not within repository.
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $TRY$: $abs\_p\_obj \leftarrow PathOp(resolve, Path(abs\_file\_path))$. $rel\_p \leftarrow PathOp(relative\_to, abs\_p\_obj, self.repository\_path)$. $RETURN(String(rel\_p))$.
+    \item $CATCH (ValueError, Exception \text{ as } e)$: Log warning/error $e$. $RETURN(None)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL.get_relative_path(self, abs_fp_str_or_Path) \rightarrow Optional[str]
+\{
+  TRY \{
+    abs_p \leftarrow PathOp(resolve, Path(abs_fp_str_or_Path));
+    rel_p \leftarrow PathOp(relative_to, abs_p, self.repository_path);
+    RETURN(String(rel_p));
+  \} CATCH (ValueException ve) \{ Log(warn, ve); RETURN(Null); \}
+    CATCH (Exception e) \{ Log(error, e); RETURN(Null); \}
+\}
+}
+
+\subsubsection{Element: Method \texttt{add\_file(self, file\_path: Union[str, Path], metadata\_updates: Optional[Dict[str, Any]] = None) -> bool}}
+\paragraph{Description:} Simplified method to add or update a file's entry in \texttt{metadata\_skel.json}. Gathers basic OS metadata and applies user-provided updates.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Validates file existence.
+    \item Gets relative path. Loads current metadata.
+    \item Populates/updates entry with filename, size, OS modified time (ISO UTC), and a "last\_skel\_updated\_utc" timestamp.
+    \item Merges \texttt{metadata\_updates}.
+    \item Saves metadata with a commit message.
+    \item Mentions conceptual staging of actual data files but doesn't implement it here.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item $abs\_p \leftarrow PathOp(resolve, Path(file\_path))$. If $\neg PathOp(exists, abs\_p) \lor \neg PathOp(is\_file, abs\_p)$, Log error, $RETURN(False)$.
+    \item $rel\_p\_str \leftarrow self.get\_relative\_path(abs\_p)$. If $\neg rel\_p\_str$, $RETURN(False)$.
+    \item $metadata \leftarrow self.\_load\_metadata()$.
+    \item $entry \leftarrow metadata.get(rel\_p\_str, \{\})$.
+    \item $stat \leftarrow PathOp(stat, abs\_p)$.
+    \item $entry['filename'] \leftarrow abs\_p.name$. $entry['size\_bytes'] \leftarrow stat.st\_size$. $entry['last\_os\_modified\_utc'] \leftarrow FormatISO8601UTC(FromTimestamp(stat.st\_mtime))$. $entry['last\_skel\_updated\_utc'] \leftarrow FormatISO8601UTC(NowUTC())$.
+    \item If $metadata\_updates$: $entry.update(metadata\_updates)$.
+    \item $metadata[rel\_p\_str] \leftarrow entry$.
+    \item $commit\_msg \leftarrow \text{"Update metadata for "} + rel\_p\_str$. If $metadata\_updates \land 'status' \in metadata\_updates$: $commit\_msg \leftarrow \text{"Update status to '"} + metadata\_updates['status'] + \text{"' for "} + rel\_p\_str$.
+    \item Call $self.\_save\_metadata(metadata, commit\_msg)$.
+    \item Log info. $RETURN(True)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL.add_file(self, fp_str_or_Path, updates_opt_dict) \rightarrow bool
+\{
+  abs_p \leftarrow PathOp(resolve, Path(fp_str_or_Path));
+  IF (\neg PathOp(exists, abs_p) \lor \neg PathOp(is_file, abs_p)) THEN \{ Log(error,...); RETURN(False); \};
+  rel_p_s \leftarrow self.get_relative_path(abs_p);
+  IF (rel_p_s == Null) THEN RETURN(False);
+
+  meta_coll \leftarrow self._load_metadata();
+  current_file_entry \leftarrow IF(rel_p_s \in meta_coll, meta_coll[rel_p_s], \{\});
+
+  stat_obj \leftarrow PathOp(stat, abs_p);
+  current_file_entry["filename"] \leftarrow PathOp(name, abs_p);
+  current_file_entry["size_bytes"] \leftarrow stat_obj.st_size;
+  current_file_entry["last_os_modified_utc"] \leftarrow FormatISO8601UTC(FromTimestamp(stat_obj.st_mtime));
+  current_file_entry["last_skel_updated_utc"] \leftarrow FormatISO8601UTC(NowUTC());
+  
+  IF (updates_opt_dict \neq Null) THEN Dict_Update(current_file_entry, updates_opt_dict);
+  meta_coll[rel_p_s] \leftarrow current_file_entry;
+  
+  msg \leftarrow "Update metadata for " + rel_p_s;
+  IF (updates_opt_dict \neq Null \land "status" \in updates_opt_dict) THEN \{
+    msg \leftarrow "Update status to '" + updates_opt_dict["status"] + "' for " + rel_p_s;
+  \};
+  self._save_metadata(meta_coll, msg);
+  Log(info, "Added/Updated: " + rel_p_s);
+  RETURN(True);
+\}
+}
+
+\subsubsection{Element: Method \texttt{get\_file\_metadata(self, file\_path: Union[str, Path]) -> Optional[Dict[str, Any]]}}
+\paragraph{Description:} Retrieves the metadata for a specific file from \texttt{metadata\_skel.json}.
+\paragraph{Actions Undertaken:} Converts input path to relative string if absolute. Loads metadata. Returns entry for the path or \texttt{None}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL.get_file_metadata(self, fp_str_or_Path) \rightarrow Optional[Dict]
+\{
+  rel_p_s \leftarrow Null;
+  IF (PathOp(is_absolute, Path(fp_str_or_Path))) THEN \{
+    rel_p_s \leftarrow self.get_relative_path(fp_str_or_Path);
+    IF (rel_p_s == Null) THEN RETURN(Null);
+  \} ELSE \{
+    rel_p_s \leftarrow String(fp_str_or_Path);
+  \};
+  all_meta \leftarrow self._load_metadata();
+  RETURN(IF(rel_p_s \in all_meta, all_meta[rel_p_s], Null));
+\}
+}
+
+\subsubsection{Element: Method \texttt{list\_tracked\_files(self) -> List[str]}}
+\paragraph{Description:} Returns a list of all file paths (relative strings) currently tracked in the metadata.
+\paragraph{Actions Undertaken:} Loads metadata, returns keys of the metadata dictionary.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerSKEL.list_tracked_files(self) \rightarrow List[str]
+\{
+  meta_dict \leftarrow self._load_metadata();
+  RETURN(Keys(meta_dict));
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Example usage of \texttt{RepoHandlerSKEL}.
+\paragraph{Actions Undertaken:} Creates a temporary repository, initializes \texttt{RepoHandlerSKEL}, creates dummy files, adds them using \texttt{add\_file}, updates one, retrieves metadata, lists tracked files. Includes conceptual commit of actual data files (commented out). Has cleanup (commented out).
+\paragraph{Algorithm/Process:} Sequential instantiation and method calls to demonstrate functionality.
+\paragraph{Mathematical/Logical Formula:} (Similar in structure to other \texttt{\_\_main\_\_} blocks, focusing on instantiation and method calls of \texttt{RepoHandlerSKEL}).
+
+\newpage
+\section{File: \texttt{src/core/repo\_handlerMETAAI.py}}
+\subsection{Overall Purpose}
+This module defines a conceptual skeleton, \texttt{RepoHandlerMetaAI}, intended for managing data assets within a hypothetical "Meta AI" specific infrastructure. It outlines how such a handler might interact with proprietary storage solutions, version control systems, metadata services, and APIs presumably available in that environment. Unlike other handlers in the project, its primary focus is integration with an external, platform-specific backend rather than local file system or standard Git repository management for data versioning. It includes provisions for local caching and metadata mirroring, potentially using Git for the cache.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{os}, \texttt{json}, \texttt{pathlib.Path}, \texttt{typing} (\texttt{Dict, Any, List, Optional, Union}), \texttt{logging}, \texttt{inspect}, \texttt{datetime} (\texttt{datetime, timezone}).
+    \item \texttt{git} (from \texttt{GitPython}): Assumed for consistency if local Git interaction (e.g., for caching) is needed.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  StdLib_Core(os, json, pathlib, typing, logging, inspect, datetime),
+  ThirdParty_VCS(git) %* Assumed for local cache management *%)
+\}
+}
+
+\subsection{Global Constants and Logging Setup}
+\paragraph{Description:} Defines placeholder constants like \texttt{METADATA\_FILENAME\_METAAI} and \texttt{LOG\_LEVEL\_METAAI}. Basic logging is configured directly using \texttt{logging.basicConfig}. A utility function \texttt{\_get\_log\_ins} (identical to versions in other handlers) is defined for structured log prefixes.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initialize basic logging tailored for this conceptual module.
+    \item Define a specific metadata filename for local caching in this context.
+    \item Provide a log prefix generator function.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+Invoke(logging.basicConfig(level=LOG_LEVEL_METAAI, format=...));
+METADATA_FILENAME_METAAI \leftarrow "meta_ai_repo_metadata.json";
+LOG_LEVEL_METAAI \leftarrow logging.INFO;
+%* _get_log_ins definition (refer to previous analyses for its formula) *%)
+}
+
+\subsection{Class \texttt{RepoHandlerMetaAI}}
+\subsubsection{Element: \texttt{\_\_init\_\_(self, project\_id: str, dataset\_name: str, local\_cache\_path: Optional[Union[str, Path]] = None)}}
+\paragraph{Description:} Constructor for \texttt{RepoHandlerMetaAI}. Initializes with Meta AI specific identifiers and an optional local cache path.
+\paragraph{Parameters:} \texttt{project\_id}, \texttt{dataset\_name}, \texttt{local\_cache\_path}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Stores \texttt{project\_id} and \texttt{dataset\_name}.
+    \item If \texttt{local\_cache\_path} is provided, resolves it, creates the directory, and sets up a path for a local metadata cache file (\texttt{self.metadata\_file\_path}). Conceptually mentions initializing a local Git mirror for this cache.
+    \item Logs initialization. Conceptually calls a method to connect to Meta services.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Set up logging prefix helpers.
+    \item $self.project\_id \leftarrow project\_id$. $self.dataset\_name \leftarrow dataset\_name$.
+    \item If $local\_cache\_path$:
+        $self.local\_cache\_path \leftarrow PathOp(resolve, Path(local\_cache\_path))$;
+        $PathOp(mkdir, self.local\_cache\_path, \{parents:True, exist\_ok:True\})$;
+        $self.metadata\_file\_path \leftarrow PathOp(join, self.local\_cache\_path, METADATA\_FILENAME\_METAAI)$.
+        %* Conceptual: self.repo \leftarrow self._init_local_git_mirror(self.local_cache_path) *%)
+    \item Else: $self.local\_cache\_path \leftarrow Null$; $self.metadata\_file\_path \leftarrow Null$.
+    \item Log initialization.
+    \item %* Conceptual: self._connect_to_meta_services() *%)
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerMetaAI.__init__(self, proj_id_str, ds_name_str, cache_p_opt) \rightarrow Instance
+\{
+  instance.LOG_INS_CLASS \leftarrow self.__class__.__name__;
+  instance.project_id \leftarrow proj_id_str;
+  instance.dataset_name \leftarrow ds_name_str;
+  
+  IF (cache_p_opt \neq Null) THEN \{
+    instance.local_cache_path \leftarrow PathOp(resolve, Path(cache_p_opt));
+    PathOp(mkdir, instance.local_cache_path, \{parents:True, exist_ok:True\});
+    instance.metadata_file_path \leftarrow PathOp(join, instance.local_cache_path, METADATA_FILENAME_METAAI);
+    %* instance.repo \leftarrow instance._init_local_git_mirror(instance.local_cache_path); (Conceptual) *%)
+  \} ELSE \{
+    instance.local_cache_path \leftarrow Null;
+    instance.metadata_file_path \leftarrow Null;
+    %* instance.repo \leftarrow Null; *%)
+  \};
+  Log(info, "RepoHandlerMetaAI initialized...");
+  %* instance._connect_to_meta_services(); (Conceptual) *%)
+  RETURN instance;
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_connect\_to\_meta\_services(self)}}
+\paragraph{Description:} Placeholder for logic to connect to Meta AI backend services (e.g., authentication, API client setup).
+\paragraph{Actions Undertaken:} Logs a message indicating conceptual connection.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerMetaAI._connect_to_meta_services(self) \rightarrow void
+\{
+  Log(info, "(Conceptual) Connecting to Meta AI services...");
+  %* Placeholder for actual connection logic: Auth(), API_Client_Init(), ... *%)
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_init\_local\_git\_mirror(self, path: Path) -> Optional[git.Repo]}}
+\paragraph{Description:} Conceptual placeholder for initializing a local Git repository to be used as a mirror or cache for data/metadata managed by the Meta AI backend.
+\paragraph{Actions Undertaken:} Attempts to open an existing Git repo at \texttt{path} or initialize a new one.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerMetaAI._init_local_git_mirror(self, p_Path) \rightarrow Optional[GitRepo]
+\{
+  LOG_PREFIX \leftarrow ...;
+  TRY \{ repo_obj \leftarrow GitRepo_Open(p_Path); Log(info, ...); RETURN(repo_obj); \}
+  CATCH (GitInvalidRepoException, GitNoSuchPathException) \{
+    TRY \{ repo_obj \leftarrow GitRepo_Init(p_Path); Log(info, ...); RETURN(repo_obj); \}
+    CATCH (Exception e) \{ Log(error, e); \}
+  \};
+  RETURN(Null);
+\}
+}
+
+\subsubsection{Element: Method \texttt{add\_data\_asset(self, local\_file\_path: Union[str, Path], remote\_path: str, asset\_metadata: Dict[str, Any]) -> bool}}
+\paragraph{Description:} Conceptual method to add a data asset. This involves uploading a local file to Meta AI's storage and registering its metadata with Meta AI's services. Updates a local metadata cache if configured.
+\paragraph{Parameters:} \texttt{local\_file\_path}, \texttt{remote\_path} (on Meta AI storage), \texttt{asset\_metadata}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Validates existence of the local file.
+    \item Logs conceptual addition.
+    \item (Conceptually) Uploads file to Meta storage and registers/updates metadata in Meta's services.
+    \item If local caching is enabled (\texttt{self.metadata\_file\_path} exists), updates the local JSON metadata cache with information about the asset (cached local path, remote path, Meta AI asset ID, version, sync time, etc.) and saves it.
+\end{itemize}
+\paragraph{Algorithm/Process:} (Conceptual)
+\begin{enumerate}
+    \item $local\_p \leftarrow Path(local\_file\_path)$. If $\neg PathOp(exists, local\_p)$, Log error, $RETURN(False)$.
+    \item Log conceptual addition including project/dataset context.
+    \item %* 1. MetaAPI_Upload(local_p, remote_path) *%)
+    \item %* 2. MetaAPI_RegisterMetadata(remote_path, asset_metadata) *%)
+    \item If $self.metadata\_file\_path$:
+        $current\_meta \leftarrow self.\_load\_local\_metadata()$.
+        $entry \leftarrow \{$ "local\_path\_cached": ..., "remote\_path": $remote\_path$, "meta\_ai\_asset\_id": ..., "version": ..., ... $\} \cup asset\_metadata$.
+        $current\_meta[remote\_path] \leftarrow entry$.
+        $self.\_save\_local\_metadata(current\_meta, \text{"Cache update for asset: "} + remote\_path)$.
+    \item $RETURN(True)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerMetaAI.add_data_asset(self, local_fp, remote_p_str, asset_meta_dict) \rightarrow bool
+\{
+  p_local \leftarrow Path(local_fp);
+  IF (\neg PathOp(exists, p_local)) THEN \{ Log(error, ...); RETURN(False); \};
+  Log(info, "(Conceptual) Adding data asset " + p_local + " to " + remote_p_str);
+  %* status_upload \leftarrow MetaPlatform_Upload(p_local, remote_p_str, self.project_id, self.dataset_name); *%)
+  %* status_register \leftarrow MetaPlatform_RegisterMetadata(remote_p_str, asset_meta_dict, self.project_id, self.dataset_name); *%)
+  %* IF (\neg status_upload \lor \neg status_register) THEN RETURN(False); *%)
+  
+  IF (self.metadata_file_path \neq Null) THEN \{
+    local_cache_meta \leftarrow self._load_local_metadata();
+    cache_entry \leftarrow \{
+      "local_path_cached": IF(self.local_cache_path \land PathOp(is_relative_to, p_local, self.local_cache_path), String(p_local), Null),
+      "remote_path": remote_p_str,
+      "meta_ai_asset_id": asset_meta_dict.get("asset_id", "UNKNOWN_ID"),
+      "version": asset_meta_dict.get("version", 1),
+      "last_sync_utc": FormatISO8601UTC(NowUTC())
+    \};
+    Dict_Update(cache_entry, asset_meta_dict); %* Merge remaining asset_meta_dict *%)
+    local_cache_meta[remote_p_str] \leftarrow cache_entry;
+    self._save_local_metadata(local_cache_meta, "Cache update for asset: " + remote_p_str);
+  \};
+  RETURN(True); %* Placeholder *%)
+\}
+}
+
+\subsubsection{Element: Method \texttt{get\_data\_asset(self, remote\_path: str, destination\_local\_path: Union[str, Path]) -> bool}}
+\paragraph{Description:} Conceptual method to retrieve/download a data asset from Meta AI storage to a specified local path.
+\paragraph{Actions Undertaken:} Logs conceptual download. Simulates download by creating a dummy file at the destination.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerMetaAI.get_data_asset(self, remote_p_str, dest_local_p_str_or_Path) \rightarrow bool
+\{
+  p_dest \leftarrow Path(dest_local_p_str_or_Path);
+  Log(info, "(Conceptual) Getting asset " + remote_p_str + " to " + p_dest);
+  %* success_download \leftarrow MetaPlatform_Download(remote_p_str, p_dest, self.project_id, self.dataset_name); *%)
+  %* IF (\neg success_download) THEN RETURN(False); *%)
+  
+  %* Simulation: *%)
+  PathOp(mkdir, PathOp(parent, p_dest), \{parents:True, exist_ok:True\});
+  FileWriteText(p_dest, "(Conceptual content for " + remote_p_str + ")");
+  RETURN(True); %* Placeholder *%)
+\}
+}
+
+\subsubsection{Element: Method \texttt{query\_assets(self, query\_params: Dict[str, Any]) -> List[Dict[str, Any]]}}
+\paragraph{Description:} Conceptual method to query for data assets in the Meta AI repository based on provided metadata parameters.
+\paragraph{Actions Undertaken:} Logs conceptual query. Simulates API response, potentially using the local metadata cache for basic filtering if available.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerMetaAI.query_assets(self, params_dict) \rightarrow List[Dict]
+\{
+  Log(info, "(Conceptual) Querying assets with " + params_dict);
+  %* results_list \leftarrow MetaPlatform_QueryAssets(params_dict, self.project_id, self.dataset_name); *%)
+  %* RETURN(results_list); *%)
+
+  %* Simulation with local cache: *%)
+  IF (self.metadata_file_path \land PathOp(exists, self.metadata_file_path)) THEN \{
+    all_local_meta \leftarrow self._load_local_metadata();
+    filtered_results \leftarrow [];
+    FOR (path_key, meta_val) IN all_local_meta.items() DO \{
+      match \leftarrow True;
+      IF ("tag" \in params_dict \land params_dict["tag"] \notin meta_val.get("tags", [])) THEN match \leftarrow False;
+      IF ("asset_id" \in params_dict \land params_dict["asset_id"] \neq meta_val.get("meta_ai_asset_id")) THEN match \leftarrow False;
+      IF (match) THEN ListOp(append, filtered_results, meta_val);
+    \};
+    RETURN(filtered_results);
+  \};
+  RETURN([\{"id": "dummy_asset_1", ...\}]); %* Placeholder *%)
+\}
+}
+
+\subsubsection{Element: Methods \texttt{\_load\_local\_metadata} and \texttt{\_save\_local\_metadata}}
+\paragraph{Description:} Helper methods to load from and save to the local JSON metadata cache file (\texttt{self.metadata\_file\_path}). \texttt{\_save\_local\_metadata} includes conceptual logic for committing changes if a local Git mirror for the cache is active.
+\paragraph{Actions Undertaken:} Standard JSON file read/write operations. \texttt{\_save\_local\_metadata} has commented-out Git commit logic.
+\paragraph{Mathematical/Logical Formula:} (Similar to \texttt{\_load\_metadata} and \texttt{\_save\_metadata} in \texttt{RepoHandlerSKEL}, but specific to \texttt{self.metadata\_file\_path} and conceptual Git commit for cache).
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Example usage scenario for \texttt{RepoHandlerMetaAI}. It's highly conceptual due to the dependency on a specific Meta AI environment.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Sets up example project/dataset IDs and a local cache path.
+    \item Initializes \texttt{RepoHandlerMetaAI}.
+    \item Simulates adding a data asset by creating a dummy local file and calling \texttt{add\_data\_asset} with example metadata.
+    \item Simulates retrieving the asset using \texttt{get\_data\_asset}.
+    \item Simulates querying assets using \texttt{query\_assets}.
+    \item Includes error handling and optional cleanup of the temporary cache directory.
+\end{itemize}
+\paragraph{Algorithm/Process:} Instantiation and calls to the conceptual methods with example data, demonstrating the intended workflow.
+\paragraph{Mathematical/Logical Formula:} (Focuses on sequential calls to the conceptual methods of \texttt{RepoHandlerMetaAI}).
+
+\newpage
+\section{File: \texttt{src/core/repo\_handlerGemini.py}}
+\subsection{Overall Purpose}
+This module defines \texttt{RepoHandlerGemini}, a conceptual skeleton for a repository handler designed to manage data and model artifacts within a Google Gemini-focused machine learning project. It anticipates integration with Google Cloud Platform (GCP) services, particularly Google Cloud Storage (GCS) for artifact storage and Vertex AI for experiment tracking and model management. The handler also outlines an optional local caching mechanism for metadata or small artifacts, potentially versioned using Git.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{os}, \texttt{json}, \texttt{pathlib.Path}, \texttt{typing} (\texttt{Dict, Any, List, Optional, Union}), \texttt{logging}, \texttt{inspect}, \texttt{datetime} (\texttt{datetime, timezone}).
+    \item \texttt{git} (from \texttt{GitPython}): Suggested for potential local versioning of cached metadata or small artifacts.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  StdLib_Core(os, json, pathlib, typing, logging, inspect, datetime),
+  ThirdParty_VCS(git) %* Suggested for local cache versioning *%)
+\}
+}
+
+\subsection{Global Constants and Logging Setup}
+\paragraph{Description:} Defines placeholder constants relevant to a GCP environment, such as \texttt{METADATA\_FILENAME\_GEMINI} (for local cache), \texttt{VERTEX\_AI\_PROJECT\_ID}, and \texttt{GCS\_BUCKET\_NAME}. These are sourced from environment variables with fallback default strings. Basic logging is configured using \texttt{logging.basicConfig}. The \texttt{\_get\_log\_ins} utility function for structured log prefixes is also defined (identical to versions in other handlers).
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Initialize basic logging.
+    \item Define a specific metadata filename for local caching.
+    \item Define constants for GCP project ID and GCS bucket, attempting to read from environment variables.
+    \item Provide a log prefix generator function.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+Invoke(logging.basicConfig(level=INFO, format=...));
+METADATA_FILENAME_GEMINI \leftarrow "gemini_repo_metadata.json";
+VERTEX_AI_PROJECT_ID \leftarrow EnvVar_Get("VERTEX_AI_PROJECT_ID", "your-gcp-project-id");
+GCS_BUCKET_NAME \leftarrow EnvVar_Get("GCS_BUCKET_NAME", "your-gcs-bucket-for-gemini-data");
+%* _get_log_ins definition (refer to previous analyses for its formula) *%)
+}
+
+\subsection{Class \texttt{RepoHandlerGemini}}
+\subsubsection{Element: \texttt{\_\_init\_\_(self, experiment\_name: str, local\_cache\_path: Optional[Union[str, Path]] = None)}}
+\paragraph{Description:} Constructor for \texttt{RepoHandlerGemini}. Initializes based on an experiment name and an optional local cache path, preparing for interaction with GCP services.
+\paragraph{Parameters:} \texttt{experiment\_name}, \texttt{local\_cache\_path}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Stores \texttt{experiment\_name}. Sets \texttt{self.project\_id} and \texttt{self.gcs\_bucket} from global constants.
+    \item If \texttt{local\_cache\_path} is provided, resolves it, creates the directory, and sets up \texttt{self.metadata\_file\_path} for a local metadata cache. Conceptually mentions initializing a local Git repository for this cache.
+    \item Logs initialization. Conceptually calls a method to connect to GCP services.
+\end{itemize}
+\paragraph{Algorithm/Process:}
+\begin{enumerate}
+    \item Set up logging prefix helpers.
+    \item $self.experiment\_name \leftarrow experiment\_name$. $self.project\_id \leftarrow VERTEX\_AI\_PROJECT\_ID$. $self.gcs\_bucket \leftarrow GCS\_BUCKET\_NAME$.
+    \item If $local\_cache\_path$:
+        $self.local\_cache\_path \leftarrow PathOp(resolve, Path(local\_cache\_path))$;
+        $PathOp(mkdir, self.local\_cache\_path, \{parents:True, exist\_ok:True\})$;
+        $self.metadata\_file\_path \leftarrow PathOp(join, self.local\_cache\_path, METADATA\_FILENAME\_GEMINI)$.
+        %* Conceptual: self.local_git_repo \leftarrow self._init_local_git_cache(self.local_cache_path) *%)
+    \item Else: $self.local\_cache\_path \leftarrow Null$; $self.metadata\_file\_path \leftarrow Null$.
+    \item Log initialization.
+    \item %* Conceptual: self._connect_to_gcp_services() *%)
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerGemini.__init__(self, exp_name_str, cache_p_opt) \rightarrow Instance
+\{
+  instance.LOG_INS_CLASS \leftarrow self.__class__.__name__;
+  instance.experiment_name \leftarrow exp_name_str;
+  instance.project_id \leftarrow VERTEX_AI_PROJECT_ID; %* From global const *%)
+  instance.gcs_bucket \leftarrow GCS_BUCKET_NAME; %* From global const *%)
+  
+  IF (cache_p_opt \neq Null) THEN \{
+    instance.local_cache_path \leftarrow PathOp(resolve, Path(cache_p_opt));
+    PathOp(mkdir, instance.local_cache_path, \{parents:True, exist_ok:True\});
+    instance.metadata_file_path \leftarrow PathOp(join, instance.local_cache_path, METADATA_FILENAME_GEMINI);
+    %* instance.local_git_repo \leftarrow instance._init_local_git_cache(instance.local_cache_path); (Conceptual) *%)
+  \} ELSE \{
+    instance.local_cache_path \leftarrow Null;
+    instance.metadata_file_path \leftarrow Null;
+    %* instance.local_git_repo \leftarrow Null; *%)
+  \};
+  Log(info, "RepoHandlerGemini initialized...");
+  %* instance._connect_to_gcp_services(); (Conceptual) *%)
+  RETURN instance;
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_connect\_to\_gcp\_services(self)}}
+\paragraph{Description:} Placeholder for logic to connect to Google Cloud Platform services (e.g., Vertex AI, GCS), likely involving authentication and client library initialization.
+\paragraph{Actions Undertaken:} Logs a message indicating conceptual connection.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerGemini._connect_to_gcp_services(self) \rightarrow void
+\{
+  Log(info, "(Conceptual) Connecting to GCP services...");
+  %* Placeholder for actual connection: storage.Client(project=...), aiplatform.init(project=...) *%)
+\}
+}
+
+\subsubsection{Element: Method \texttt{\_init\_local\_git\_cache(self, path: Path) -> Optional[git.Repo]}}
+\paragraph{Description:} Conceptual placeholder for initializing a local Git repository at the given path, intended for caching metadata or small artifacts.
+\paragraph{Actions Undertaken:} Attempts to open an existing Git repository at \texttt{path} or initialize a new one using \texttt{GitPython}.
+\paragraph{Mathematical/Logical Formula:} (Identical to \texttt{\_init\_local\_git\_mirror} in \texttt{RepoHandlerMetaAI}, refer there, replacing "mirror" with "cache" in logs).
+
+\subsubsection{Element: Method \texttt{upload\_artifact(self, local\_path: Union[str, Path], gcs\_path: str, artifact\_metadata: Dict[str, Any]) -> Optional[str]}}
+\paragraph{Description:} Conceptual method to upload a data artifact (e.g., dataset, model) from a local path to Google Cloud Storage (GCS) and register it, possibly with Vertex AI.
+\paragraph{Parameters:} \texttt{local\_path}, \texttt{gcs\_path} (relative path within GCS bucket), \texttt{artifact\_metadata}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Validates existence of the local artifact.
+    \item Constructs the full GCS URI.
+    \item Logs conceptual upload.
+    \item (Conceptually) Uses \texttt{google-cloud-storage} client to upload the artifact.
+    \item (Conceptually) Registers the artifact with Vertex AI services (e.g., as a Model, Dataset, or Artifact).
+    \item If local caching is enabled, updates the local JSON metadata cache with GCS URI, Vertex AI resource name, version, and other metadata, then saves the cache.
+    \item Returns the GCS URI of the uploaded artifact or \texttt{None} on failure.
+\end{itemize}
+\paragraph{Algorithm/Process:} (Conceptual)
+\begin{enumerate}
+    \item $local\_p \leftarrow Path(local\_path)$. If $\neg PathOp(exists, local\_p)$, Log error, $RETURN(None)$.
+    \item $full\_gcs\_uri \leftarrow \text{"gs://"} + self.gcs\_bucket + \text{"/"} + gcs\_path.lstrip('/') $.
+    \item Log conceptual upload.
+    \item %* 1. GCP_StorageClient.upload(local_p, self.gcs_bucket, gcs_path) *%)
+    \item %* 2. VertexAI_Client.register_artifact(gcs_uri, artifact_metadata, self.experiment_name) *%)
+    \item If $self.metadata\_file\_path$:
+        $current\_cache\_meta \leftarrow self.\_load\_local\_cache\_metadata()$.
+        $entry \leftarrow \{$ "gcs\_uri": $full\_gcs\_uri$, "vertex\_ai\_resource\_name": ..., "version": ..., ... $\} \cup artifact\_metadata$.
+        $current\_cache\_meta[gcs\_path.lstrip('/')] \leftarrow entry$.
+        $self.\_save\_local\_cache\_metadata(current\_cache\_meta, \text{"Cache update for GCS artifact: "} + gcs\_path)$.
+    \item $RETURN(full\_gcs\_uri)$.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerGemini.upload_artifact(self, local_fp, gcs_p_str, artifact_meta_dict) \rightarrow Optional[str]
+\{
+  p_local \leftarrow Path(local_fp);
+  IF (\neg PathOp(exists, p_local)) THEN \{ Log(error, ...); RETURN(Null); \};
+  
+  full_gcs_uri_str \leftarrow StringOp(concat, "gs://", self.gcs_bucket, "/", StringOp(lstrip, gcs_p_str, "/"));
+  Log(info, "(Conceptual) Uploading " + p_local + " to " + full_gcs_uri_str);
+  %* upload_status \leftarrow GCP_UploadToGCS(p_local, self.gcs_bucket, gcs_p_str); *%)
+  %* register_status \leftarrow GCP_VertexAIRegister(full_gcs_uri_str, artifact_meta_dict, self.experiment_name); *%)
+  %* IF (\neg upload_status) THEN RETURN(Null); *%)
+  
+  IF (self.metadata_file_path \neq Null) THEN \{
+    local_cache \leftarrow self._load_local_cache_metadata();
+    cache_entry \leftarrow \{
+      "gcs_uri": full_gcs_uri_str,
+      "vertex_ai_resource_name": artifact_meta_dict.get("vertex_ai_id"), 
+      "version": artifact_meta_dict.get("version", "latest"),
+      "uploaded_utc": FormatISO8601UTC(NowUTC())
+    \};
+    Dict_Update(cache_entry, artifact_meta_dict);
+    local_cache[StringOp(lstrip, gcs_p_str, "/")] \leftarrow cache_entry;
+    self._save_local_cache_metadata(local_cache, "Cache update for GCS: " + gcs_p_str);
+  \};
+  RETURN(full_gcs_uri_str); %* Placeholder *%)
+\}
+}
+
+\subsubsection{Element: Method \texttt{download\_artifact(self, gcs\_path: str, local\_destination\_path: Union[str, Path]) -> bool}}
+\paragraph{Description:} Conceptual method to download an artifact from GCS to a specified local path.
+\paragraph{Actions Undertaken:} Logs conceptual download. Simulates download by creating a dummy file at the destination.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerGemini.download_artifact(self, gcs_p_str, dest_local_p_str_or_Path) \rightarrow bool
+\{
+  p_dest \leftarrow Path(dest_local_p_str_or_Path);
+  full_gcs_uri_str \leftarrow StringOp(concat, "gs://", self.gcs_bucket, "/", StringOp(lstrip, gcs_p_str, "/"));
+  Log(info, "(Conceptual) Downloading " + full_gcs_uri_str + " to " + p_dest);
+  %* success \leftarrow GCP_DownloadFromGCS(self.gcs_bucket, gcs_p_str, p_dest); *%)
+  %* IF (\neg success) THEN RETURN(False); *%)
+  
+  %* Simulation: *%)
+  PathOp(mkdir, PathOp(parent, p_dest), \{parents:True, exist_ok:True\});
+  FileWriteText(p_dest, "(Conceptual content for GCS artifact " + gcs_p_str + ")");
+  RETURN(True); %* Placeholder *%)
+\}
+}
+
+\subsubsection{Element: Methods \texttt{log\_experiment\_params} and \texttt{log\_experiment\_metrics}}
+\paragraph{Description:} Conceptual methods for logging experiment parameters and metrics, presumably to Vertex AI Experiments.
+\paragraph{Actions Undertaken:} Logs conceptual messages. In a real implementation, would call Vertex AI SDK methods (e.g., \texttt{aiplatform.log\_params()}, \texttt{aiplatform.log\_metrics()}).
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+RepoHandlerGemini.log_experiment_params(self, params_dict) \rightarrow void
+\{
+  Log(info, "(Conceptual) Logging params for " + self.experiment_name + ": " + params_dict);
+  %* VertexAI_LogParams(params_dict, experiment_name=self.experiment_name); *%)
+\}
+
+RepoHandlerGemini.log_experiment_metrics(self, metrics_dict) \rightarrow void
+\{
+  Log(info, "(Conceptual) Logging metrics for " + self.experiment_name + ": " + metrics_dict);
+  %* VertexAI_LogMetrics(metrics_dict, experiment_name=self.experiment_name); *%)
+\}
+}
+
+\subsubsection{Element: Methods \texttt{\_load\_local\_cache\_metadata} and \texttt{\_save\_local\_cache\_metadata}}
+\paragraph{Description:} Helper methods for managing the local JSON metadata cache file (\texttt{self.metadata\_file\_path}). \texttt{\_save\_local\_cache\_metadata} includes conceptual logic for committing changes if a local Git cache repository is active.
+\paragraph{Actions Undertaken:} Standard JSON file read/write. \texttt{\_save\_local\_cache\_metadata} has commented-out Git commit logic for the cache.
+\paragraph{Mathematical/Logical Formula:} (Similar to \texttt{\_load\_metadata} and \texttt{\_save\_metadata} in \texttt{RepoHandlerSKEL}, specific to \texttt{self.metadata\_file\_path} and the conceptual Gemini cache context).
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Example usage scenario for \texttt{RepoHandlerGemini}. It's highly conceptual, depending on a GCP setup.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Sets up an example experiment name and local cache path. Warns if default GCP environment variables are not set.
+    \item Initializes \texttt{RepoHandlerGemini}.
+    \item Simulates creating and uploading a model artifact.
+    \item Simulates downloading the artifact.
+    \item Simulates logging experiment parameters and metrics.
+    \item Shows an example of reading the local cache metadata file.
+    \item Includes error handling and optional cleanup.
+\end{itemize}
+\paragraph{Algorithm/Process:} Instantiation and calls to the conceptual methods with example data, demonstrating intended GCP workflow.
+\paragraph{Mathematical/Logical Formula:} (Focuses on sequential calls to the conceptual methods of \texttt{RepoHandlerGemini}, simulating GCP interactions).
+
+\newpage
+\section{File: \texttt{src/core/models.py}}
+\subsection{Overall Purpose}
+This module defines Pydantic models to structure and validate data entities used throughout the application. Key models include those for representing file metadata entries (designed to be comprehensive and align with refined proposals for \texttt{metadata.json}), individual file versions, hash information, collections of metadata, and structures for machine learning experiment configurations and results. The use of Pydantic ensures data consistency, type checking, and easy serialization/deserialization (e.g., to/from JSON).
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{pydantic}: Provides \texttt{BaseModel}, \texttt{Field}, \texttt{validator}, \texttt{HttpUrl}.
+    \item \texttt{typing}: Provides type hints (\texttt{Optional, List, Dict, Any, Union}).
+    \item \texttt{datetime}: Provides \texttt{datetime}, \texttt{timezone} for timestamping.
+    \item \texttt{pathlib.Path}: For path manipulations in validators.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  Pydantic_Core(BaseModel, Field, validator, HttpUrl),
+  StdLib_Typing(Optional, List, Dict, Any, Union),
+  StdLib_Time(datetime, timezone),
+  StdLib_Path(Path)
+\}
+}
+
+\subsection{Global Constants (within module)}
+\paragraph{Description:} Defines constants for default values and validation lists.
+\begin{itemize}
+    \item \texttt{DEFAULT\_STATUS = "new"}.
+    \item \texttt{SUPPORTED\_HASH\_TYPES = ["md5", "sha256", "sha1"]}.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DEFAULT_STATUS \leftarrow "new";
+SUPPORTED_HASH_TYPES \leftarrow ["md5", "sha256", "sha1"];
+}
+
+\subsection{Pydantic Models}
+\subsubsection{Element: Class \texttt{HashInfo(BaseModel)}}
+\paragraph{Description:} Models a single hash, containing its type (e.g., "md5") and value.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{hash\_type: str}: Type of hash algorithm. Validated against \texttt{SUPPORTED\_HASH\_TYPES}.
+    \item \texttt{value: str}: Hexadecimal hash value.
+\end{itemize}
+\paragraph{Validators:}
+\begin{itemize}
+    \item \texttt{hash\_type\_supported}: Ensures \texttt{hash\_type} is in \texttt{SUPPORTED\_HASH\_TYPES}.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+HashInfo \triangleq \{
+  hash\_type: String \text{ s.t. } StringOp(to_lower, hash_type) \in SUPPORTED\_HASH\_TYPES,
+  value: String
+\}
+}
+
+\subsubsection{Element: Class \texttt{FileVersion(BaseModel)}}
+\paragraph{Description:} Represents a specific version of a file within its history, typically part of an application-level versioning scheme.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{version\_number: int}: Sequential version number.
+    \item \texttt{timestamp\_utc: datetime}: Timestamp of this version record (defaults to now UTC).
+    \item \texttt{git\_commit\_hash: Optional[str]}: Associated Git commit hash (relevant for Git-based versioning).
+    \item \texttt{change\_description: Optional[str]}: Description of changes in this version.
+    \item \texttt{size\_bytes: Optional[int]}: File size at this version.
+    \item \texttt{custom\_hashes: Optional[List[HashInfo]]}: List of hashes for the file content at this version.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+FileVersion \triangleq \{
+  version_number: Integer,
+  timestamp_utc: DateTimeUTC,
+  git_commit_hash: Optional[String],
+  change_description: Optional[String],
+  size_bytes: Optional[Integer],
+  custom_hashes: Optional[List[HashInfo]]
+\}
+}
+
+\subsubsection{Element: Class \texttt{FileMetadataEntry(BaseModel)}}
+\paragraph{Description:} A comprehensive model for a single file's metadata entry. This is designed to be the primary structure for entries in \texttt{metadata.json}, aligning with the `REFINED-PROPOSALS-repo_handler.md`.
+\paragraph{Fields (Key Examples):}
+\begin{itemize}
+    \item \texttt{filepath\_relative: str}: Relative path, acts as key.
+    \item \texttt{filename: Optional[str]}: Derived from \texttt{filepath\_relative} if not provided.
+    \item \texttt{extension: Optional[str]}: Derived from \texttt{filename} if not provided.
+    \item \texttt{size\_bytes: Optional[int]}.
+    \item \texttt{os\_last\_modified\_utc: Optional[datetime]}.
+    \item \texttt{os\_created\_utc: Optional[datetime]}.
+    \item \texttt{git\_object\_hash\_current: Optional[str]}: Git blob hash.
+    \item \texttt{custom\_hashes: Dict[str, str]}: Dictionary of custom hashes (e.g., \{"md5": "val"\}).
+    \item \texttt{date\_added\_to\_metadata\_utc: datetime}.
+    \item \texttt{last\_metadata\_update\_utc: datetime}.
+    \item \texttt{application\_status: str}: e.g., 'new', 'processed'. Defaults to \texttt{DEFAULT\_STATUS}.
+    \item \texttt{user\_metadata: Dict[str, Any]}: For arbitrary user data.
+    \item \texttt{version\_current: int}: Current application-level version.
+    \item \texttt{version\_history\_app: List[FileVersion]}: History of application-level versions.
+    \item \texttt{source\_uri: Optional[Union[HttpUrl, str]]}.
+    \item \texttt{processing\_attempts: int}.
+    \item \texttt{last\_processing\_date\_utc: Optional[datetime]}.
+    \item \texttt{tags: List[str]}.
+    \item \texttt{external\_system\_link: Optional[Dict[str, str]]}.
+\end{itemize}
+\paragraph{Validators:}
+\begin{itemize}
+    \item \texttt{set\_extension\_from\_filename}: Derives \texttt{extension} if not given.
+    \item \texttt{set\_filename\_from\_filepath}: Derives \texttt{filename} if not given.
+    \item \texttt{ensure\_utc}: Converts string datetimes to UTC-aware \texttt{datetime} objects or ensures existing \texttt{datetime} objects are UTC.
+\end{itemize}
+\paragraph{Class Config:} \texttt{validate\_assignment = True}.
+\paragraph{Mathematical/Logical Formula:} (Representing a subset of key fields for brevity)
+\mathformulabox{
+FileMetadataEntry \triangleq \{
+  filepath_relative: String,
+  filename: Optional[String] \text{ (derived if Null)},
+  extension: Optional[String] \text{ (derived if Null)},
+  size_bytes: Optional[Integer],
+  os_last_modified_utc: Optional[DateTimeUTC],
+  custom_hashes: Map[String, String],
+  application_status: String,
+  user_metadata: Map[String, Any],
+  version_current: Integer,
+  version_history_app: List[FileVersion],
+  ... %* Other fields *%)
+\}
+%* With derivation rules for filename, extension and UTC enforcement for datetime fields. *%)
+}
+
+\subsubsection{Element: Class \texttt{MetadataCollection(BaseModel)}}
+\paragraph{Description:} Represents the entire metadata collection (typically the content of \texttt{metadata.json}), which is a dictionary mapping relative file paths to their \texttt{FileMetadataEntry} objects.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{\_\_root\_\_: Dict[str, FileMetadataEntry]}: The root element is a dictionary.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+MetadataCollection \triangleq \{
+  __root__: Map[String_{filepath\_relative}, FileMetadataEntry]
+\}
+}
+
+\subsubsection{Element: Class \texttt{ExperimentRunConfig(BaseModel)}}
+\paragraph{Description:} Models the configuration parameters for a single machine learning experiment run.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{run\_id: str}: Unique identifier for the run.
+    \item \texttt{timestamp\_start\_utc: datetime}: Start time of the run.
+    \item \texttt{parameters: Dict[str, Any]}: Dictionary of parameters used for the run.
+    \item \texttt{model\_name: Optional[str]}.
+    \item \texttt{dataset\_version\_used: Optional[str]}.
+    \item \texttt{notes: Optional[str]}.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+ExperimentRunConfig \triangleq \{
+  run_id: String,
+  timestamp_start_utc: DateTimeUTC,
+  parameters: Map[String, Any],
+  model_name: Optional[String],
+  ...
+\}
+}
+
+\subsubsection{Element: Class \texttt{ExperimentRunResult(BaseModel)}}
+\paragraph{Description:} Models the results obtained from a single machine learning experiment run.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{run\_id: str}: Matches an \texttt{ExperimentRunConfig.run\_id}.
+    \item \texttt{timestamp\_end\_utc: datetime}: End time of the run.
+    \item \texttt{metrics: Dict[str, float]}: Dictionary of metrics from the run.
+    \item \texttt{output\_artifacts\_paths: List[str]}: List of paths/URIs to output artifacts.
+    \item \texttt{status: str}: e.g., "completed", "failed".
+    \item \texttt{error\_message: Optional[str]}.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+ExperimentRunResult \triangleq \{
+  run_id: String,
+  timestamp_end_utc: DateTimeUTC,
+  metrics: Map[String, Float],
+  output_artifacts_paths: List[String],
+  status: String,
+  ...
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Contains example usage of the defined Pydantic models, demonstrating instantiation, validation, and JSON serialization.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Creates instances of \texttt{HashInfo}, \texttt{FileVersion}, \texttt{FileMetadataEntry}, \texttt{MetadataCollection}, \texttt{ExperimentRunConfig}, and \texttt{ExperimentRunResult}.
+    \item Prints their JSON representations to show structure and default/derived values.
+    \item Demonstrates validator behavior (e.g., for unsupported hash type, datetime UTC conversion, filename/extension derivation).
+\end{itemize}
+\paragraph{Algorithm/Process:} Sequential instantiation of Pydantic models with sample data, calls to \texttt{.json()} method for output. Includes a try-except block for expected validation errors.
+\paragraph{Mathematical/Logical Formula:} (Focuses on instantiation and serialization calls for each model).
+
+\newpage
+\section{File: \texttt{src/core/zones.py}}
+\subsection{Overall Purpose}
+This module defines Pydantic models for representing and managing geometric zones or regions of interest, typically used in contexts like image processing, document analysis (e.g., OCR zones, object detection bounding boxes), or any application requiring the definition of spatial areas. It provides structures for coordinates, bounding boxes, and polygons, along with a generic container for zones of interest.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{typing}: Provides type hints (\texttt{List, Tuple, Optional, Dict, Any, Union}).
+    \item \texttt{pydantic}: Provides \texttt{BaseModel}, \texttt{Field} for data modeling and validation.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  StdLib_Typing(List, Tuple, Optional, Dict, Any, Union),
+  Pydantic_Core(BaseModel, Field)
+\}
+}
+
+\subsection{Module Elements}
+\subsubsection{Element: Exception \texttt{ZoneDefinitionError(Exception)}}
+\paragraph{Description:} A custom exception class for errors specifically related to the definition or processing of zones.
+\paragraph{Actions Undertaken:} Defines a new exception type inheriting from the base \texttt{Exception}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+DefineException ZoneDefinitionError EXTENDS Exception;
+}
+
+\subsubsection{Element: Class \texttt{Coordinate(BaseModel)}}
+\paragraph{Description:} A Pydantic model representing a 2D coordinate with 'x' and 'y' values.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{x: float}.
+    \item \texttt{y: float}.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+Coordinate \triangleq \{
+  x: Float,
+  y: Float
+\}
+}
+
+\subsubsection{Element: Class \texttt{BoundingBox(BaseModel)}}
+\paragraph{Description:} Represents a rectangular bounding box, typically defined by two opposite corner coordinates. Includes optional label and confidence score.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{x1: float}: X-coordinate of the first corner.
+    \item \texttt{y1: float}: Y-coordinate of the first corner.
+    \item \texttt{x2: float}: X-coordinate of the second corner.
+    \item \texttt{y2: float}: Y-coordinate of the second corner.
+    \item \texttt{label: Optional[str]}: Optional label for the box.
+    \item \texttt{confidence: Optional[float]}: Optional confidence score (between 0.0 and 1.0).
+\end{itemize}
+\paragraph{Methods:}
+\begin{itemize}
+    \item \texttt{get\_width(self) -> float}: Calculates width as $|x2 - x1|$.
+    \item \texttt{get\_height(self) -> float}: Calculates height as $|y2 - y1|$.
+    \item \texttt{get\_area(self) -> float}: Calculates area as width * height.
+    \item \texttt{to\_xywh(self) -> Tuple[float, float, float, float]}: Returns box as $(x_{min}, y_{min}, width, height)$.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula (for fields and one method example):}
+\mathformulabox{
+BoundingBox \triangleq \{
+  x1: Float, y1: Float, x2: Float, y2: Float,
+  label: Optional[String],
+  confidence: Optional[Float] \text{ s.t. } 0.0 \le confidence \le 1.0
+\};
+
+BoundingBox.get_width(self) \rightarrow Float := |self.x2 - self.x1|;
+BoundingBox.get_height(self) \rightarrow Float := |self.y2 - self.y1|;
+BoundingBox.get_area(self) \rightarrow Float := self.get_width() * self.get_height();
+BoundingBox.to_xywh(self) \rightarrow Tuple[Float,Float,Float,Float] := (Min(self.x1,self.x2), Min(self.y1,self.y2), self.get_width(), self.get_height());
+}
+
+\subsubsection{Element: Class \texttt{PolygonZone(BaseModel)}}
+\paragraph{Description:} Represents a zone defined by a polygon, specified as a list of vertices.
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{vertices: List[Coordinate]}: List of \texttt{Coordinate} objects defining the polygon (minimum 3 vertices).
+    \item \texttt{label: Optional[str]}: Optional label for the polygon.
+    \item \texttt{metadata: Dict[str, Any]}: Arbitrary metadata.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+PolygonZone \triangleq \{
+  vertices: List[Coordinate] \text{ s.t. Length(vertices)} \ge 3,
+  label: Optional[String],
+  metadata: Map[String, Any]
+\}
+}
+
+\subsubsection{Element: Class \texttt{ZoneOfInterest(BaseModel)}}
+\paragraph{Description:} A generic container for a Zone of Interest (ZOI). It specifies the zone's ID, type, and holds the actual zone data (which can be a \texttt{BoundingBox}, \texttt{PolygonZone}, or a custom dictionary).
+\paragraph{Fields:}
+\begin{itemize}
+    \item \texttt{zone\_id: str}: Unique identifier for the ZOI.
+    \item \texttt{zone\_type: str}: Type of the zone (e.g., "bounding\_box", "polygon").
+    \item \texttt{zone\_data: Union[BoundingBox, PolygonZone, Dict[str, Any]]}: The geometric data for the zone.
+    \item \texttt{source\_document\_id: Optional[str]}: Identifier of the source document/image.
+    \item \texttt{description: Optional[str]}: Optional description.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+ZoneOfInterest \triangleq \{
+  zone_id: String,
+  zone_type: String,
+  zone_data: Union[BoundingBox, PolygonZone, Map[String, Any]],
+  source_document_id: Optional[String],
+  description: Optional[String]
+\}
+}
+
+\subsubsection{Element: Function \texttt{create\_bounding\_box(...) -> BoundingBox}}
+\paragraph{Description:} A helper function to simplify the creation of \texttt{BoundingBox} instances.
+\paragraph{Parameters:} \texttt{x1, y1, x2, y2, label (Optional), confidence (Optional)}.
+\paragraph{Actions Undertaken:} Instantiates and returns a \texttt{BoundingBox} object.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+create_bounding_box(x1_f, y1_f, x2_f, y2_f, lbl_opt_s, conf_opt_f) \rightarrow BoundingBox :=
+  New BoundingBox(\{x1:x1_f, y1:y1_f, x2:x2_f, y2:y2_f, label:lbl_opt_s, confidence:conf_opt_f\})
+}
+
+\subsubsection{Element: Function \texttt{create\_polygon\_zone(...) -> PolygonZone}}
+\paragraph{Description:} A helper function to simplify the creation of \texttt{PolygonZone} instances from a list of (x,y) coordinate tuples.
+\paragraph{Parameters:} \texttt{vertices\_coords: List[Tuple[float, float]], label (Optional), metadata (Optional)}.
+\paragraph{Actions Undertaken:} Converts list of tuples to list of \texttt{Coordinate} objects, then instantiates and returns a \texttt{PolygonZone}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+create_polygon_zone(verts_list_tuple, lbl_opt_s, meta_opt_dict) \rightarrow PolygonZone :=
+  v_coords \leftarrow [New Coordinate(\{x:t[0], y:t[1]\}) \text{ FOR } t \text{ IN } verts_list_tuple];
+  New PolygonZone(\{vertices:v_coords, label:lbl_opt_s, metadata: (meta_opt_dict \text{ IF } meta_opt_dict \neq Null \text{ ELSE } \{\})\})
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Contains example usage of the defined Pydantic models and helper functions for zones.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Creates instances of \texttt{BoundingBox} (via helper), \texttt{PolygonZone} (via helper), and \texttt{ZoneOfInterest} (for bounding box, polygon, and custom dictionary data).
+    \item Prints their JSON representations to demonstrate structure and data.
+    \item For \texttt{BoundingBox}, it also prints calculated width, height, area, and XYWH format.
+\end{itemize}
+\paragraph{Algorithm/Process:} Sequential instantiation of Pydantic models using the helper functions and direct instantiation, followed by calls to \texttt{.json()} for output and specific getter methods for \texttt{BoundingBox}.
+\paragraph{Mathematical/Logical Formula:} (Focuses on instantiation and method calls for each model example).
+
+\newpage
+\section{File: \texttt{src/core/attention.py}}
+\subsection{Overall Purpose}
+This module implements attention mechanisms commonly used in neural networks, particularly for sequence processing tasks in natural language processing or computer vision. It provides a custom \texttt{SelfAttention} layer and a \texttt{MultiHeadAttention} layer that wraps PyTorch's built-in version, both designed to operate on PyTorch tensors.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{torch}: The PyTorch library.
+    \item \texttt{torch.nn} (as \texttt{nn}): Neural network module from PyTorch.
+    \item \texttt{torch.nn.functional} (as \texttt{F}): Functional interface for neural network operations.
+    \item \texttt{math}: Standard Python math library (used for \texttt{math.sqrt}).
+    \item \texttt{typing.Optional}: For type hinting optional parameters.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  PyTorch_Core(torch),
+  PyTorch_NN(torch.nn, torch.nn.functional),
+  StdLib_Math(math),
+  StdLib_Typing(Optional)
+\}
+}
+
+\subsection{Pytorch Modules (Classes)}
+\subsubsection{Element: Class \texttt{SelfAttention(nn.Module)}}
+\paragraph{Description:} A custom implementation of a self-attention mechanism. It takes an input tensor, projects it into query (Q), key (K), and value (V) representations, computes attention scores using scaled dot-product, and then applies these scores to the values to produce an output. Supports multi-head attention by splitting the embedding dimension.
+\paragraph{Parameters (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{embed\_dim: int}: The dimensionality of the input embeddings.
+    \item \texttt{num\_heads: int}: The number of attention heads (defaults to 1). \texttt{embed\_dim} must be divisible by \texttt{num\_heads}.
+\end{itemize}
+\paragraph{Key Layers (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{self.query, self.key, self.value}: \texttt{nn.Linear} layers to project input \texttt{x} to Q, K, V.
+    \item \texttt{self.fc\_out}: \texttt{nn.Linear} layer for final output projection.
+\end{itemize}
+\paragraph{Forward Pass (\texttt{forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor})}
+\paragraph{Actions Undertaken:}
+\begin{enumerate}
+    \item Linear projection of input \texttt{x} to Q, K, V.
+    \item Reshape Q, K, V to accommodate multiple attention heads: $(B, S, E) \rightarrow (B, H, S, D_h)$, where $B$=batch size, $S$=sequence length, $E$=embed dim, $H$=num heads, $D_h$=head dim.
+    \item Calculate attention energy: $Energy = \frac{Q K^T}{\sqrt{D_h}}$.
+    \item Apply optional mask to energy scores (e.g., for padding or causal attention). Additive mask is assumed.
+    \item Apply softmax to energy to get attention weights: $AttentionWeights = softmax(Energy)$.
+    \item Compute weighted sum of Values: $Output_{heads} = AttentionWeights \cdot V$.
+    \item Concatenate heads and pass through a final linear layer.
+\end{enumerate}
+\paragraph{Input/Output Shapes:}
+\begin{itemize}
+    \item Input \texttt{x}: $(BatchSize, SeqLen, EmbedDim)$.
+    \item Mask (conceptual for additive): $(BatchSize, 1, 1 \text{ or } SeqLen, SeqLen)$, with $-\infty$ for masked positions.
+    \item Output: $(BatchSize, SeqLen, EmbedDim)$.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula (Forward Pass - Simplified for one head for clarity, extendable to multi-head):}
+\mathformulabox{
+SelfAttention.forward(x, mask_opt) \rightarrow OutputTensor
+\{
+  Q \leftarrow Linear_{query}(x); K \leftarrow Linear_{key}(x); V \leftarrow Linear_{value}(x);
+  %* Reshape Q, K, V for multi-head if num_heads > 1: Q_h, K_h, V_h *%)
+  
+  Energy \leftarrow MatMul(Q_h, Transpose(K_h, -2, -1)) / Sqrt(head_dim);
+  IF (mask_opt \neq Null) THEN Energy \leftarrow Energy + mask_opt; %* Additive mask *%)
+  
+  AttnWeights \leftarrow Softmax(Energy, dim=-1);
+  WeightedV \leftarrow MatMul(AttnWeights, V_h);
+  
+  %* Transpose and reshape WeightedV to concat heads *%)
+  Output_{concat} \leftarrow Reshape_Concat_Heads(WeightedV);
+  Output_{final} \leftarrow Linear_{fc\_out}(Output_{concat});
+  RETURN Output_{final};
+\}
+}
+
+\subsubsection{Element: Class \texttt{MultiHeadAttention(nn.Module)}}
+\paragraph{Description:} A wrapper around PyTorch's built-in \texttt{nn.MultiheadAttention} layer, configured with \texttt{batch\_first=True}.
+\paragraph{Parameters (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{embed\_dim: int}: Total dimension of the model.
+    \item \texttt{num\_heads: int}: Number of parallel attention heads. \texttt{embed\_dim} must be divisible by \texttt{num\_heads}.
+\end{itemize}
+\paragraph{Key Layers (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{self.attention}: An instance of \texttt{torch.nn.MultiheadAttention}.
+\end{itemize}
+\paragraph{Forward Pass (\texttt{forward(self, query, key, value, key\_padding\_mask=None, attn\_mask=None)})}
+\paragraph{Actions Undertaken:} Directly calls the forward method of the internal \texttt{nn.MultiheadAttention} layer.
+\paragraph{Input/Output Shapes (for \texttt{batch\_first=True}):}
+\begin{itemize}
+    \item \texttt{query, key, value}: $(BatchSize, SeqLen, EmbedDim)$.
+    \item \texttt{key\_padding\_mask}: $(BatchSize, KeySeqLen)$ where \texttt{True} indicates padding.
+    \item \texttt{attn\_mask}: $(QuerySeqLen, KeySeqLen)$ or broadcastable, where $-\infty$ (for additive) or \texttt{True} (for boolean) indicates masking.
+    \item Output \texttt{attn\_output}: $(BatchSize, QuerySeqLen, EmbedDim)$.
+    \item Output \texttt{attn\_weights}: $(BatchSize, QuerySeqLen, KeySeqLen)$.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula (Forward Pass):}
+\mathformulabox{
+MultiHeadAttention.forward(q, k, v, key_pad_mask_opt, attn_mask_opt) \rightarrow Tuple[OutputTensor, WeightsTensor]
+\{
+  %* Assumes q, k, v are (N, L, E) or (N, S, E) if L=S for self-attention *%)
+  (attn_out, attn_w) \leftarrow PyTorch_nn_MHA(q, k, v, 
+                                    key_padding_mask=key_pad_mask_opt, 
+                                    attn_mask=attn_mask_opt,
+                                    embed_dim_to_check=self.embed_dim, %* internal to nn.MHA *%)
+                                    num_heads=self.num_heads, %* internal to nn.MHA *%)
+                                    batch_first=True);
+  RETURN (attn_out, attn_w);
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Contains example usage to test both \texttt{SelfAttention} and \texttt{MultiHeadAttention} layers.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Defines sample input dimensions (batch size, sequence length, embedding dimension, number of heads).
+    \item Instantiates \texttt{SelfAttention}, creates dummy input tensor and a simple mask, passes them through the layer, and prints input/output shapes.
+    \item Instantiates \texttt{MultiHeadAttention}, creates dummy query, key, value tensors, a key padding mask, and a causal attention mask. Passes them through the layer and prints input/output shapes.
+\end{itemize}
+\paragraph{Algorithm/Process:} Instantiation of implemented \texttt{nn.Module}s, generation of random tensors using \texttt{torch.rand} and specific mask tensors, forward pass calls, and printing of tensor shapes for verification.
+
+\newpage
+\section{File: \texttt{src/core/Untitled-1.py}}
+\subsection{Overall Purpose}
+This file appears to be a scratchpad or a temporary, unsaved file used for experimentation or testing small code snippets. It does not seem to have a defined, integrated role within the main project structure based on its name and content. The content includes basic \texttt{numpy} array manipulations, \texttt{pandas} DataFrame creation, and a simple class definition.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{numpy} (as \texttt{np}): For numerical operations, specifically array creation and manipulation.
+    \item \texttt{pandas} (as \texttt{pd}): For data manipulation using DataFrames.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  ThirdParty_Numeric(numpy),
+  ThirdParty_Data(pandas)
+\}
+}
+
+\subsection{Major Code Elements}
+\subsubsection{Element: Function \texttt{some\_function()}}
+\paragraph{Description:} A standalone function demonstrating simple \texttt{numpy} array operations and \texttt{pandas} DataFrame creation and access.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Creates a numpy array \texttt{a}.
+    \item Creates a new array \texttt{b} by element-wise multiplication of \texttt{a} by 2. Prints \texttt{b}.
+    \item Creates a pandas DataFrame \texttt{df} from a dictionary. Prints \texttt{df}.
+    \item Accesses and prints a specific element from the DataFrame using \texttt{df.iloc}.
+\end{itemize}
+\paragraph{Algorithm/Process:} Basic array and DataFrame operations as provided by \texttt{numpy} and \texttt{pandas}.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+some_function() \rightarrow void
+\{
+  a \leftarrow NumpyArray_Create([1, 2, 3, 4, 5]);
+  b \leftarrow ElementWiseMultiply(a, 2);
+  Print("Array b:", b);
+  
+  data_dict \leftarrow \{'col1': [1,2,3], 'col2': ['A','B','C']\};
+  df \leftarrow PandasDataFrame_Create(data_dict);
+  Print("DataFrame:", df);
+  
+  element \leftarrow DataFrame_Access(df, row_idx=0, col_label='col1');
+  Print("Accessing element:", element);
+\}
+}
+
+\subsubsection{Element: Class \texttt{TempClass}}
+\paragraph{Description:} A simple example class with a constructor, a method to set a value (randomized), and a string representation method.
+\paragraph{Fields (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{self.name: str}.
+    \item \texttt{self.value: Optional[float]} (initialized to \texttt{None}).
+\end{itemize}
+\paragraph{Methods:}
+\begin{itemize}
+    \item \texttt{\_\_init\_\_(self, name)}: Initializes \texttt{name} and \texttt{value}.
+    \item \texttt{set\_value(self, val)}: Sets \texttt{self.value} to \texttt{val} multiplied by a random number between 0 and 1. Prints the new value.
+    \item \texttt{\_\_str\_\_(self)}: Returns a string representation of the object.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula (\texttt{set\_value} method):}
+\mathformulabox{
+TempClass.set_value(self, val_in) \rightarrow void
+\{
+  self.value \leftarrow val_in * RandomFloat(0, 1);
+  Print(self.name + " set value to (randomized): " + self.value);
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Executes when the script is run directly. Calls \texttt{some\_function} and demonstrates usage of \texttt{TempClass}.
+\paragraph{Actions Undertaken:}
+\begin{itemize}
+    \item Prints an entry message.
+    \item Calls \texttt{some\_function()}.
+    \item Creates an instance of \texttt{TempClass}.
+    \item Calls the \texttt{set\_value} method on the instance.
+    \item Prints the string representation of the instance.
+    \item Includes a comment noting the file's likely temporary nature.
+\end{itemize}
+\paragraph{Algorithm/Process:} Sequential execution of the defined function and class methods.
+
+\newpage
+\section{File: \texttt{src/data/processing.py}}
+\subsection{Overall Purpose}
+This module provides tools for common data preprocessing tasks, primarily designed to operate on Pandas DataFrames. It includes classes for data cleaning (handling missing values) and feature scaling, along with a function for one-hot encoding categorical features. It also demonstrates a simple pipeline function combining these operations. Fallback logging is included if the project's main logger is unavailable.
+
+\subsection{Import Statements}
+\begin{itemize}
+    \item \texttt{pandas} (as \texttt{pd}): Core library for DataFrame manipulation.
+    \item \texttt{numpy} (as \texttt{np}): Used for numerical operations and selecting dtypes.
+    \item \texttt{typing}: For type hints (\texttt{Optional, List, Dict, Any, Union}).
+    \item \texttt{sklearn.preprocessing}: Provides \texttt{StandardScaler}, \texttt{MinMaxScaler}, \texttt{OneHotEncoder} (though \texttt{OneHotEncoder} from sklearn is imported but \texttt{pd.get\_dummies} is used).
+    \item \texttt{sklearn.model\_selection}: Provides \texttt{train\_test\_split} (imported but not used in the provided snippet).
+    \item \texttt{pathlib.Path}: (Imported but not directly used in the provided snippet).
+    \item \texttt{logging}: Imported as a placeholder, but project logger is preferred.
+    \item Project-specific (attempted): \texttt{src.utils.logger.log\_statement}, \texttt{src.data.constants.LOG\_INS}.
+    \item \texttt{inspect}: Used with \texttt{LOG\_INS} for structured logging.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula for Imports:}
+\mathformulabox{
+Imports \leftarrow \{
+  ThirdParty_Data(pandas, numpy),
+  StdLib_Typing(Optional, List, Dict, Any, Union),
+  ThirdParty_ML(sklearn.preprocessing.{StandardScaler, MinMaxScaler, OneHotEncoder}, sklearn.model_selection.train_test_split),
+  StdLib_Path(Path), StdLib_Logging(logging), StdLib_Inspect(inspect),
+  Project_Utils(src.utils.logger.log_statement) \text{ (optional)},
+  Project_Data(src.data.constants.LOG_INS) \text{ (optional)}
+\}
+}
+
+\subsection{Data Preprocessing Classes and Functions}
+\subsubsection{Element: Class \texttt{DataCleaner}}
+\paragraph{Description:} Handles common data cleaning tasks, specifically focusing on missing value imputation.
+\paragraph{Parameters (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{missing\_value\_strategy: str}: Strategy for imputation ('mean', 'median', 'mode', 'drop', 'constant'). Defaults to 'mean'.
+    \item \texttt{constant\_fill\_value: Optional[Union[int, float, str]]}: Value to use if strategy is 'constant'.
+\end{itemize}
+\paragraph{Key Attributes:} \texttt{self.fill\_values\_}: Stores learned imputation values (e.g., mean) for each column.
+\paragraph{Methods:}
+\begin{itemize}
+    \item \texttt{fit(self, df: pd.DataFrame, columns: Optional[List[str]] = None)}: Calculates imputation values (mean, median, mode) for specified numerical columns (or all numerical if \texttt{columns} is \texttt{None}) from the input DataFrame \texttt{df} and stores them in \texttt{self.fill\_values\_}.
+    \item \texttt{transform(self, df: pd.DataFrame) -> pd.DataFrame}: Applies the learned imputation to the input DataFrame \texttt{df}. If strategy is 'drop', it drops rows with any remaining NAs.
+    \item \texttt{fit\_transform(...)}: Convenience method calling \texttt{fit} then \texttt{transform}.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula (\texttt{fit} for 'mean' strategy):}
+\mathformulabox{
+DataCleaner.fit(self, df, cols_opt) \rightarrow self
+\{
+  target_cols \leftarrow IF(cols_opt \neq Null, cols_opt, SelectNumericCols(df));
+  FOR col_name IN target_cols DO \{
+    IF (HasMissingValues(df[col_name])) THEN \{
+      IF (self.missing_value_strategy == "mean") THEN self.fill_values_[col_name] \leftarrow Mean(df[col_name]);
+      %* ... other strategies ... *%)
+    \}
+  \}
+  RETURN self;
+\}
+}
+
+\subsubsection{Element: Class \texttt{FeatureScaler}}
+\paragraph{Description:} Scales numerical features using either Standard (Z-score) or MinMax scaling.
+\paragraph{Parameters (\texttt{\_\_init\_\_}):}
+\begin{itemize}
+    \item \texttt{method: str}: Scaling method ('standard' or 'minmax'). Defaults to 'standard'.
+\end{itemize}
+\paragraph{Key Attributes:} \texttt{self.scaler\_}: Stores the fitted scikit-learn scaler object. \texttt{self.columns\_}: Stores names of columns the scaler was fitted on.
+\paragraph{Methods:}
+\begin{itemize}
+    \item \texttt{fit(self, df: pd.DataFrame, columns: Optional[List[str]] = None)}: Initializes and fits the chosen scaler (\texttt{StandardScaler} or \texttt{MinMaxScaler}) on the specified numerical columns of DataFrame \texttt{df}.
+    \item \texttt{transform(self, df: pd.DataFrame) -> pd.DataFrame}: Applies the fitted scaling transformation to the relevant columns of DataFrame \texttt{df}.
+    \item \texttt{fit\_transform(...)}: Convenience method.
+\end{itemize}
+\paragraph{Mathematical/Logical Formula (\texttt{fit} for 'standard' strategy):}
+\mathformulabox{
+FeatureScaler.fit(self, df, cols_opt) \rightarrow self
+\{
+  target_cols \leftarrow IF(cols_opt \neq Null, cols_opt, SelectNumericCols(df));
+  IF (IsEmpty(target_cols)) THEN RETURN self;
+  
+  IF (self.method == "standard") THEN self.scaler_ \leftarrow SKLearn_StandardScaler_New();
+  ELSE IF (self.method == "minmax") THEN self.scaler_ \leftarrow SKLearn_MinMaxScaler_New();
+  
+  SKLearn_Scaler_Fit(self.scaler_, df[target_cols]);
+  self.columns_ \leftarrow target_cols;
+  RETURN self;
+\}
+}
+
+\subsubsection{Element: Function \texttt{one\_hot\_encode\_column(df: pd.DataFrame, column\_name: str, drop\_first: bool = False) -> pd.DataFrame}}
+\paragraph{Description:} Performs one-hot encoding on a specified categorical column using \texttt{pandas.get\_dummies}.
+\paragraph{Parameters:} Input DataFrame \texttt{df}, \texttt{column\_name} to encode, \texttt{drop\_first} flag for \texttt{get\_dummies}.
+\paragraph{Actions Undertaken:} Creates dummy variables for the categories in the specified column, concatenates them to the DataFrame, and drops the original categorical column.
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+one_hot_encode_column(df_in, col_str, drop_1st_bool) \rightarrow DataFrame
+\{
+  IF (col_str \notin Columns(df_in)) THEN RAISE ValueError("Column not found");
+  dummy_vars_df \leftarrow Pandas_GetDummies(df_in[col_str], prefix=col_str, drop_first=drop_1st_bool);
+  df_out \leftarrow Pandas_Concat([Pandas_DropColumn(df_in, col_str), dummy_vars_df], axis=1);
+  RETURN df_out;
+\}
+}
+
+\subsubsection{Element: Function \texttt{preprocess\_dataframe(df: pd.DataFrame, numerical\_cols: List[str], categorical\_cols: List[str], scaling\_method: str = 'standard', missing\_strategy: str = 'mean') -> pd.DataFrame}}
+\paragraph{Description:} A pipeline function that applies a sequence of preprocessing steps: data cleaning (missing value imputation), one-hot encoding for categorical features, and scaling for numerical features.
+\paragraph{Parameters:} Input DataFrame \texttt{df}, lists of \texttt{numerical\_cols} and \texttt{categorical\_cols}, \texttt{scaling\_method}, \texttt{missing\_strategy}.
+\paragraph{Actions Undertaken:}
+\begin{enumerate}
+    \item Creates a copy of the input DataFrame.
+    \item Applies \texttt{DataCleaner} to impute missing values in numerical columns.
+    \item Iterates through \texttt{categorical\_cols}, applying \texttt{one\_hot\_encode\_column} to each.
+    \item Applies \texttt{FeatureScaler} to the (remaining) numerical columns.
+    \item Returns the processed DataFrame.
+\end{enumerate}
+\paragraph{Mathematical/Logical Formula:}
+\mathformulabox{
+preprocess_dataframe(df_orig, num_cs, cat_cs, scale_m, missing_s) \rightarrow DataFrame
+\{
+  df_proc \leftarrow Copy(df_orig);
+  
+  cleaner_obj \leftarrow New DataCleaner(\{missing_value_strategy: missing_s\});
+  df_proc \leftarrow cleaner_obj.fit_transform(df_proc, columns=num_cs);
+  
+  FOR c_col IN cat_cs DO \{
+    IF (c_col \in Columns(df_proc)) THEN df_proc \leftarrow one_hot_encode_column(df_proc, c_col);
+    ELSE Log(warn, "Categorical col for OHE not found: " + c_col);
+  \};
+  
+  IF (\neg IsEmpty(num_cs)) THEN \{
+    scaler_obj \leftarrow New FeatureScaler(\{method: scale_m\});
+    current_num_cols_for_scaling \leftarrow Filter(num_cs, lambda cn: cn \in Columns(df_proc) \land IsNumeric(df_proc[cn]));
+    IF (\neg IsEmpty(current_num_cols_for_scaling)) THEN df_proc \leftarrow scaler_obj.fit_transform(df_proc, columns=current_num_cols_for_scaling);
+    ELSE Log(warn, "No valid numerical columns for scaling after OHE");
+  \};
+  RETURN df_proc;
+\}
+}
+
+\subsubsection{Element: \texttt{if \_\_name\_\_ == "\_\_main\_\_":} Block}
+\paragraph{Description:} Contains example usage demonstrating the \texttt{DataCleaner}, \texttt{FeatureScaler}, \texttt{one\_hot\_encode\_column} function, and the \texttt{preprocess\_dataframe} pipeline on a sample Pandas DataFrame.
+\paragraph{Actions Undertaken:} Creates a sample DataFrame with numerical and categorical data, including missing values. Applies each preprocessing component individually and then the full pipeline, logging the state of the DataFrame after each step.
+\paragraph{Algorithm/Process:} Instantiation of classes and function calls with a predefined sample DataFrame to illustrate the effects of each preprocessing step.
+
+\end{document}

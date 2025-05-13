@@ -16,8 +16,15 @@ import inspect
 from pathlib import Path
 import pickle
 import zipfile
+# src/core/models.py
+from pydantic import BaseModel, RootModel, Field, HttpUrl, field_validator as validator
+from typing import Optional, List, Dict, Any, Union
+from datetime import datetime, timezone # Ensure timezone is imported
+from pathlib import Path
 from src.utils.logger import log_statement
 from src.data.constants import *
+from src.utils.config import *
+from src.utils.hashing import HashInfo
 
 # Import necessary components from PyTorch Geometric if used
 try:
@@ -32,6 +39,186 @@ except ImportError:
     class GATConv: pass
     class Data: pass
     class Batch: pass
+
+class FileVersion(BaseModel):
+    """Represents a specific version of a file in its application-level history."""
+    version_number: int = Field(VER_NO, description="Sequential application-level version number.")
+    timestamp_utc: datetime = Field(description="Timestamp of this version record (UTC).")
+    git_commit_hash: Optional[str] = Field(None, description="Git commit hash associated with the commit that established this version.")
+    change_description: Optional[str] = Field(None, description="Brief description of changes in this version or reason for new version.")
+    size_bytes: Optional[int] = Field(None, description="Size of the file at this version in bytes.")
+    # Storing custom_hashes as a dictionary for this version, similar to FileMetadataEntry
+    custom_hashes: List[HashInfo] = Field(default_factory=list, description="List of custom hashes for the file content at this version.") # CHANGED HERE
+
+    """Represents a specific version of a file in its application-level history."""
+    # Ensure timestamps are correctly handled
+    @validator('timestamp_utc', mode='before', check_fields=True)
+    def ensure_timestamp_utc(cls, v):
+        if isinstance(v, str):
+            try:
+                dt_obj = datetime.fromisoformat(v.replace('Z', '+00:00'))
+                if dt_obj.tzinfo is None:
+                    return dt_obj.replace(tzinfo=timezone.utc)
+                return dt_obj.astimezone(timezone.utc)
+            except ValueError:
+                raise ValueError(f"Invalid datetime string format for timestamp_utc: {v}")
+        elif isinstance(v, datetime):
+            if v.tzinfo is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v.astimezone(timezone.utc)
+        return v
+
+class FileMetadataEntry(BaseModel):
+    """
+    Pydantic model for a single file's metadata entry, aligning with REFINED-PROPOSALS.
+    """
+    filepath_relative: str = Field(..., description="Path relative to the repository root (POSIX format). Acts as the primary key.")
+    filename: Optional[str] = Field(None, description="Filename with extension.")
+    extension: Optional[str] = Field(None, description="File extension without the dot (e.g., 'txt', 'csv').")
+    
+    size_bytes: Optional[int] = Field(None, description="Current size of the file in bytes.")
+    os_last_modified_utc: Optional[datetime] = Field(None, description="OS last modification timestamp (UTC).")
+    os_created_utc: Optional[datetime] = Field(None, description="OS creation timestamp (UTC) - platform dependent (ctime).")
+    
+    git_object_hash_current: Optional[str] = Field(None, description="Git blob hash of the current file content as known to the last metadata commit.")
+    
+    custom_hashes: Dict[str, str] = Field(default_factory=dict, description="Dictionary of custom content hashes (e.g., {'md5': 'value', 'sha256': 'value'}).")
+
+    date_added_to_metadata_utc: datetime = Field(description="Timestamp when this entry was first added to metadata (UTC).")
+    last_metadata_update_utc: datetime = Field(description="Timestamp of the last update to this metadata entry (UTC).")
+    
+    application_status: str = Field(DEFAULT_APPLICATION_STATUS, description="Current status of the file in the application/pipeline.")
+    
+    user_metadata: Dict[str, Any] = Field(default_factory=dict, description="User-defined arbitrary metadata.")
+    
+    version_current: int = Field(1, description="Current active application-level version number for this file.")
+    version_history_app: List[FileVersion] = Field(default_factory=list, description="Application-level version history of this file.")
+
+    # Optional fields from repo_handlerORIG.py or for future use
+    source_uri: Optional[Union[HttpUrl, str]] = Field(None, description="Original source URI of the file, if applicable.")
+    # processing_attempts: int = Field(0, description="Number of times processing has been attempted on this file.") # Example, add if needed
+    # last_processing_date_utc: Optional[datetime] = Field(None, description="Timestamp of the last processing attempt (UTC).") # Example
+    tags: List[str] = Field(default_factory=list, description="List of tags associated with the file.")
+    external_system_link: Optional[Dict[str, str]] = Field(default_factory=dict, description="Links to this file/asset in external systems.")
+
+    original_filename_if_compressed: Optional[str] = Field(None, description="Original filename if the stored file in the repository is a compressed version (e.g., 'data.csv' if 'data.csv.gz' is stored).")
+    compression_type: Optional[str] = Field(None, description="Type of compression used on the file stored in the repository (e.g., 'gzip').")
+
+    @validator('filepath_relative', mode='before', check_fields=True)
+    def normalize_filepath_relative(cls, v):
+        if isinstance(v, str):
+            return Path(v).as_posix() # Ensure POSIX-style separators
+        return v
+
+    @validator('extension', mode='before', check_fields=True)
+    def set_extension_from_filename_or_filepath(cls, v, values, **kwargs):
+        if v: # If extension is explicitly provided
+            return v.lower().lstrip('.')
+        
+        filename = values.get('filename')
+        if filename:
+            ext = Path(filename).suffix
+            if ext:
+                return ext.lower().lstrip('.')
+        
+        # If no filename, try to derive from filepath_relative
+        filepath_relative = values.get('filepath_relative')
+        if filepath_relative:
+            ext = Path(filepath_relative).suffix
+            if ext:
+                return ext.lower().lstrip('.')
+        return None
+
+    @validator('filename', mode='before', check_fields=True)
+    def set_filename_from_filepath(cls, v, values, **kwargs):
+        if v: # If filename is explicitly provided
+            return v
+        filepath_relative = values.get('filepath_relative')
+        if filepath_relative:
+            return Path(filepath_relative).name
+        return None
+
+    # Universal validator for all datetime fields to ensure they are UTC and correctly parsed/set
+    @validator('os_last_modified_utc', 'os_created_utc', 'date_added_to_metadata_utc', 
+               'last_metadata_update_utc', # 'last_processing_date_utc' (if added back)
+               mode='before', check_fields=True)
+    def ensure_datetime_utc(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                # Handle ISO format strings, including those ending with 'Z'
+                dt_obj = datetime.fromisoformat(v.replace('Z', '+00:00'))
+            except ValueError:
+                # Try parsing if it's just a float timestamp (less ideal but might occur)
+                try:
+                    dt_obj = datetime.fromtimestamp(float(v), timezone.utc)
+                except (ValueError, TypeError):
+                    raise ValueError(f"Invalid datetime string or timestamp format: {v}")
+            
+            if dt_obj.tzinfo is None:
+                return dt_obj.replace(tzinfo=timezone.utc)
+            return dt_obj.astimezone(timezone.utc)
+        elif isinstance(v, (int, float)): # Treat as UNIX timestamp
+            return datetime.fromtimestamp(v, timezone.utc)
+        elif isinstance(v, datetime):
+            if v.tzinfo is None:
+                return v.replace(tzinfo=timezone.utc)
+            return v.astimezone(timezone.utc)
+        raise TypeError(f"Unsupported type for datetime field: {type(v)}")
+        
+    class Config:
+        validate_assignment = True
+        # Ensure Pydantic can handle Path objects if they are ever passed directly (though we convert to str for filepath_relative)
+        arbitrary_types_allowed = True # If Path objects were stored directly in models
+
+class MetadataCollection(RootModel[Dict[str, FileMetadataEntry]]):
+    """
+    Represents the entire metadata collection, typically the content of metadata.json.
+    The keys are relative file paths (strings), and values are FileMetadataEntry objects.
+    """
+    # Convenience methods to interact with the collection
+    # Need to access via self.root now
+    def get_entry(self, filepath_relative: str) -> Optional[FileMetadataEntry]:
+        # Ensure filepath_relative is normalized for lookup, as keys are stored normalized
+        normalized_key = Path(filepath_relative).as_posix()
+        return self.root.get(normalized_key)
+
+    def add_or_update_entry(self, entry: FileMetadataEntry):
+        # filepath_relative in entry should already be normalized by its validator
+        self.root[entry.filepath_relative] = entry
+
+    def remove_entry(self, filepath_relative: str) -> Optional[FileMetadataEntry]:
+        # Ensure filepath_relative is normalized for lookup
+        normalized_key = Path(filepath_relative).as_posix()
+        return self.root.pop(normalized_key, None)
+
+    # Allow iteration over the model as if it were the root dict
+    def __iter__(self):
+        return iter(self.root)
+
+    def __getitem__(self, item):
+        # Ensure item is normalized if it's a path string
+        normalized_item = Path(item).as_posix() if isinstance(item, str) else item
+        return self.root[normalized_item]
+
+    def __len__(self):
+        return len(self.root)
+
+    # If you need to serialize back to a plain dict for metadata_handler.write_metadata
+    def to_dict(self) -> Dict[str, Any]:
+        # Pydantic's .dict() is deprecated for RootModel's root directly.
+        # We need to serialize each FileMetadataEntry.
+        return {key: value.model_dump(by_alias=True, exclude_none=True) for key, value in self.root.items()}
+
+# In your repo_handler.py, when you call write_metadata, you'd now use:
+# self.metadata_handler.write_metadata(metadata_collection.to_dict())
+# instead of metadata_collection.dict(by_alias=True)['__root__']
+#
+# When parsing from read_metadata:
+# metadata_collection = MetadataCollection.model_validate(all_metadata_dict if all_metadata_dict else {})
+# (Pydantic v2 uses model_validate or model_validate_json instead of model_validate/parse_raw)
+
 
 # --- Placeholder for GATLayer (implied by tests.txt) ---
 class GATLayer(nn.Module):
@@ -359,3 +546,67 @@ def load_model_from_checkpoint(
         # Catch unexpected errors during the process
         log_statement(loglevel='critical', logstatement=f"{LOG_INS_CUST}:CRITICAL>>CRITICAL: Unexpected error loading model from checkpoint {checkpoint_path}: {e}", main_logger=__file__, exc_info=True)
         return None
+
+if __name__ == "__main__":
+    print("--- FileVersion Example ---")
+    now_dt = datetime.now(timezone.utc)
+    version_entry = FileVersion(
+        version_number=1, 
+        timestamp_utc=now_dt, # Pass datetime object
+        change_description="Initial check-in.",
+        size_bytes=100,
+        custom_hashes={"md5": "hashval1"}
+    )
+    print(version_entry.model_dump_json(indent=2))
+
+    print("\n--- FileMetadataEntry Example ---")
+    file_meta_data_dict = {
+        "filepath_relative": "data/raw/my_document.txt",
+        # filename and extension will be derived
+        "size_bytes": 1024,
+        "os_last_modified_utc": datetime.now(timezone.utc).isoformat(), # Pass ISO string
+        "custom_hashes": {"md5": "d41d8cd98f00b204e9800998ecf8427e", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        "date_added_to_metadata_utc": now_dt.isoformat(), # Pass ISO string
+        "last_metadata_update_utc": now_dt, # Pass datetime object
+        "application_status": "new",
+        "user_metadata": {"project": "alpha", "source_type": "upload"},
+        "version_current": 2,
+        "version_history_app": [version_entry.dict()], # Pass dict from FileVersion Pydantic model
+        "tags": ["document", "important"]
+    }
+    file_entry = FileMetadataEntry(**file_meta_data_dict)
+    print(f"Derived filename: {file_entry.filename}, Derived extension: {file_entry.extension}")
+    print(file_entry.model_dump_json(indent=2, exclude_none=True))
+    
+    # Test derivation and default factory for timestamps
+    file_meta_derive = FileMetadataEntry(filepath_relative="another/file.pdf", date_added_to_metadata_utc=datetime.now(timezone.utc), last_metadata_update_utc=datetime.now(timezone.utc))
+    print("\nDerived filename/extension for another/file.pdf:")
+    print(f"Filename: {file_meta_derive.filename}, Extension: {file_meta_derive.extension}")
+    print(f"Date added: {file_meta_derive.date_added_to_metadata_utc}")
+
+
+    print("\n--- MetadataCollection Example ---")
+    # Create dicts from Pydantic models for the collection
+    collection_data = {
+        file_entry.filepath_relative: file_entry.dict(by_alias=True),
+        file_meta_derive.filepath_relative: file_meta_derive.dict(by_alias=True)
+    }
+    # Initialize MetadataCollection with a dictionary of raw data that can be parsed into FileMetadataEntry
+    metadata_collection = MetadataCollection.model_validate(collection_data)
+    print(f"Collection has {len(metadata_collection.__root__)} entries.")
+    retrieved_entry = metadata_collection.get_entry("data/raw/my_document.txt")
+    if retrieved_entry:
+        print(f"Retrieved status for my_document.txt: {retrieved_entry.application_status}")
+
+    # Example of adding a new entry (assuming it's already a Pydantic model instance)
+    new_file_data = FileMetadataEntry(
+        filepath_relative="new/data/sample.json",
+        size_bytes=2048,
+        os_last_modified_utc=datetime.now(timezone.utc),
+        custom_hashes={"md5": "someotherhash"},
+        date_added_to_metadata_utc=datetime.now(timezone.utc),
+        last_metadata_update_utc=datetime.now(timezone.utc)
+    )
+    metadata_collection.add_or_update_entry(new_file_data)
+    print(f"Collection size after adding new entry: {len(metadata_collection.__root__)}")
+    print(metadata_collection.model_dump_json(indent=2, exclude_none=True)) # Can be verbose

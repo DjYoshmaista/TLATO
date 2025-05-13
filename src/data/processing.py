@@ -34,7 +34,7 @@ import csv
 import datetime as dt
 from datetime import timezone # Import timezone
 import zstandard as zstd
-from src.core.repo_handler import DataRepository
+from src.core.repo_handler import RepoHandler
 from src.data.constants import *
 from src.utils.config import *
 from src.utils.compression import *
@@ -238,10 +238,10 @@ class DataProcessor:
 
         # --- Repository Initialization ---
         try:
-            self.repo = DataRepository(repo_path=self.repo_filepath)
-            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor's internal DataRepository initialized with: {self.repo_filepath}", main_logger=init_logger_name)
+            self.repo = RepoHandler(metadata_compression='zst', repository_path=self.repo_filepath)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor's internal RepoHandler initialized with: {self.repo_filepath}", main_logger=init_logger_name)
             df_len = len(self.repo.df) if self.repo.df is not None else 'None'
-            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor internal DataRepository load complete. DF length: {len(self.repo.df) if self.repo.df is not None else 'None'}", main_logger=__file__)
+            log_statement(loglevel='info', logstatement=f"{LOG_INS}::DataProcessor internal RepoHandler load complete. DF length: {len(self.repo.df) if self.repo.df is not None else 'None'}", main_logger=__file__)
             if self.repo.df is not None and not self.repo.df.empty:
                 if COL_STATUS in self.repo.df.columns:
                     log_statement(loglevel='info', logstatement=f"{LOG_INS} >>> MORE DEBUG: Status column values IN LOADED DF (Top 10): {self.repo.df[COL_STATUS].head(10).tolist()}"
@@ -251,10 +251,10 @@ class DataProcessor:
             elif self.repo.df is not None:
                 log_statement(loglevel='error', logstatement=f"{LOG_INS} >>> MORE DEBUG: Loaded DataFrame is empty.", main_logger=__file__)
         except ValueError as init_ve:
-            log_statement(loglevel='exception', logstatement=f"{LOG_INS}::DataRepository initialization failed: {init_ve}", main_logger=init_logger_name)
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS}::RepoHandler initialization failed: {init_ve}", main_logger=init_logger_name)
             raise
         except Exception as init_e:
-            log_statement(loglevel='exception', logstatement=f"{LOG_INS}::Unexpected error initializing DataRepository: {init_e}", main_logger=init_logger_name, exc_info=True)
+            log_statement(loglevel='exception', logstatement=f"{LOG_INS}::Unexpected error initializing RepoHandler: {init_e}", main_logger=init_logger_name, exc_info=True)
             raise
 
         # --- State Management ---
@@ -849,7 +849,7 @@ JSON Output:
         else:
              log_statement(loglevel="info", logstatement=f"{LOG_INS}::Saving {len(df_copy)} processed entries to: {output_path}", main_logger=save_logger_name)
 
-        # --- Ensure Schema Alignment (similar to DataRepository.save) ---
+        # --- Ensure Schema Alignment (similar to RepoHandler.save) ---
         current_cols = df_copy.columns.tolist()
         added_cols_save = []
         for col_const in expected_columns:
@@ -869,7 +869,7 @@ JSON Output:
             log_statement(loglevel='error', logstatement=f"{LOG_INS}::Save Processed Repo Error: Column mismatch after adding defaults. Missing: {ke}. Expected: {expected_columns}. Available: {df_copy.columns.tolist()}", main_logger=save_logger_name)
             return False # Cannot proceed if columns mismatch
 
-        # --- Type Prep and Saving Logic (Simplified from DataRepository.save) ---
+        # --- Type Prep and Saving Logic (Simplified from RepoHandler.save) ---
         temp_path = output_path.with_suffix(f'{output_path.suffix}.tmp_proc_{int(time.time())}')
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -878,7 +878,7 @@ JSON Output:
             with open(temp_path, 'wb') as f_out:
                 with cctx.stream_writer(f_out) as writer:
                     # Convert DF to CSV in memory, handling types appropriately for CSV
-                    # NOTE: Reusing the simple string conversion from DataRepository.save for now
+                    # NOTE: Reusing the simple string conversion from RepoHandler.save for now
                     df_stringified = df_copy.copy()
                     for col_const in expected_columns:
                         if col_const in df_stringified.columns:
@@ -1503,7 +1503,7 @@ JSON Output:
     #         print(f"{LOG_INS}:DEBUG>>Calling update_entry for {file_name_hint}. Final Status: '{updated_info[COL_STATUS]}'.")
     #         print(f"{LOG_INS}:DEBUG>>Data being sent to update_entry: {updated_info}")
     #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE Calling update_entry for {file_name_hint}. Final Status: '{updated_info[COL_STATUS]}'. Update Keys: {list(updated_info.keys())}", main_logger=main_logger_name)
-    #         # Use self.repo which should be the DataRepository instance for the MAIN repo
+    #         # Use self.repo which should be the RepoHandler instance for the MAIN repo
     #         self.repo.update_entry(absolute_file_path, **updated_info)
     #         print(f"{LOG_INS}:DEBUG>>update_entry call returned for {file_name_hint}.")
     #         log_statement(loglevel='debug', logstatement=f"{LOG_INS}::PROCESS_FILE update_entry call returned for {file_name_hint}.", main_logger=main_logger_name)
@@ -3180,7 +3180,7 @@ JSON Output:
 class Tokenizer:
     """ Loads processed, tokenizes, saves compressed tensors. """
     def __init__(self, max_workers: int | None = None):
-        self.repo = DataRepository(repo_path=TOKENIZED_REPO_FILENAME)
+        self.repo = RepoHandler(metadata_compression='zst', repository_path=TOKENIZED_REPO_FILENAME)
         resolved_max_workers = max_workers if max_workers is not None else DataProcessingConfig.MAX_WORKERS
         self.max_workers = max(1, resolved_max_workers)
         log_statement(loglevel='info', logstatement=f"{LOG_INS}::Initializing Tokenizer with max_workers={self.max_workers}", main_logger=__file__)
