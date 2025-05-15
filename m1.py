@@ -662,14 +662,13 @@ def set_data_directory(): # Added app_state argument as it's likely needed
             # Pass the data directory and the calculated central storage path
             target_repo = RepoHandler(
                 data_path=folder_path_str,
-                repo_hash=generate_data_hash(Path(repo_storage_path)),
-                repo_index_entry=None,
+                repo_hash_val=generate_data_hash(Path(repo_storage_path)),
                 metadata_compression='zst',
-                repository_path=target_path_resolved
+                repo_path=target_path_resolved
             )
             # Get existing data (or empty frame) from the instance
             existing_df = target_repo.df.copy() if target_repo.df is not None else pd.DataFrame(columns=target_repo.expected_columns_order)
-            log_statement('info', f"{LOG_INS}:INFO>>RepoHandler instance initialized. Loaded/Created state file {target_repo.repo_file} ({len(existing_df)} entries).", Path(__file__).stem)
+            log_statement('info', f"{LOG_INS}:INFO>>RepoHandler instance initialized. Loaded/Created state file {target_repo.repo} ({len(existing_df)} entries).", Path(__file__).stem)
             repo_schema_dict = COL_SCHEMA
 
         except ImportError: # Should not happen if imports are correct
@@ -864,13 +863,13 @@ def set_data_directory(): # Added app_state argument as it's likely needed
             target_repo.save(save_type='repository') # Save the main repository data (DF and Index)
 
             # *** Robust Save Confirmation ***
-            if target_repo.repo_file and target_repo.repo_file.exists():
-                 log_statement('info', f"{LOG_INS}:INFO>>Repository save completed successfully for {target_path_resolved}. File: {target_repo.repo_file}", Path(__file__).stem)
+            if target_repo.repo and target_repo.repo.exists():
+                 log_statement('info', f"{LOG_INS}:INFO>>Repository save completed successfully for {target_path_resolved}. File: {target_repo.repo}", Path(__file__).stem)
             else:
                  # Log error but don't raise immediately, allow app state update attempt
-                 log_statement('error', f"{LOG_INS}:ERROR>>Save reported success but repository file NOT FOUND at expected location: {target_repo.repo_file}", Path(__file__).stem)
+                 log_statement('error', f"{LOG_INS}:ERROR>>Save reported success but repository file NOT FOUND at expected location: {target_repo.repo}", Path(__file__).stem)
                  # Maybe raise a custom exception or return a failure status?
-                 # raise IOError(f"Save failed verification for {target_repo.repo_file}") # Optional: re-enable raise if needed
+                 # raise IOError(f"Save failed verification for {target_repo.repo}") # Optional: re-enable raise if needed
 
             # Update App State (use the repo instance and resolved path)
             app_state['repo'] = target_repo

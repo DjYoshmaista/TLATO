@@ -1,6 +1,7 @@
 import git
 import json
 import logging
+import torch
 import os
 import re
 import shutil
@@ -31,6 +32,9 @@ from src.data.constants import *
 from src.utils.helpers import process_file
 from src.core.models import FileMetadataEntry, FileVersion, MetadataCollection # Pydantic models
 from src.utils.hashing import *
+from src.utils.config import load_config
+
+Config = load_config()
 
 try:
     from src.utils.logger import log_statement as actual_log_statement
@@ -991,25 +995,29 @@ class RepoHandler:
     def __init__(
         self,
         data_path: Union[str, Path],
-        repository_path: Union[str, Path],
+        repo_path: Union[str, Path],
+        repo_hash_val: Optional[str] = None,
+        index_entry: Optional[Dict[str, Any]] = None,
         metadata_filename: str = METADATA_FILENAME, # From constants
         progress_dir_name: str = PROGRESS_DIR, # From constants
         create_if_not_exist: bool = True, 
         use_dvc: bool = False,
+        dvc_files_to_track: Optional[List[str]] = None,
+        config_settings: Optional[List[str]] = None,
+        repo_name: Optional[Config] = None,
+        auto_scan_on_init: Optional[str] = None,
         metadata_compression: Optional[str] = None, # New argument, e.g., "gzip"
         git_ops_helper: GitOpsHelper = None,
         metadata_handler: MetadataFileHandler = None,
-        repo_hash=None,
-        repo_index_entry=None
     ):
-        actual_log_statement("debug", f"{LOG_INS}:DEBUG>>RepoHandler initializing with path: {repository_path}", Path(__file__).stem)
+        actual_log_statement("debug", f"{LOG_INS}:DEBUG>>RepoHandler initializing with path: {repo_path}", Path(__file__).stem)
         self.data_path = data_path
         self.modifier = RepoModifier(git_ops_helper, metadata_handler)
         self.analyzer = RepoAnalyzer(git_ops_helper)
-        self.repo_path = Path(repository_path).resolve()
+        self.repo_path = Path(repo_path).resolve()
         self.is_new_repo = False
-        self.repo_hash = repo_hash
-        self.repo_index_entry = repo_index_entry
+        self.repo_hash_val = repo_hash_val
+        self.index_entry = index_entry
         try:
             self.repo = git.Repo(self.repo_path)
             actual_log_statement("info", f"{LOG_INS}:INFO>>Opened existing Git repository at: {self.repo_path}", Path(__file__).stem)
@@ -1054,7 +1062,341 @@ class RepoHandler:
         self.all_metadata_dict = self.metadata_handler.read_metadata()
         if not self.all_metadata_dict:
             actual_log_statement('warning', f"{LOG_INS}:WARNING>>Metadata file is empty or could not be read", Path(__file__).stem)
+
+        # --- DataFrame Cache Initialization ---
+        log_statement('debug', "Initializing DataFrame cache 'df'.", Path(__file__).stem) # Use Path(__file__).stem
+        try:
+            self.expected_columns_order: List[str] = list(REPO_FILE_SCHEMA.keys())
+            self.df: pd.DataFrame = pd.DataFrame(columns=self.expected_columns_order)
+            
+            # Ensure data types are set for an empty DataFrame if needed, though pandas
+            # often infers them on first append. For explicit control based on REPO_FILE_SCHEMA:
+            schema_dtypes = {col: REPO_FILE_SCHEMA[col]['type'] for col in self.expected_columns_order if REPO_FILE_SCHEMA[col]['type'] != 'datetime64[ns]'}
+            # Pandas doesn't directly map all string type names (e.g. 'string' to dtype on empty df)
+            # It's often better to let types be inferred or explicitly cast when adding data or after.
+            # For now, columns are set. Types will be handled during data addition.
+
+            self._df_lock: threading.RLock = threading.RLock()
+            self.max_df_cache_size: int = MAX_REPO_DF_CACHE_SIZE
+            log_statement('info', f"DataFrame cache 'df' initialized with columns: {self.expected_columns_order} and max size: {self.max_df_cache_size}.", Path(__file__).stem)
+        except Exception as e:
+            log_statement('error', f"Failed to initialize DataFrame cache 'df': {e}", Path(__file__).stem, True)
+            # Fallback: ensure df exists even if schema fails, to prevent immediate AttributeError
+            self.expected_columns_order = ['file_path', 'file_hash', 'status', 'timestamp'] # Minimal fallback
+            self.df = pd.DataFrame(columns=self.expected_columns_order) 
+            self._df_lock = threading.RLock()
+            self.max_df_cache_size = 100 # Minimal fallback size
+
         actual_log_statement('info', f"{LOG_INS}:INFO>>RepoHandler initialized successfully.", Path(__file__).stem)
+
+    def store_raw_file_info(self, file_path: Path, file_hash: str, size: int, metadata: Optional[Dict] = None) -> bool:
+        """Adds or updates metadata for a raw file in the repository cache (self.df)."""
+        with self._df_lock: # Assuming self._df_lock and self.df exist
+            entry_data = {
+                'file_id': generate_data_hash(str(file_path.relative_to(self.path))), # Example file_id
+                'file_path': str(file_path.relative_to(self.path)),
+                'absolute_path': str(file_path),
+                'file_hash': file_hash,
+                'size': size,
+                'status': 'untracked', # Or 'added' if immediately committed
+                'timestamp': pd.Timestamp.now(tz='UTC'),
+                'version': 1, # Initial version
+                'metadata_json': json.dumps(metadata) if metadata else None,
+                'zone_label': 'raw' # Example zone
+            }
+            # This would use the self.add_entry_to_cache_df method defined previously
+            return self.add_entry_to_cache_df(entry_data)
+
+    def _get_data_subdirectory(self, data_type: str) -> Path:
+        """Helper to get the designated subdirectory for a data type."""
+        if data_type == "processed":
+            subdir = self.path / PROCESSED_DATA_DIR
+        elif data_type == "tokenized":
+            subdir = self.path / TOKENIZED_DATA_DIR
+        elif data_type == "raw": # Raw files might be at the root or a 'raw' subdir
+            subdir = self.path / RAW_DATA_DIR # Assuming DATA_SUBDIR_RAW constant
+        else:
+            log_statement('error', f"Unknown data type '{data_type}' for subdirectory.", self.logger_name)
+            raise ValueError(f"Unknown data type '{data_type}'")
+        
+        subdir.mkdir(parents=True, exist_ok=True)
+        return subdir
+
+    def _commit_and_update_metadata(self, file_path_in_repo: Path, action_type: str, source_identifier: str, custom_metadata: Optional[Dict] = None, zone: str = "default") -> bool:
+        """Internal helper to commit a file and update metadata df."""
+        if not self.git_ops_helper or not self.git_ops_helper.is_valid_repo():
+            log_statement('warning', f"Git repository not available. Cannot commit {file_path_in_repo}.", self.logger_name)
+            return False
+        
+        try:
+            abs_file_path = self.path / file_path_in_repo
+            self.git_ops_helper.add_files([str(file_path_in_repo)]) # Pass path relative to repo root
+            commit_message = f"{action_type.capitalize()} {zone} data for {source_identifier}: {file_path_in_repo.name}"
+            self.git_ops_helper.commit(commit_message)
+            log_statement('info', f"Committed {file_path_in_repo} to Git.", self.logger_name)
+
+            file_hash_val = calculate_file_hash(abs_file_path) # You need this utility
+            entry_data = {
+                'file_id': generate_data_hash(str(file_path_in_repo)), # Unique ID based on relative path
+                'file_path': str(file_path_in_repo),
+                'absolute_path': str(abs_file_path),
+                'file_hash': file_hash_val,
+                'size': abs_file_path.stat().st_size,
+                'status': 'committed', # Or other relevant status
+                'timestamp': pd.Timestamp.now(tz='UTC'),
+                'version': 1, # Implement versioning logic if needed
+                'metadata_json': json.dumps(custom_metadata) if custom_metadata else None,
+                'zone_label': zone
+            }
+            self.add_entry_to_cache_df(entry_data) # Assumes this method exists and updates self.df
+            # Optionally update and save self.metadata_df (persisted one) too
+            # self._update_and_save_main_metadata_df(entry_data) 
+            return True
+        except Exception as e:
+            log_statement('error', f"Failed to commit or update metadata for {file_path_in_repo}: {e}", self.logger_name, exc_info=True)
+            return False
+
+    def load_processed_data(self, file_path_relative_to_repo: Union[str, Path]) -> Optional[pd.DataFrame]:
+        """Loads a processed data file (Parquet) from the repository."""
+        abs_path = self.path / file_path_relative_to_repo
+        if not abs_path.exists():
+            log_statement('warning', f"Processed data file not found: {abs_path}", self.logger_name)
+            return None
+        try:
+            df = pd.read_parquet(abs_path)
+            log_statement('info', f"Loaded processed data from: {abs_path}", self.logger_name)
+            return df
+        except Exception as e:
+            log_statement('error', f"Failed to load processed data from {abs_path}: {e}", self.logger_name, exc_info=True)
+            return None
+
+    def load_tokenized_data(self, file_path_relative_to_repo: Union[str, Path]) -> Optional[Any]:
+        """Loads a tokenized data file (.pt tensor) from the repository."""
+        abs_path = self.path / file_path_relative_to_repo
+        if not abs_path.exists():
+            log_statement('warning', f"Tokenized data file not found: {abs_path}", self.logger_name)
+            return None
+        try:
+            # Add 'map_location' if loading on a different device than saved
+            data = torch.load(abs_path, map_location=torch.device('cpu')) 
+            log_statement('info', f"Loaded tokenized data from: {abs_path}", self.logger_name)
+            return data
+        except Exception as e:
+            log_statement('error', f"Failed to load tokenized data from {abs_path}: {e}", self.logger_name, exc_info=True)
+            return None
+
+    def save_processed_data(self, data_df: pd.DataFrame, original_file_id: str, processing_metadata: Optional[Dict] = None) -> Optional[Path]:
+        """
+        Saves processed data (DataFrame) to the repository, versions it, and updates metadata.
+        Returns the path to the saved processed file.
+        """
+        if not self.git_ops_helper or not self.git_ops_helper.is_valid_repo():
+            log_statement('warning', "Git repository not available. Cannot save processed data with versioning.", self.logger_name)
+            # Fallback: Save without versioning? Or raise error? For now, just log and return None.
+            # Depending on strictness, you might save to a staging area without commit.
+            return None
+
+        processed_dir = self.path / PROCESSED_DATA_DIR
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate a unique filename, e.g., based on original_file_id and timestamp
+        timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        processed_filename = f"processed_{original_file_id}_{timestamp_str}.parquet"
+        output_path = processed_dir / processed_filename
+
+        try:
+            data_df.to_parquet(output_path, engine='pyarrow', compression='snappy') # Or 'gzip'
+            log_statement('info', f"Saved processed data to: {output_path}", self.logger_name)
+
+            # Add to Git and commit
+            relative_output_path = output_path.relative_to(self.path)
+            self.git_ops_helper.add_files([str(relative_output_path)])
+            commit_message = f"Add processed data for {original_file_id}: {processed_filename}"
+            self.git_ops_helper.commit(commit_message)
+            log_statement('info', f"Committed processed file {processed_filename} to Git.", self.logger_name)
+
+            # Update self.df (cache) and/or self.metadata_df
+            file_hash = calculate_file_hash(output_path) # Assuming calculate_file_hash utility
+            entry_data = {
+                'file_id': generate_data_hash(str(relative_output_path)),
+                'file_path': str(relative_output_path),
+                'absolute_path': str(output_path),
+                'file_hash': file_hash,
+                'size': output_path.stat().st_size,
+                'status': 'committed',
+                'timestamp': pd.Timestamp.now(tz='UTC'),
+                'version': 1, # Or manage versioning more explicitly
+                'metadata_json': json.dumps(processing_metadata) if processing_metadata else None,
+                'zone_label': 'processed'
+            }
+            self.add_entry_to_cache_df(entry_data)
+            # Potentially also update self.metadata_df and save it
+            # self._update_and_save_main_metadata_df(entry_data)
+
+            return output_path
+        except Exception as e:
+            log_statement('error', f"Failed to save/commit processed data {output_path}: {e}", self.logger_name, exc_info=True)
+            return None
+
+    def save_tokenized_data(self, tensor_data: Any, original_processed_file_id: str, tokenization_metadata: Optional[Dict] = None) -> Optional[Path]:
+        """
+        Saves tokenized data (e.g., PyTorch tensor) to the repository, versions it, and updates metadata.
+        Returns the path to the saved tokenized file.
+        """
+        if not self.git_ops_helper or not self.git_ops_helper.is_valid_repo():
+            log_statement('warning', "Git repository not available. Cannot save tokenized data with versioning.", self.logger_name)
+            return None
+
+        tokenized_dir = self.path / DATA_SUBDIR_TOKENIZED
+        tokenized_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        tokenized_filename = f"tokenized_{original_processed_file_id}_{timestamp_str}.pt"
+        output_path = tokenized_dir / tokenized_filename
+
+        try:
+            # Assuming tensor_data is a PyTorch tensor or similar that can be saved with torch.save
+            torch.save(tensor_data, output_path) # Add compression if needed
+            log_statement('info', f"Saved tokenized data to: {output_path}", self.logger_name)
+
+            relative_output_path = output_path.relative_to(self.path)
+            self.git_ops_helper.add_files([str(relative_output_path)])
+            commit_message = f"Add tokenized data for {original_processed_file_id}: {tokenized_filename}"
+            self.git_ops_helper.commit(commit_message)
+            log_statement('info', f"Committed tokenized file {tokenized_filename} to Git.", self.logger_name)
+            
+            file_hash = calculate_file_hash(output_path)
+            entry_data = {
+                'file_id': generate_data_hash(str(relative_output_path)),
+                'file_path': str(relative_output_path),
+                'absolute_path': str(output_path),
+                'file_hash': file_hash,
+                'size': output_path.stat().st_size,
+                'status': 'committed',
+                'timestamp': pd.Timestamp.now(tz='UTC'),
+                'version': 1,
+                'metadata_json': json.dumps(tokenization_metadata) if tokenization_metadata else None,
+                'zone_label': 'tokenized'
+            }
+            self.add_entry_to_cache_df(entry_data)
+            # Potentially also update self.metadata_df and save it
+
+            return output_path
+        except Exception as e:
+            log_statement('error', f"Failed to save/commit tokenized data {output_path}: {e}", self.logger_name, exc_info=True)
+            return None
+
+    # Methods to load data would also be needed, e.g.:
+    # def load_processed_data(self, file_id_or_path: Union[str, Path]) -> Optional[pd.DataFrame]: ...
+    # def load_tokenized_data(self, file_id_or_path: Union[str, Path]) -> Optional[Any]: ...
+
+    def add_entry_to_cache_df(self, entry_data: Dict[str, Any]) -> bool:
+        """
+        Adds a new entry to the 'df' cache in a thread-safe manner.
+        Manages the cache size by evicting the oldest entries if max_size is exceeded.
+
+        Args:
+            entry_data (Dict[str, Any]): A dictionary representing a single row to add.
+                                         Keys should match columns in REPO_FILE_SCHEMA.
+
+        Returns:
+            bool: True if the entry was added successfully, False otherwise.
+        """
+        if not isinstance(entry_data, dict):
+            log_statement('warning', "Invalid entry_data type for add_entry_to_cache_df, expected dict.", Path(__file__).stem)
+            return False
+
+        with self._df_lock:
+            try:
+                # Ensure all expected columns are present, fill missing with None or default
+                prepared_entry = {col: entry_data.get(col) for col in self.expected_columns_order}
+                
+                # Handle specific type conversions if necessary, e.g., for timestamp
+                if 'timestamp' in prepared_entry and prepared_entry['timestamp'] is not None:
+                    try:
+                        prepared_entry['timestamp'] = pd.to_datetime(prepared_entry['timestamp'], utc=True)
+                    except Exception as e_ts:
+                        log_statement('warning', f"Could not convert timestamp '{prepared_entry['timestamp']}' for entry: {e_ts}", Path(__file__).stem)
+                        prepared_entry['timestamp'] = pd.NaT # Or keep as is, or None
+
+                # Create a single-row DataFrame from the entry to ensure proper concatenation
+                # Using pd.concat is generally more robust for types than df.append (deprecated)
+                new_row_df = pd.DataFrame([prepared_entry], columns=self.expected_columns_order)
+                self.df = pd.concat([self.df, new_row_df], ignore_index=True)
+
+                # Enforce max_df_cache_size (FIFO eviction)
+                if len(self.df) > self.max_df_cache_size:
+                    num_to_evict = len(self.df) - self.max_df_cache_size
+                    self.df = self.df.iloc[num_to_evict:].reset_index(drop=True)
+                    log_statement('debug', f"DataFrame cache 'df' exceeded max size, evicted {num_to_evict} oldest entries.", Path(__file__).stem)
+                
+                log_statement('debug', f"Added entry to DataFrame cache 'df'. New size: {len(self.df)}", Path(__file__).stem)
+                return True
+            except Exception as e:
+                log_statement('error', f"Failed to add entry to DataFrame cache 'df': {e}", Path(__file__).stem, True)
+                return False
+
+    def get_cache_df_snapshot(self) -> pd.DataFrame:
+        """
+        Returns a thread-safe copy (snapshot) of the current 'df' cache.
+
+        Returns:
+            pd.DataFrame: A copy of the 'df' cache.
+        """
+        with self._df_lock:
+            try:
+                snapshot = self.df.copy()
+                log_statement('debug', "Retrieved snapshot of DataFrame cache 'df'.", Path(__file__).stem)
+                return snapshot
+            except Exception as e:
+                log_statement('error', f"Failed to get snapshot of DataFrame cache 'df': {e}", Path(__file__).stem, True)
+                # Return an empty DataFrame with expected columns in case of error
+                return pd.DataFrame(columns=self.expected_columns_order)
+
+    def process_cached_df_for_git(self, status_to_process: str = 'to_add') -> Optional[List[Dict[str, Any]]]:
+        """
+        Example method to process entries from the 'df' cache, e.g., for Git operations.
+        This is a placeholder and should be adapted to your specific needs.
+
+        Args:
+            status_to_process (str): Filter entries by this status for processing.
+
+        Returns:
+            Optional[List[Dict[str, Any]]]: A list of records to process, or None on error.
+        """
+        log_statement('info', f"Processing DataFrame cache 'df' for entries with status: '{status_to_process}'.", Path(__file__).stem)
+        df_snapshot = self.get_cache_df_snapshot() # Gets a thread-safe copy
+
+        if df_snapshot.empty:
+            log_statement('info', "DataFrame cache 'df' is empty, nothing to process.", Path(__file__).stem)
+            return []
+
+        try:
+            # Filter entries based on status
+            # Ensure 'status' column exists
+            if 'status' not in df_snapshot.columns:
+                log_statement('warning', "'status' column not found in DataFrame cache 'df'. Cannot process by status.", Path(__file__).stem)
+                return None
+                
+            entries_to_process_df = df_snapshot[df_snapshot['status'] == status_to_process]
+
+            if entries_to_process_df.empty:
+                log_statement('info', f"No entries found with status '{status_to_process}' in DataFrame cache 'df'.", Path(__file__).stem)
+                return []
+
+            # Convert to list of dicts for further processing (e.g., passing to Git add/commit)
+            records_to_process = entries_to_process_df.to_dict('records')
+            log_statement('info', f"Found {len(records_to_process)} entries to process with status '{status_to_process}'.", Path(__file__).stem)
+            
+            # Placeholder: Actual Git operations would happen here or be triggered based on these records
+            # For example, you might want to update their status in the df after processing.
+            # self.update_cache_df_status(ids_of_processed_entries, new_status='committed')
+            
+            return records_to_process
+
+        except Exception as e:
+            log_statement('error', f"Error processing DataFrame cache 'df': {e}", Path(__file__).stem, True)
+            return None
 
     def _initialize_git_ops_helper(self, create_if_not_exist: bool) -> Optional[GitOpsHelper]:
         """
@@ -2599,7 +2941,7 @@ if __name__ == "__main__":
         repo = git.Repo(repo_path)
         git_ops_helper = GitOpsHelper(repo)
         metdata_handler = MetadataFileHandler(repo_path=ROOT_DIR)
-        repo_handler = RepoHandler(repository_path="/home/yosh/repos/TLATOv4.1/", metadata_filename="/home/yosh/repos/TLATOv4.1/repositories/metadata.json.zst", progress_dir_name="/home/yosh/repos/TLATOv4.1/progress_dir", create_repo_if_not_exists=True, )
+        repo_handler = RepoHandler(repo_path="/home/yosh/repos/TLATOv4.1/", metadata_filename="/home/yosh/repos/TLATOv4.1/repositories/metadata.json.zst", progress_dir_name="/home/yosh/repos/TLATOv4.1/progress_dir", create_repo_if_not_exists=True, )
         # Example: Get summary
         summary = repo_handler.get_summary_metadata()
         actual_log_statement("info", f"{LOG_INS}:INFO>>Repository Summary: {summary}", Path(__file__).stem, False)

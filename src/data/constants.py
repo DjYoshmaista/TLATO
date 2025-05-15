@@ -290,3 +290,20 @@ SUPPORTED_EXTENSIONS = ACCEPTED_FILE_TYPES
 OUTPUT_DIR_BASE = "data/output" # Mirrored structure will be created under this
 MODEL_DIR = "src/models"
 PROGRESS_DIR = "data/progress"
+
+# Schema for the repository file tracking DataFrame
+REPO_FILE_SCHEMA = {
+    'file_id': {'type': 'string', 'nullable': False, 'unique': True}, # Unique identifier for the file entry (e.g., hash of relative_path + version_tag)
+    'file_path': {'type': 'string', 'nullable': False},           # Relative path within the repository
+    'absolute_path': {'type': 'string', 'nullable': True},        # Absolute path on the filesystem (can be None if not applicable)
+    'version': {'type': 'integer', 'nullable': False, 'default': 1}, # Version number of the file in the repo
+    'file_hash': {'type': 'string', 'nullable': True},            # Hash of the file content (SHA256 recommended)
+    'size': {'type': 'integer', 'nullable': True},                # File size in bytes
+    'status': {'type': 'string', 'nullable': False,               # Status: 'added', 'modified', 'committed', 'untracked', 'deleted', 'cached'
+               'allowed': ['added', 'modified', 'committed', 'untracked', 'deleted', 'cached', 'to_add', 'to_commit']},
+    'timestamp': {'type': 'datetime64[ns]', 'nullable': False},   # Timestamp of last action or scan (use timezone-aware UTC)
+    'metadata_json': {'type': 'string', 'nullable': True},        # Other metadata as a JSON string (e.g., tags, description)
+    'zone_label': {'type': 'string', 'nullable': True}            # Semantic zone label if applicable
+}
+
+MAX_REPO_DF_CACHE_SIZE = 9999999  # Maximum number of entries in the RepoHandler's 'df' cache
