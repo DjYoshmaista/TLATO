@@ -440,6 +440,33 @@ def process_file(file_path_str: str) -> Dict[str, Any]:
 
     return result
 
+def _ensure_pathResolve(object):
+    if isinstance(object, str):
+        object = Path(object).resolve()
+    elif isinstance(object, Path):
+        object = object.resolve()
+    else:
+        err_msg = f"Object '{object}' set as datatype '{type(object)}' instead of str or Path object."
+        log_statement('error', f"{LOG_INS}:ERROR>>{err_msg}", Path(__file__).stem, True)
+        raise TypeError(err_msg)
+    return object
+
+def init_progbar(total: int, desc: str = "") -> Generator:
+    """
+    Initializes a progress bar for tracking file processing.
+    Args:
+        total (int): Total number of items to process.
+        desc (str): Description for the progress bar.
+    Returns:
+        Generator: A generator that yields the current progress.
+    """
+    try:
+        from tqdm import tqdm
+        return tqdm(total=total, desc=desc, unit="file")
+    except ImportError:
+        log_statement("warning", f"{LOG_INS}:WARNING>>tqdm not available, using simple counter.", __file__, False)
+        return range(total)  # Fallback to a simple range if tqdm is not available
+
 def _get_file_metadata(filepath: Path) -> Optional[Dict[str, Any]]:
     """
     Extracts metadata for a single file, populating all columns defined in

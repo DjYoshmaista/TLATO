@@ -9,12 +9,210 @@ dotenv.load_dotenv()
 # Version Number
 VER_NO = '1.000a'
 
+# Project Name
+PROJECT_NAME = "TLATO41"
+# Project Description
+PROJECT_DESCRIPTION = "TLATO41 is a data repository and processing system designed to handle large datasets efficiently."
+# Project Author
+PROJECT_AUTHOR = "Yoshmaista"
+# Project Author Email
+PROJECT_AUTHOR_EMAIL = "djyoshmaista@gmail.com"
+
+# HOST MACHINE SPECIFICATIONS
+# CPU
+MAX_WORKERS = os.cpu_count()
+# RAM
+MAX_RAM = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / (1024. ** 3) # in GB
+# Disk Space
+DISK_SPACE = os.statvfs('/').f_frsize * os.statvfs('/').f_blocks / (1024. ** 3) # in GB
+# Disk Space Free
+DISK_SPACE_FREE = os.statvfs('/').f_frsize * os.statvfs('/').f_bavail / (1024. ** 3) # in GB
+# Disk Space Used
+DISK_SPACE_USED = os.statvfs('/').f_frsize * (os.statvfs('/').f_blocks - os.statvfs('/').f_bavail) / (1024. ** 3) # in GB
+# Disk Space Total
+DISK_SPACE_TOTAL = os.statvfs('/').f_frsize * os.statvfs('/').f_blocks / (1024. ** 3) # in GB
+
+# src/data/constants.py
+# Default .gitignore content
+DEFAULT_GITIGNORE_CONTENT = """
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a script distutils.core.setup()
+#  and should be ignored from version control in your package galleries
+#  Python usually creates these files in directories named dist/ and build/
+#  so you probably only need to ignore those directories if you are not
+#  using PyInstaller
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# PEP 582; __pypackages__ directory
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Poetry
+# poetry.lock
+
+# ML/AI specific
+# Data files
+*.csv
+*.xls
+*.xlsx
+*.json  # Be careful with this one, might be needed for configs
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.joblib
+*.pkl
+*.pickle
+*.dat
+*.data
+
+# Model files
+*.pt
+*.pth
+*.pb
+*.onnx
+*.tflite
+*.keras
+
+# Large files (consider Git LFS)
+# data/raw/
+# data/processed/
+# models/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+"""
+
 # Repository file constants
 _project_folder_str = os.getenv("TLATO41DIR")
 if not _project_folder_str:
     raise ValueError("Environment variable TLATO41DIR is not set.")
 PROJECT_FOLDER = Path(_project_folder_str)
-REPO_DIR = PROJECT_FOLDER / "src/data/repositories"
+REPO_DIR = Path(PROJECT_FOLDER / "src/data/repositories")
 MAIN_REPO_FILENAME = "main_repository.csv.zst"
 PROCESSED_REPO_FILENAME = "processed_repository.csv.zst"
 TOKENIZED_REPO_FILENAME = "tokenized_repository.csv.zst"
@@ -22,8 +220,10 @@ DATALOADER_METADATA_FILENAME = "dataloader_metadata.json.zst" # Example for Data
 DATA_REPO_DIR = REPO_DIR / "data_repository"
 LOG_DIR = PROJECT_FOLDER / "logs"
 STATE_DIR = PROJECT_FOLDER / "states"
+GITIGNORE_FILENAME = PROJECT_FOLDER / ".gitignore"
 
 # --- Repository Index Structure Keys ---
+INDEX_FILENAME = Path("repository_index.json")
 INDEX_FILE = "repositories/repository_index.json"
 INDEX_KEY_PATH = "path"
 INDEX_KEY_METADATA = "metadata"
@@ -290,3 +490,6 @@ SUPPORTED_EXTENSIONS = ACCEPTED_FILE_TYPES
 OUTPUT_DIR_BASE = "data/output" # Mirrored structure will be created under this
 MODEL_DIR = "src/models"
 PROGRESS_DIR = "data/progress"
+
+# ----- DataFrameCache Constants -----
+DF_CACHE_MAXSIZE = "192000"

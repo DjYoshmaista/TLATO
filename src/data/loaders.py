@@ -13,33 +13,14 @@ import torch
 import numpy as np
 import zstandard as zstd
 import json
-import logging
 from pathlib import Path
 from tqdm import tqdm
 import io
 from typing import List, Optional
 
 # Import configuration and utility functions
-try:
-    from ..utils.config import DataLoaderConfig, DEFAULT_DEVICE, COMPRESSION_ENABLED, TOKENIZED_DATA_DIR
-    from ..utils.logger import configure_logging, log_statement
-    configure_logging()
-    logger = logging.getLogger(__name__)
-    log_statement(loglevel=str("debug"), logstatement=str("EnhancedDataLoader and SyntheticDataLoader initialized."), main_logger=str(__name__))
-except ImportError:
-    try: # Fallback relative
-        from ..utils.config import DataLoaderConfig, DEFAULT_DEVICE, COMPRESSION_ENABLED, TOKENIZED_DATA_DIR
-        from ..utils.logger import configure_logging, log_statement
-        configure_logging()
-        logger = logging.getLogger(__name__)
-        log_statement(loglevel=str("debug"), logstatement=str("EnhancedDataLoader and SyntheticDataLoader initialized."), main_logger=str(__name__))
-    except ImportError: # Fallback dummy
-        logging.critical("Failed config import for DataLoader. Using defaults.")
-        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - [loaders.py] - %(message)s')
-        logger = logging.getLogger(__name__)
-        log_statement(loglevel=str("debug"), logstatement=str("Dummy config import for DataLoader."), main_logger=str(__name__))
-        class DataLoaderConfig: ENHANCED_LOADER_DATA_DIR = './tokenized'; ENHANCED_LOADER_BATCH_SIZE = 32; ENHANCED_LOADER_FILE_PATTERN = '*.pt.zst'; SYNTHETIC_LOADER_DATA_DIR = './synthetic'; SYNTHETIC_LOADER_BATCH_SIZE = 32; SYNTHETIC_LOADER_FILE_PATTERN = '*.jsonl'
-        DEFAULT_DEVICE = 'cpu'; COMPRESSION_ENABLED = True; TOKENIZED_DATA_DIR = Path('./tokenized')
+from src.utils.config import DataLoaderConfig, DEFAULT_DEVICE, COMPRESSION_ENABLED, TOKENIZED_DATA_DIR
+from src.utils.logger import log_statement
 
 class EnhancedDataLoader:
     """

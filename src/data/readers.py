@@ -11,11 +11,7 @@ from io import StringIO, BytesIO # StringIO needed for CSV/JSON parsing from str
 # Import constants using relative path if readers.py is in src/data
 from ..data.constants import * # Use .. to go up one level from data to src
 # Import logger using relative path
-from ..utils.logger import configure_logging, log_statement
-
-# Configure logging for this module
-configure_logging()
-logger = logging.getLogger(__name__) # Use __name__ for module-specific logger
+from ..utils.logger import log_statement
 
 # Import optional dependencies safely
 try:

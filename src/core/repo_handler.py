@@ -1,6 +1,9 @@
 import git
+from git import Repo, Blob, PushInfo
+from git.exc import BadName, GitCommandError, InvalidGitRepositoryError, NoSuchPathError
+import sys
+from filelock import FileLock, Timeout
 import json
-import logging
 import os
 import re
 import shutil
@@ -28,7 +31,7 @@ except ImportError:
     actual_log_statement('warning', f"{LOG_INS}:WARNING>>gzip Compression Utilities from src.utils.compression not available.  File compression features will be disabled", Path(__file__).stem)
 from src.utils.config import *
 from src.data.constants import *
-from src.utils.helpers import process_file
+from src.utils.helpers import process_file, LRUCache, _ensure_pathResolve
 from src.core.models import FileMetadataEntry, FileVersion, MetadataCollection # Pydantic models
 from src.utils.hashing import *
 
@@ -36,6 +39,7 @@ try:
     from src.utils.logger import log_statement as actual_log_statement
     _log_statement_defined = True
 except ImportError:
+    import logging
     _log_statement_defined = False
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
     def actual_log_statement(loglevel: str, logstatement: str, main_logger_name: Optional[str] = None, exc_info: bool = False):
@@ -47,14 +51,14 @@ except ImportError:
             logger.log(level, logstatement)
 # Attempt to import _get_file_metadata from helpers; it's crucial
 try:
-    from src.utils.helpers import _get_file_metadata as get_os_and_content_metadata
-    _get_os_and_content_metadata_defined = True
+    from src.utils.helpers import _get_file_metadata
+    _get_file_metadata_defined = True
 except ImportError:
-    _get_os_and_content_metadata_defined = False
+    _get_file_metadata_defined = False
     actual_log_statement('critical', "_get_file_metadata from src.utils.helpers could not be imported! Essential functionality will be missing.", Path(__file__).stem)
-    def get_os_and_content_metadata(abs_path: Path, hash_algorithms: Optional[List[str]] = None, calculate_custom_hashes: bool = True) -> Dict[str, Any]:
+    def _get_file_metadata(abs_path: Path, hash_algorithms: Optional[List[str]] = None, calculate_custom_hashes: bool = True) -> Dict[str, Any]:
         # Fallback placeholder if actual helper is missing
-        actual_log_statement('error', f"Fallback get_os_and_content_metadata called for {abs_path}. This is a stub!", Path(__file__).stem)
+        actual_log_statement('error', f"Fallback _get_file_metadata called for {abs_path}. This is a stub!", Path(__file__).stem)
         return {
             "filename": abs_path.name, "extension": abs_path.suffix, "size_bytes": 0,
             "os_last_modified_utc": datetime.now(timezone.utc).isoformat(),
@@ -97,54 +101,63 @@ class GitOpsHelper:
     def __init__(self,
                  repo_path: Path,
                  create_if_not_exist: bool = False, 
-                 repo: Optional[git.Repo] = None, 
+                 repo: Optional[Repo] = None, 
                  root_dir: Path = ROOT_DIR):
         self.path: Path = repo_path
-        self.git_repo: Optional[git.Repo] = repo
-        self.is_new_repo: bool = False
+        self.git_dir: Path = self.path / ".git"
         self.root_dir = root_dir
-        self._log_ins_class = self.__class__.__name__
-        
-        try:
-            if not self.path.is_dir():
+        self.gifh = GitignoreHandler(repo, git_ops=self)
+
+        if self.git_dir.exists() and self.git_dir.is_dir():
+            log_statement('info', f"{LOG_INS}:INFO>>Git directory exists at {self.git_dir}.", Path(__file__).stem)
+            try:
+                self.repo = Repo(self.path)
+                log_statement('info', f"{LOG_INS}:INFO>>Git repository loaded successfully.", Path(__file__).stem)
+            except InvalidGitRepositoryError:
+                log_statement('error', f"{LOG_INS}:ERROR>>Invalid Git repository at {self.git_dir}.", Path(__file__).stem)
                 if create_if_not_exist:
-                    log_statement('info', f"{LOG_INS}:INFO>>Directory {self.path} does not exist. Creating for Git repository.", self._logger_name)
-                    self.path.mkdir(parents=True, exist_ok=True)
-                    self._initialize_new_git_repo()
+                    self._init_repo()
                 else:
-                    log_statement('warning', f"Path {self.path} is not a valid directory and create_if_not_exist is False. Cannot load/init Git repo.", self._logger_name)
-            else: # Path is a directory
-                try:
-                    self.git_repo = git.Repo(str(self.path))
-                    log_statement('info', f"{LOG_INS}:INFO>>Successfully loaded existing Git repository at: {self.path}", self._logger_name)
-                except git.InvalidGitRepositoryError:
-                    if create_if_not_exist:
-                        log_statement('info', f"{LOG_INS}:INFO>>No existing Git repository at {self.path}. Initializing new one.", self._logger_name)
-                        self._initialize_new_git_repo()
-                    else:
-                        log_statement('warning', f"Not a valid Git repository at {self.path} and create_if_not_exist is False.", self._logger_name)
-                except git.NoSuchPathError: # Should be rare if self.path.is_dir() passed, but for safety
-                    log_statement('error', f"{LOG_INS}:ERROR>>Path {self.path} became invalid before GitPython could access it.", self._logger_name, exc_info=True)
-                except Exception as e: # Catch other GitPython or unexpected errors during load
-                    log_statement('error', f"{LOG_INS}:ERROR>>Unexpected error loading Git repository from {self.path}: {e}", self._logger_name, exc_info=True)
+                    self.repo = None
+                    raise GitCommandError(f"Invalid Git repository at {self.git_dir}.")
+        elif create_if_not_exist:
+            log_statement('info', f"{LOG_INS}:INFO>>Git directory does not exist at {self.git_dir}. Creating new repository.", Path(__file__).stem)
+            self._init_repo()
+        else:
+            log_statement('error', f"{LOG_INS}:ERROR>>Git directory does not exist at {self.git_dir} and create_if_not_exist is False.", Path(__file__).stem)
+            self.repo = None
+            raise GitCommandError(f"Git directory does not exist at {self.git_dir}.")
+        if self.repo:
+            self.gitignore_path = self.path / GITIGNORE_FILENAME
+            self._ensure_gitignore()
 
-        except Exception as e: # Catch errors from path.mkdir or other pre-checks
-            log_statement('error', f"{LOG_INS}:ERROR>>Failed to prepare path or initialize Git repository at {self.path}: {e}", self._logger_name, exc_info=True)
-
-    def _initialize_new_git_repo(self):
+    def _init_repo(self):
         """Internal method to initialize a new Git repository."""
         try:
-            self.git_repo = git.Repo.init(str(self.path))
+            self.repo = Repo.init(str(self.path))
             self.is_new_repo = True
-            log_statement('info', f"{LOG_INS}:INFO>>Successfully initialized new Git repository at: {self.path}", self._logger_name)
+            log_statement('info', f"{LOG_INS}:INFO>>Successfully initialized new Git repository at: {self.path}", Path(__file__).stem)
         except Exception as e:
-            log_statement('error', f"{LOG_INS}:ERROR>>Failed to initialize new Git repository at {self.path}: {e}", self._logger_name, exc_info=True)
-            self.git_repo = None # Ensure it's None on failure
+            log_statement('error', f"{LOG_INS}:ERROR>>Failed to initialize new Git repository at {self.path}: {e}", Path(__file__).stem, exc_info=True)
+            self.repo = None # Ensure it's None on failure
             self.is_new_repo = False
+
+    def _ensure_gitignore(self):
+        if not self.gifh.gitignore_path.exists():
+            try:
+                with open(self.gifh.gitignore_path, "w") as f:
+                    f.write("# Gitignore file created by TLATO GitOpsHelper\n")
+                    f.write(f"{METADATA_FILENAME}\n") # Ensure METADATA_FILE_NAME_CONST is defined
+                log_statement('info', f"{LOG_INS}:INFO>>Created .gitignore file at {self.gifh.gitignore_path}", Path(__file__).stem, False)
+                self.gifh.add_to_gitignore([METADATA_FILENAME]) # Add default ignore
+            except IOError as e:
+                log_statement('error', f"{LOG_INS}:ERROR>>Failed to create .gitignore file at {self.gifh.gitignore_path}: {e}", Path(__file__).stem, True)
+        else:
+            log_statement('debug', f"{LOG_INS}:DEBUG>>.gitignore file already exists at {self.gifh.gitignore_path}", Path(__file__).stem, False)
 
     def is_valid_repo(self) -> bool:
         """Checks if the GitPython Repo object is initialized and valid."""
-        return self.git_repo is not None
+        return self.repo is not None
 
     def commit_changes(self, filepaths: List[Union[str, Path]], message: str) -> bool:
         try:
@@ -160,7 +173,7 @@ class GitOpsHelper:
             else:
                 actual_log_statement('info', f"{LOG_INS}:INFO>>No changes to commit for files: {actual_filepaths_str}", Path(__file__).stem)
                 return True # No changes is not an error in this context
-        except git.exc.GitCommandError as e:
+        except GitCommandError as e:
             if "nothing to commit" in str(e).lower():
                 actual_log_statement('info', f"{LOG_INS}:INFO>>Nothing to commit with message: '{message}'", Path(__file__).stem)
                 return True
@@ -176,7 +189,7 @@ class GitOpsHelper:
             abs_path = self.repo.working_dir / Path(file_rel_path)
             if abs_path.is_file():
                 with open(abs_path, 'rb') as f:
-                    blob = self.repo.odb.store(git.Blob.input_stream(f, 'blob'))
+                    blob = self.repo.odb.store(Blob.input_stream(f, 'blob'))
                     return blob.hexsha
             actual_log_statement('warning', f"{LOG_INS}:WARNING>>File not found for blob hash calculation (or not a file): {abs_path}", Path(__file__).stem)
         except Exception as e:
@@ -197,10 +210,10 @@ class GitOpsHelper:
         """
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Executing Git command: git {' '.join(command)} with kwargs: {kwargs}", Path(__file__).stem, False)
         try:
-            result = self.git_repo.git.execute(command, **kwargs)
+            result = self.repo.git.execute(command, **kwargs)
             actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Git command 'git {' '.join(command)}' executed successfully.", Path(__file__).stem, False)
             return result
-        except git.exc.GitCommandError as e:
+        except GitCommandError as e:
             log_msg = f"{LOG_INS}:ERROR>>Git command 'git {' '.join(command)}' failed: {e}"
             actual_log_statement("error", log_msg, Path(__file__).stem, True)
             if suppress_errors:
@@ -239,35 +252,48 @@ class GitOpsHelper:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Parsed {len(commits)} commits from log output.", Path(__file__).stem, False)
         return commits
 
+    def get_file_last_commit_hash(self, file_path: Union[str, Path]) -> Optional[str]:
+        if not self.repo:
+            return None
+        try:
+            # Ensure file_path is relative to the repository root for the git command
+            relative_file_path = Path(file_path).relative_to(self.path)
+            commit = self.repo.git.log("-1", "--pretty=format:%H", "--", str(relative_file_path))
+            return commit
+        except (GitCommandError, ValueError) as e: # ValueError if not relative
+            # Replace: logger.debug(f"GitOpsHelper: Could not get last commit hash for {file_path}: {e}")
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Could not get last commit hash for {file_path}: {e}", Path(__file__).stem, False)
+            return None
+        
     # --- Potential additional Git operation methods ---
     # def get_status(self) -> Optional[str]:
     #     if self.is_valid_repo():
-    #         return self.git_repo.git.status()
-    #     log_statement('warning', "Cannot get status, Git repo not initialized.", self._logger_name)
+    #         return self.repo.git.status()
+    #     log_statement('warning', "Cannot get status, Git repo not initialized.", Path(__file__).stem)
     #     return None
 
     # def add_files(self, file_paths: list[Union[str, Path]]) -> bool:
     #     if self.is_valid_repo():
     #         try:
-    #             self.git_repo.index.add([str(fp) for fp in file_paths])
-    #             log_statement('info', f"Added files to index: {file_paths}", self._logger_name)
+    #             self.repo.index.add([str(fp) for fp in file_paths])
+    #             log_statement('info', f"Added files to index: {file_paths}", Path(__file__).stem)
     #             return True
     #         except Exception as e:
-    #             log_statement('error', f"Failed to add files {file_paths}: {e}", self._logger_name, exc_info=True)
+    #             log_statement('error', f"Failed to add files {file_paths}: {e}", Path(__file__).stem, exc_info=True)
     #             return False
-    #     log_statement('warning', "Cannot add files, Git repo not initialized.", self._logger_name)
+    #     log_statement('warning', "Cannot add files, Git repo not initialized.", Path(__file__).stem)
     #     return False
 
     # def commit(self, message: str) -> bool:
     #     if self.is_valid_repo():
     #         try:
-    #             self.git_repo.index.commit(message)
-    #             log_statement('info', f"Committed with message: {message}", self._logger_name)
+    #             self.repo.index.commit(message)
+    #             log_statement('info', f"Committed with message: {message}", Path(__file__).stem)
     #             return True
     #         except Exception as e:
-    #             log_statement('error', f"Failed to commit: {e}", self._logger_name, exc_info=True)
+    #             log_statement('error', f"Failed to commit: {e}", Path(__file__).stem, exc_info=True)
     #             return False
-    #     log_statement('warning', "Cannot commit, Git repo not initialized.", self._logger_name)
+    #     log_statement('warning', "Cannot commit, Git repo not initialized.", Path(__file__).stem)
     #     return False
 
 class MetadataFileHandler:
@@ -292,7 +318,7 @@ class MetadataFileHandler:
         self._log_ins_class = self.__class__.__name__
         self._file_identifier = Path(Path(__file__).stem).stem
 
-    def ensure_metadata_file_exists(self, repo_instance: Optional[git.Repo] = None, initial_commit: bool = False) -> None:
+    def ensure_metadata_file_exists(self, repo_instance: Optional[Repo] = None, initial_commit: bool = False) -> None:
         with self.lock:
             if not self.metadata_filepath.exists():
                 actual_log_statement('info', f"{LOG_INS}:INFO>>Metadata file not found. Creating: {self.metadata_filepath}", Path(__file__).stem)
@@ -358,14 +384,14 @@ class MetadataFileHandler:
             except FileNotFoundError:
                  actual_log_statement('debug', f"{LOG_INS}:DEBUG>>Metadata file {self.metadata_filepath} not found. Returning empty metadata.", Path(__file__).stem)
                  return {}
-            except (json.JSONDecodeError, EOFError, gzip.BadGzipFile, zstandard.ZstdError): # EOFError for empty gzip/zstd, BadGzipFile for corrupted gzip, ZstdError for zstd issues
+            except (json.JSONDecodeError, EOFError, gzip.BadGzipFile, zstd.ZstdError): # EOFError for empty gzip/zstd, BadGzipFile for corrupted gzip, ZstdError for zstd issues
                 actual_log_statement('error', f"{LOG_INS}:ERROR>>Error decoding JSON/decompressing {self.metadata_filepath}. Returning empty metadata.", Path(__file__).stem, exc_info=True)
                 return {}
             except Exception as e:
                 actual_log_statement('exception', f"{LOG_INS}:EXCEPTION>>Error loading metadata from {self.metadata_filepath}: {e}", Path(__file__).stem)
                 return {}
             
-    def write_metadata(self, data: Dict[str, Any], commit_message: Optional[str] = None, repo_instance: Optional[git.Repo] = None) -> bool:
+    def write_metadata(self, data: Dict[str, Any], commit_message: Optional[str] = None, repo_instance: Optional[Repo] = None) -> bool:
         with self.lock:
             try:
                 # Create parent directory if it doesn't exist (e.g. .tlato/metadata.json)
@@ -391,7 +417,7 @@ class MetadataFileHandler:
                             actual_log_statement('info', f"{LOG_INS}:INFO>>Committed metadata changes: {commit_message}", Path(__file__).stem)
                         else:
                             actual_log_statement('debug', f"{LOG_INS}:DEBUG>>No changes to commit for metadata file after writing.", Path(__file__).stem)
-                    except git.exc.GitCommandError as git_err:
+                    except GitCommandError as git_err:
                         if "nothing to commit" in str(git_err).lower():
                              actual_log_statement('debug', f"{LOG_INS}:DEBUG>>Nothing to commit for metadata: {commit_message}", Path(__file__).stem)
                         else:
@@ -404,12 +430,12 @@ class MetadataFileHandler:
 class ProgressFileHandler:
     """Handles saving and loading of progress files."""
 
-    def __init__(self, root_dir: Path, repo_path: Path, progress_dir_name: str = PROGRESS_DIR, git_ops_helper: Optional[GitOpsHelper] = None):
+    def __init__(self, root_dir: Path, repo_path: Path, progress_dir_name: str = PROGRESS_DIR, git_ops: Optional[GitOpsHelper] = None):
         self.progress_dir = f"{repo_path}/{progress_dir_name}"
         Path(self.progress_dir).mkdir(parents=True, exist_ok=True)
         self._log_ins_class = self.__class__.__name__
         self.root_dir = root_dir
-        self.git_ops_helper = git_ops_helper # Optional, for committing progress files
+        self.git_ops = git_ops # Optional, for committing progress files
 
     def save_progress(self, process_id: str, current_state: Dict[str, Any], commit_changes: bool = True) -> bool:
         """Saves progress to a JSON file and optionally commits it."""
@@ -422,10 +448,10 @@ class ProgressFileHandler:
                 json.dump(current_state, f, indent=4)
             actual_log_statement("info", f"{LOG_INS}:INFO>>Progress saved successfully for {process_id} to {progress_file}.", Path(__file__).stem, False)
 
-            if commit_changes and self.git_ops_helper:
+            if commit_changes and self.git_ops:
                 try:
-                    self.git_ops_helper.git_repo.index.add([str(progress_file)])
-                    self.git_ops_helper.git_repo.index.commit(f"Saved progress for {process_id}")
+                    self.git_ops.repo.index.add([str(progress_file)])
+                    self.git_ops.repo.index.commit(f"Saved progress for {process_id}")
                     actual_log_statement("info", f"{LOG_INS}:INFO>>Committed progress file for {process_id}.", Path(__file__).stem, False)
                 except Exception as e:
                     actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to commit progress file for {process_id}: {e}", Path(__file__).stem, True)
@@ -456,32 +482,81 @@ class ProgressFileHandler:
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to load progress for {process_id}: {e}", Path(__file__).stem, True)
             return None
 
-class GitignoreFileHandler:
+class GitignoreHandler:
     """Handles reading and modifying the .gitignore file."""
-    def __init__(self, repo: git.Repo, gitignore_name=".gitgnore", git_ops_helper: GitOpsHelper = None, gitignore_path: Optional[Path] = None):
+    def __init__(self, repo: Repo, gitignore_name=".gitgnore", git_ops: GitOpsHelper = None, gitignore_path: Optional[Path] = None):
         self.repo = repo
-        self.git_ops_helper = git_ops_helper
+        self.repo_path = PROJECT_FOLDER
+        self.git_ops = git_ops
         self.gitignore_path = Optional[Path] = None
         self.gitignore_name = gitignore_name
         # Ensure .gitignore file exists
-        if self.git_ops_helper and hasattr(self.git_ops_helper, 'git_repo') and self.git_ops_helper.git_repo:
+        if self.git_ops and hasattr(self.git_ops, 'git_repo') and self.git_ops.git_repo:
             try:
-                working_tree_dir = self.git_ops_helper.git_repo.working_tree_dir
+                working_tree_dir = self.git_ops.repo.working_tree_dir
                 if working_tree_dir:
                     self.gitignore_path = Path(working_tree_dir).resolve() / self.gitignore_name
-                    log_statement('debug', f"{LOG_INS}:DEBUG>>Gitignore path set to: {self.gitignore_path}", "GitignoreFileHandler")
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>Gitignore path set to: {self.gitignore_path}", "GitignoreHandler")
                 else:
-                    log_statement('warning', f"{LOG_INS}:WARNING>>Working tree directory is None, cannot determine .gitignore path.", "GitIgnoreFileHandler")
+                    log_statement('warning', f"{LOG_INS}:WARNING>>Working tree directory is None, cannot determine .gitignore path.", "GitignoreHandler")
             except AttributeError:
                 # This can happen if git_repo exists but working_tree_dir is missing (unlikely for valid repo)
-                log_statement('warning', f"{LOG_INS}:WARNING>>git_repo object missing 'working_tree_dir' attribute.", "GitignoreFileHandler")
+                log_statement('warning', f"{LOG_INS}:WARNING>>git_repo object missing 'working_tree_dir' attribute.", "GitignoreHandler")
                 pass # self.gitignore_path remains None
             except Exception as e:
-                log_statement('warning', f"{LOG_INS}:WARNING>>Could not determine .gitignore path due to: {e}", "GitignoreFileHandler")
+                log_statement('warning', f"{LOG_INS}:WARNING>>Could not determine .gitignore path due to: {e}", "GitignoreHandler")
                 pass # self.gitignore_path remains None
         else:
-            log_statement('info', f"{LOG_INS}:INFO>>GitOpsHelper or its git_repo is not available. .gitignore handling might be limited or skipped.", "GitignoreFileHandler")
+            log_statement('info', f"{LOG_INS}:INFO>>GitOpsHelper or its git_repo is not available. .gitignore handling might be limited or skipped.", "GitignoreHandler")
             pass # self.gitignore_path remains None
+
+    def _load_repo_ignore_rules(self) -> List[str]:
+        """Loads the ignore rules from the .gitignore file."""
+        if not self.gitignore_path or not self.gitignore_path.exists():
+            log_statement('warning', f"{LOG_INS}:WARNING>>.gitignore file does not exist at {self.gitignore_path}.", Path(__file__).stem, False)
+            return []
+        try:
+            with open(self.gitignore_path, "r") as f:
+                rules = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            actual_log_statement("info", f"{LOG_INS}:INFO>>Loaded ignore rules from .gitignore: {rules}", Path(__file__).stem, False)
+            return rules
+        except Exception as e:
+            actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to load .gitignore rules: {e}", Path(__file__).stem, True)
+            return []
+        # Fallback to empty list if loading fails
+        # This is a fallback, as the file might not exist or be empty.
+        # In that case, we can assume no rules are loaded.
+    def _write_gitignore(self, rules: List[str]) -> bool:
+        """Writes the ignore rules to the .gitignore file."""
+        if not self.gitignore_path:
+            log_statement('warning', f"{LOG_INS}:WARNING>>.gitignore path is not set. Cannot write rules.", Path(__file__).stem, False)
+            return False
+        try:
+            with open(self.gitignore_path, "w") as f:
+                for rule in rules:
+                    f.write(f"{rule}\n")
+            actual_log_statement("info", f"{LOG_INS}:INFO>>Wrote ignore rules to .gitignore: {rules}", Path(__file__).stem, False)
+            return True
+        except Exception as e:
+            actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to write .gitignore rules: {e}", Path(__file__).stem, True)
+            return False
+    def is_path_ignored(self, path: Union[str, Path]) -> bool:
+        """Checks if a given path is ignored by the .gitignore rules."""
+        if not self.gitignore_path or not self.gitignore_path.exists():
+            log_statement('warning', f"{LOG_INS}:WARNING>>.gitignore file does not exist at {self.gitignore_path}.", Path(__file__).stem, False)
+            return False
+        try:
+            with open(self.gitignore_path, "r") as f:
+                rules = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            for rule in rules:
+                if Path(path).match(rule):
+                    actual_log_statement("info", f"{LOG_INS}:INFO>>Path '{path}' is ignored by rule '{rule}'", Path(__file__).stem, False)
+                    return True
+            actual_log_statement("info", f"{LOG_INS}:INFO>>Path '{path}' is not ignored by any rule.", Path(__file__).stem, False)
+            return False
+        except Exception as e:
+            actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to check if path is ignored: {e}", Path(__file__).stem, True)
+            return False
 
     def get_gitignore_content(self) -> Optional[str]:
         """Reads the content of the .gitignore file."""
@@ -497,11 +572,95 @@ class GitignoreFileHandler:
         except Exception as e:
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to read .gitignore file: {e}", Path(__file__).stem, True)
             return None # Fallback
+    
+    def get_ignored_files(self, file_paths: List[Union[str, Path]]) -> List[str]:
+        if not self.repo or not self.repo.git_dir: # Check if repo is valid
+            log_statement('warning', f"{LOG_INS}:WARNING>>Git repository not available for checking ignored files.", Path(__file__).stem, False)
+            return []
+        try:
+            # Convert all paths to strings relative to the repo root for the command
+            # Ensure paths are correctly formatted for `git check-ignore`
+            # `git check-ignore` expects paths relative to the repository root.
+            
+            relative_file_paths = []
+            for p in file_paths:
+                try:
+                    # Ensure p is a Path object for relative_to
+                    path_obj = Path(p)
+                    if path_obj.is_absolute():
+                         # Make path relative to repo_path
+                        relative_path = path_obj.relative_to(self.path)
+                        relative_file_paths.append(str(relative_path))
+                    else: # If already relative (assume relative to repo_path)
+                        relative_file_paths.append(str(p))
+                except ValueError: # if p is not under self.path
+                    # logger.debug(f"File {p} is not within the repository path {self.path}, cannot check gitignore status.")
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>File {p} is not within the repository path {self.path}, cannot check gitignore status.", Path(__file__).stem, False)
+                    # This file cannot be checked by git check-ignore if it's outside the repo, so it's not "ignored by this repo"
+                    pass
+
+
+            if not relative_file_paths:
+                # logger.debug("No relative file paths to check against gitignore.")
+                log_statement('debug', f"{LOG_INS}:DEBUG>>No relative file paths to check against gitignore.", Path(__file__).stem, False)
+                return []
+
+            # Using --no-index allows checking paths not in the index, useful for new files.
+            # The paths should be relative to the repo root.
+            ignored_by_git = self.repo.git.check_ignore(*relative_file_paths) # Pass paths as *args
+            
+            if isinstance(ignored_by_git, str) and ignored_by_git: # If it returns a string of filenames
+                ignored_list = [str(Path(self.path / ignored_file.strip()).resolve()) for ignored_file in ignored_by_git.splitlines()]
+            elif isinstance(ignored_by_git, list): # If it already returns a list
+                 ignored_list = [str(Path(self.path / ignored_file.strip()).resolve()) for ignored_file in ignored_by_git]
+            else: # No files ignored or empty string
+                ignored_list = []
+            
+            # logger.debug(f"Git ignored files (resolved): {ignored_list}")
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Git ignored files (resolved): {ignored_list}", Path(__file__).stem, False)
+            return ignored_list
+            
+        except GitCommandError as e:
+            # This can happen if no .gitignore exists or other git issues.
+            # Replace: logger.warning(f"GitOpsHelper: 'git check-ignore' command failed: {e}. Assuming no files are ignored by git.", exc_info=False)
+            log_statement('warning', f"{LOG_INS}:WARNING>>'git check-ignore' command failed: {e}. Assuming no files are ignored by git.", Path(__file__).stem, False)
+            return []
+        except Exception as e:
+            # Replace: logger.error(f"GitOpsHelper: Error checking ignored files: {e}", exc_info=True)
+            log_statement('error', f"{LOG_INS}:ERROR>>Error checking ignored files: {e}", Path(__file__).stem, True)
+            return []
 
     def add_to_gitignore(self, pattern: str, commit: bool = True, commit_message: Optional[str] = None) -> bool:
         """Adds a pattern to .gitignore if it's not already present."""
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Attempting to add pattern '{pattern}' to .gitignore", Path(__file__).stem, False)
+        if not self.repo:
+            log_statement('warning', f"{LOG_INS}:WARNING>>GitOpsHelper: Git repository not available for adding to .gitignore.", Path(__file__).stem, False)
+            return
+
+        if not self.gitignore_path.exists():
+            self.gifh._ensure_gitignore() # Create it if it doesn't exist
+
         try:
+            patterns = []
+            if self.gitignore_path.exists():
+                with open(self.gitignore_path, "r") as f:
+                    patterns = [line.strip() for line in f.readlines()]
+
+            new_patterns_added = False
+            with open(self.gitignore_path, "a") as f:
+                for pattern in patterns:
+                    if pattern not in patterns:
+                        f.write(f"\n{pattern}")
+                        patterns.append(pattern) # Keep track of added patterns
+                        new_patterns_added = True
+            if new_patterns_added:
+                # Replace: logger.info(f"GitOpsHelper: Added patterns to .gitignore: {patterns}")
+                log_statement('info', f"{LOG_INS}:INFO>>Added patterns to .gitignore: {patterns}", Path(__file__).stem, False)
+            else:
+                # Replace: logger.debug(f"GitOpsHelper: Patterns {patterns} already in .gitignore or no new patterns to add.")
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Patterns {patterns} already in .gitignore or no new patterns to add.", Path(__file__).stem, False)
+
+
             content = self.get_gitignore_content()
             if content is None: # File doesn't exist or couldn't be read
                 lines = []
@@ -517,15 +676,23 @@ class GitignoreFileHandler:
             actual_log_statement("info", f"{LOG_INS}:INFO>>Pattern '{pattern}' added to .gitignore.", Path(__file__).stem, False)
 
             if commit:
-                msg = commit_message or f"Added '{pattern}' to .gitignore"
+                if commit_message:
+                    actual_log_statement('info', f"{LOG_INS}:INFO>>Current commit_message: {commit_message}", Path(__file__).stem)
+                elif not commit_message:
+                    commit_msg = input(f"Current number of patterns: {patterns} -- What would you like to enter as your commit message?")
+                    commit_message = f"{commit_msg}\nNumber of patterns added to .gitignore: {patterns} ----- Number of patterns in .gitignore: {len(DEFAULT_GITIGNORE_CONTENT)}\nDate and Time: {datetime.now}"
                 try:
-                    self.git_ops_helper.git_repo.index.add([str(self.gitignore_path)])
-                    self.git_ops_helper.git_repo.index.commit(msg)
-                    actual_log_statement("info", f"{LOG_INS}:INFO>>Committed .gitignore changes: {msg}", Path(__file__).stem, False)
+                    self.git_ops.repo.index.add([str(self.gitignore_path)])
+                    self.git_ops.repo.index.commit(msg)
+                    actual_log_statement("info", f"{LOG_INS}:INFO>>Committed .gitignore changes: {commit_message}", Path(__file__).stem, False)
                 except Exception as e:
                     actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to commit .gitignore changes: {e}", Path(__file__).stem, True)
                     return False # File was modified, but commit failed
             return True
+
+        except IOError as e:
+            # Replace: logger.error(f"GitOpsHelper: Failed to write to .gitignore file at {self.gitignore_path}: {e}", exc_info=True)
+            log_statement('error', f"{LOG_INS}:ERROR>>Failed to write to .gitignore file at {self.gitignore_path}: {e}", Path(__file__).stem, True)
         except Exception as e:
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to add pattern '{pattern}' to .gitignore: {e}", Path(__file__).stem, True)
             return False
@@ -549,11 +716,15 @@ class GitignoreFileHandler:
             actual_log_statement("info", f"{LOG_INS}:INFO>>Pattern '{pattern}' removed from .gitignore.", Path(__file__).stem, False)
 
             if commit:
-                msg = commit_message or f"Removed '{pattern}' from .gitignore"
+                if commit_message:
+                    actual_log_statement('info', f"{LOG_INS}:INFO>>Current commit_message: {commit_message}", Path(__file__).stem)
+                elif not commit_message:
+                    commit_msg = input(f"Current pattern set to be removed from .gitignore:\n****    {pattern}    ****\nWhat would you like to enter as your commit message?")
+                    commit_message = f"{commit_msg}\nNumber of patterns added to .gitignore:\n****    {pattern}    *****\n ----- Number of patterns in .gitignore: {len(DEFAULT_GITIGNORE_CONTENT)}\nDate and Time: {datetime.now}"
                 try:
-                    self.git_ops_helper.git_repo.index.add([str(self.gitignore_path)])
-                    self.git_ops_helper.git_repo.index.commit(msg)
-                    actual_log_statement("info", f"{LOG_INS}:INFO>>Committed .gitignore changes: {msg}", Path(__file__).stem, False)
+                    self.git_ops.repo.index.add([str(self.gitignore_path)])
+                    self.git_ops.repo.index.commit(commit_message)
+                    actual_log_statement("info", f"{LOG_INS}:INFO>>Committed .gitignore changes: {commit_message}", Path(__file__).stem, False)
                 except Exception as e:
                     actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to commit .gitignore changes: {e}", Path(__file__).stem, True)
                     return False # File modified, commit failed
@@ -562,11 +733,69 @@ class GitignoreFileHandler:
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to remove pattern '{pattern}' from .gitignore: {e}", Path(__file__).stem, True)
             return False
 
+    def get_ignored_files(self, file_paths: List[Union[str, Path]]) -> List[str]:
+        if not self.repo or not self.repo.git_dir: # Check if repo is valid
+            # Replace: logger.warning("GitOpsHelper: Git repository not available for checking ignored files.")
+            log_statement('warning', f"{LOG_INS}:WARNING>>Git repository not available for checking ignored files.", Path(__file__).stem, False)
+            return []
+        try:
+            # Convert all paths to strings relative to the repo root for the command
+            # Ensure paths are correctly formatted for `git check-ignore`
+            # `git check-ignore` expects paths relative to the repository root.
+            
+            relative_file_paths = []
+            for p in file_paths:
+                try:
+                    # Ensure p is a Path object for relative_to
+                    path_obj = Path(p)
+                    if path_obj.is_absolute():
+                         # Make path relative to repo_path
+                        relative_path = path_obj.relative_to(self.repo_path)
+                        relative_file_paths.append(str(relative_path))
+                    else: # If already relative (assume relative to repo_path)
+                        relative_file_paths.append(str(p))
+                except ValueError: # if p is not under self.repo_path
+                    # logger.debug(f"File {p} is not within the repository path {self.repo_path}, cannot check gitignore status.")
+                    log_statement('debug', f"{LOG_INS}:DEBUG>>File {p} is not within the repository path {self.repo_path}, cannot check gitignore status.", Path(__file__).stem, False)
+                    # This file cannot be checked by git check-ignore if it's outside the repo, so it's not "ignored by this repo"
+                    pass
+
+
+            if not relative_file_paths:
+                # logger.debug("No relative file paths to check against gitignore.")
+                log_statement('debug', f"{LOG_INS}:DEBUG>>No relative file paths to check against gitignore.", Path(__file__).stem, False)
+                return []
+
+            # Using --no-index allows checking paths not in the index, useful for new files.
+            # The paths should be relative to the repo root.
+            ignored_by_git = self.repo.git.check_ignore(*relative_file_paths) # Pass paths as *args
+            
+            if isinstance(ignored_by_git, str) and ignored_by_git: # If it returns a string of filenames
+                ignored_list = [str(Path(self.repo_path / ignored_file.strip()).resolve()) for ignored_file in ignored_by_git.splitlines()]
+            elif isinstance(ignored_by_git, list): # If it already returns a list
+                 ignored_list = [str(Path(self.repo_path / ignored_file.strip()).resolve()) for ignored_file in ignored_by_git]
+            else: # No files ignored or empty string
+                ignored_list = []
+            
+            # logger.debug(f"Git ignored files (resolved): {ignored_list}")
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Git ignored files (resolved): {ignored_list}", Path(__file__).stem, False)
+            return ignored_list
+            
+        except GitCommandError as e:
+            # This can happen if no .gitignore exists or other git issues.
+            # Replace: logger.warning(f"GitOpsHelper: 'git check-ignore' command failed: {e}. Assuming no files are ignored by git.", exc_info=False)
+            log_statement('warning', f"{LOG_INS}:WARNING>>'git check-ignore' command failed: {e}. Assuming no files are ignored by git.", Path(__file__).stem, False)
+            return []
+        except Exception as e:
+            # Replace: logger.error(f"GitOpsHelper: Error checking ignored files: {e}", exc_info=True)
+            log_statement('error', f"{LOG_INS}:ERROR>>Error checking ignored files: {e}", Path(__file__).stem, True)
+            return []
+        
 class RepoAnalyzer:
     """Analyzes the Git repository for information (read-only operations)."""
 
-    def __init__(self, git_ops_helper: GitOpsHelper):
-        self.git_ops = git_ops_helper
+    def __init__(self, git_ops: GitOpsHelper):
+        self.git_ops = git_ops
 
     def get_status_for_file(self, filepath: Path) -> Optional[str]:
         """Gets the Git status for a specific file."""
@@ -663,14 +892,14 @@ class RepoAnalyzer:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Getting details for commit: {commit_hash}", Path(__file__).stem, False)
         if not commit_hash or commit_hash.lower() == "head": # Resolve HEAD if needed
             try:
-                commit_hash = self.git_ops.git_repo.head.commit.hexsha
+                commit_hash = self.git_ops.repo.head.commit.hexsha
                 actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Resolved HEAD to {commit_hash}", Path(__file__).stem, False)
             except Exception as e:
                  actual_log_statement("error", f"{LOG_INS}:ERROR>>Could not resolve HEAD: {e}", Path(__file__).stem, True)
                  return None
 
         try:
-            commit = self.git_ops.git_repo.commit(commit_hash)
+            commit = self.git_ops.repo.commit(commit_hash)
             details = {
                 "commit_hash": commit.hexsha,
                 "author_name": commit.author.name,
@@ -692,7 +921,7 @@ class RepoAnalyzer:
             }
             actual_log_statement("info", f"{LOG_INS}:INFO>>Retrieved details for commit {commit_hash}.", Path(__file__).stem, False)
             return details
-        except git.exc.BadName as e: # More specific error for invalid commit hash
+        except BadName as e: # More specific error for invalid commit hash
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Invalid commit hash '{commit_hash}': {e}", Path(__file__).stem, False) # exc_info not needed for BadName
             return None
         except Exception as e:
@@ -793,7 +1022,7 @@ class RepoAnalyzer:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Getting repository root path.", Path(__file__).stem, False)
         try:
             # GitPython provides this directly and more reliably
-            root_path_str = self.git_ops.git_repo.working_tree_dir
+            root_path_str = self.git_ops.repo.working_tree_dir
             if root_path_str:
                 root_path = Path(root_path_str)
                 actual_log_statement("info", f"{LOG_INS}:INFO>>Repository root path: {root_path}", Path(__file__).stem, False)
@@ -812,13 +1041,13 @@ class RepoAnalyzer:
             # For the current repo instance, this is implicitly true if git_repo is valid.
             # For an arbitrary directory, we'd init a new Repo object or use rev-parse.
             if directory: # Checking an arbitrary directory
-                 git.Repo(path_to_check) # This will raise an error if not a repo
+                 Repo(path_to_check) # This will raise an error if not a repo
             else: # Checking the repo this handler is for
-                 if not self.git_ops.git_repo.git_dir: # Basic check
+                 if not self.git_ops.repo.git_dir: # Basic check
                      return False
             actual_log_statement("info", f"{LOG_INS}:INFO>>Path {path_to_check} is a Git repository.", Path(__file__).stem, False)
             return True
-        except (git.exc.NoSuchPathError, git.exc.InvalidGitRepositoryError):
+        except (NoSuchPathError, InvalidGitRepositoryError):
             actual_log_statement("info", f"{LOG_INS}:INFO>>Path {path_to_check} is not a Git repository.", Path(__file__).stem, False)
             return False
         except Exception as e:
@@ -827,8 +1056,8 @@ class RepoAnalyzer:
 
 class RepoModifier:
     """Modifies the Git repository state (commits, branches, tags, etc.)."""
-    def __init__(self, git_ops_helper: GitOpsHelper, metadata_handler: MetadataFileHandler):
-        self.git_ops = git_ops_helper
+    def __init__(self, git_ops: GitOpsHelper, metadata_handler: MetadataFileHandler):
+        self.git_ops = git_ops
         self.metadata_handler = metadata_handler
 
     def _commit_changes(self, files_to_add: List[Union[str, Path]], commit_message: str) -> bool:
@@ -836,8 +1065,8 @@ class RepoModifier:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Committing changes. Files: {files_to_add}, Message: '{commit_message}'", Path(__file__).stem, False)
         try:
             str_files_to_add = [str(f.resolve() if isinstance(f, Path) else Path(f).resolve()) for f in files_to_add]
-            self.git_ops.git_repo.index.add(str_files_to_add)
-            self.git_ops.git_repo.index.commit(commit_message)
+            self.git_ops.repo.index.add(str_files_to_add)
+            self.git_ops.repo.index.commit(commit_message)
             actual_log_statement("info", f"{LOG_INS}:INFO>>Changes committed successfully with message: '{commit_message}'.", Path(__file__).stem, False)
             return True
         except Exception as e: # Catch Git related errors specifically
@@ -848,13 +1077,60 @@ class RepoModifier:
         """Adds all changes and creates a commit."""
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Saving repository snapshot with message: '{commit_message}'", Path(__file__).stem, False)
         try:
-            self.git_ops.git_repo.git.add(all=True) # Using git.add directly for 'all'
-            self.git_ops.git_repo.index.commit(commit_message)
+            self.git_ops.repo.git.add(all=True) # Using git.add directly for 'all'
+            self.git_ops.repo.index.commit(commit_message)
             actual_log_statement("info", f"{LOG_INS}:INFO>>Repository snapshot saved successfully.", Path(__file__).stem, False)
             return True
         except Exception as e:
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to save repository snapshot: {e}", Path(__file__).stem, True)
             return False
+
+    def add_file_entry(self, file_data: Dict[str, Any]):
+        if self.df is None:
+            log_statement('error', f"{LOG_INS}:ERROR>>DataFrame not initialized. Cannot add file entry.", Path(__file__).stem, False)
+            return
+        with self._lock:
+            # Convert to DataFrame to handle potential type issues and ensure column order
+            new_entry_df = pd.DataFrame([file_data], columns=self.df.columns) 
+            self.df = pd.concat([self.df, new_entry_df], ignore_index=True)
+            self.df.drop_duplicates(subset=['absolute_path'], keep='last', inplace=True) # Ensure uniqueness
+            
+            # Update file_id_map
+            if 'file_id' in file_data and 'absolute_path' in file_data:
+                self.file_id_map[file_data['absolute_path']] = file_data['file_id']
+
+            self.df_cache.put('df', self.df.copy()) # Update cache
+            log_statement('debug', f"{LOG_INS}:DEBUG>>Added/Updated file entry for: {file_data.get('absolute_path')}", Path(__file__).stem, False)
+
+    def remove_file_entry(self, file_path: Union[str, Path]):
+        if self.df is None:
+            log_statement('error', f"{LOG_INS}:ERROR>>DataFrame not initialized. Cannot remove file entry.", Path(__file__).stem, False)
+            return
+        
+        abs_path_to_remove = str(Path(file_path).resolve())
+        with self._lock:
+            original_len = len(self.df)
+            self.df = self.df[self.df['absolute_path'] != abs_path_to_remove]
+            if len(self.df) < original_len:
+                log_statement('info', f"{LOG_INS}:INFO>>Removed file entry for: {abs_path_to_remove}", Path(__file__).stem, False)
+                if abs_path_to_remove in self.file_id_map:
+                    del self.file_id_map[abs_path_to_remove]
+                self.df_cache.put('df', self.df.copy()) # Update cache
+            else:
+                log_statement('debug', f"{LOG_INS}:DEBUG>>File entry not found for removal: {abs_path_to_remove}", Path(__file__).stem, False)
+
+    def get_all_files_metadata(self, base_dir: Optional[Union[str,Path]] = None, use_gitignore: bool = True) -> List[Dict[str, Any]]:
+        # ... (Inside this method, find logger calls and convert them)
+        # Example:
+        # logger.info(f"Scanning directory: {current_base_dir}")
+        # Becomes:
+        # log_statement('info', f"{LOG_INS}:INFO>>Scanning directory: {current_base_dir}", Path(__file__).stem, False)
+        
+        # When calling self.is_path_ignored, ensure it works as expected.
+        pass # Placeholder for brevity
+
+    # ... other methods like add_file, update_file_status, get_file_status, etc.
+    # should also have their logging updated.
 
     def update_metadata_entry(self, filepath: Path, commit_message_prefix: str = "Updated", **kwargs) -> bool:
         """Updates a metadata entry and commits the change."""
@@ -910,23 +1186,23 @@ class RepoModifier:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Branch action: {action}, name: {branch_name}, new_name: {new_branch_name}", Path(__file__).stem, False)
         try:
             if action == "create":
-                self.git_ops.git_repo.create_head(branch_name)
+                self.git_ops.repo.create_head(branch_name)
             elif action == "delete":
-                self.git_ops.git_repo.delete_head(branch_name, force=True) # Add force for safety, or make it an option
+                self.git_ops.repo.delete_head(branch_name, force=True) # Add force for safety, or make it an option
             elif action == "checkout":
-                self.git_ops.git_repo.heads[branch_name].checkout()
+                self.git_ops.repo.heads[branch_name].checkout()
             elif action == "rename": # Not in original but good addition
                 if not new_branch_name:
                     actual_log_statement("error", f"{LOG_INS}:ERROR>>New branch name required for rename action.", Path(__file__).stem, False)
                     return False
-                branch_to_rename = self.git_ops.git_repo.heads[branch_name]
+                branch_to_rename = self.git_ops.repo.heads[branch_name]
                 branch_to_rename.rename(new_branch_name)
             else:
                 actual_log_statement("error", f"{LOG_INS}:ERROR>>Unsupported branch action: {action}", Path(__file__).stem, False)
                 return False
             actual_log_statement("info", f"{LOG_INS}:INFO>>Branch action '{action}' for '{branch_name}' successful.", Path(__file__).stem, False)
             return True
-        except Exception as e: # Catch specific git errors like git.exc.GitCommandError
+        except Exception as e: # Catch specific git errors like GitCommandError
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Branch action '{action}' for '{branch_name}' failed: {e}", Path(__file__).stem, True)
             return False
 
@@ -935,10 +1211,10 @@ class RepoModifier:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Tag action: {action}, name: {tag_name}, message: {message}, commit: {commit_ish}", Path(__file__).stem, False)
         try:
             if action == "create":
-                ref = commit_ish if commit_ish else self.git_ops.git_repo.head.commit
-                self.git_ops.git_repo.create_tag(tag_name, ref=ref, message=message or f"Tag {tag_name}", force=False) # -a implicitly by message
+                ref = commit_ish if commit_ish else self.git_ops.repo.head.commit
+                self.git_ops.repo.create_tag(tag_name, ref=ref, message=message or f"Tag {tag_name}", force=False) # -a implicitly by message
             elif action == "delete":
-                self.git_ops.git_repo.delete_tag(tag_name)
+                self.git_ops.repo.delete_tag(tag_name)
             else:
                 actual_log_statement("error", f"{LOG_INS}:ERROR>>Unsupported tag action: {action}", Path(__file__).stem, False)
                 return False
@@ -956,9 +1232,9 @@ class RepoModifier:
                 if not remote_url:
                     actual_log_statement("error", f"{LOG_INS}:ERROR>>Remote URL required for add action.", Path(__file__).stem, False)
                     return False
-                self.git_ops.git_repo.create_remote(remote_name, remote_url)
+                self.git_ops.repo.create_remote(remote_name, remote_url)
             elif action == "remove":
-                self.git_ops.git_repo.delete_remote(remote_name)
+                self.git_ops.repo.delete_remote(remote_name)
             else:
                 actual_log_statement("error", f"{LOG_INS}:ERROR>>Unsupported remote action: {action}", Path(__file__).stem, False)
                 return False
@@ -972,10 +1248,10 @@ class RepoModifier:
         """Pushes changes to a remote."""
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Pushing to remote '{remote_name}', refspec '{refspec}', tags={tags}, force={force}", Path(__file__).stem, False)
         try:
-            remote_to_push = self.git_ops.git_repo.remote(name=remote_name)
+            remote_to_push = self.git_ops.repo.remote(name=remote_name)
             push_infos = remote_to_push.push(refspec=refspec, tags=tags, force=force) # GitPython uses force flag
             for info in push_infos:
-                if info.flags & (git.PushInfo.ERROR | git.PushInfo.REJECTED | git.PushInfo.REMOTE_REJECTED | git.PushInfo.REMOTE_FAILURE):
+                if info.flags & (PushInfo.ERROR | PushInfo.REJECTED | PushInfo.REMOTE_REJECTED | PushInfo.REMOTE_FAILURE):
                     actual_log_statement("error", f"{LOG_INS}:ERROR>>Push to {remote_name} failed for ref {info.local_ref or info.remote_ref_string}: {info.summary}", Path(__file__).stem, False)
                     # return False # Decide if any error means overall failure
             actual_log_statement("info", f"{LOG_INS}:INFO>>Push to remote '{remote_name}' completed.", Path(__file__).stem, False)
@@ -991,32 +1267,52 @@ class RepoHandler:
     def __init__(
         self,
         data_path: Union[str, Path],
-        repository_path: Union[str, Path],
+        storage_path: Union[str, Path],
+        repo_path: Union[str, Path],
+        repo_name: Optional[str] = None,
         metadata_filename: str = METADATA_FILENAME, # From constants
         progress_dir_name: str = PROGRESS_DIR, # From constants
         create_if_not_exist: bool = True, 
         use_dvc: bool = False,
         metadata_compression: Optional[str] = None, # New argument, e.g., "gzip"
-        git_ops_helper: GitOpsHelper = None,
+        git_ops: GitOpsHelper = None,
         metadata_handler: MetadataFileHandler = None,
         repo_hash=None,
+        ignore_rules=None,
         repo_index_entry=None
     ):
-        actual_log_statement("debug", f"{LOG_INS}:DEBUG>>RepoHandler initializing with path: {repository_path}", Path(__file__).stem)
-        self.data_path = data_path
-        self.modifier = RepoModifier(git_ops_helper, metadata_handler)
-        self.analyzer = RepoAnalyzer(git_ops_helper)
-        self.repo_path = Path(repository_path).resolve()
+        actual_log_statement("debug", f"{LOG_INS}:DEBUG>>RepoHandler initializing with path: {repo_path}", Path(__file__).stem)
+
+        # Ensure data_path is Path object
+        self.data_path = _ensure_pathResolve(data_path)
+        
+        # Ensure storage_path is Path object
+        self.storage_path = _ensure_pathResolve(storage_path)
+
+        self.repo_name = repo_name if repo_name else self.data_path.name
+        self.metadata_file_path = self.data_path / METADATA_FILENAME
+        self.repo_index_path = self.storage_path.parent / f"{self.storage_path.name.split('.')[0]}_index.json"
+        self._lock = threading.Lock()
+        self.repo = None
+        self.git_ops = None
+        self.ignore_rules = DEFAULT_GITIGNORE_CONTENT if ignore_rules is None else self.ignore_rules.append(ignore_rules)
+        self.metadata_cache = {}
+        self.df_cache = LRUCache(maxsize=DF_CACHE_MAXSIZE)
+        self.df = self._load_or_initialize_df()
+
+        self.modifier = RepoModifier(git_ops, metadata_handler)
+        self.analyzer = RepoAnalyzer(git_ops)
+        self.repo_path = Path(repo_path).resolve()
         self.is_new_repo = False
         self.repo_hash = repo_hash
         self.repo_index_entry = repo_index_entry
         try:
-            self.repo = git.Repo(self.repo_path)
+            self.repo = Repo(self.repo_path)
             actual_log_statement("info", f"{LOG_INS}:INFO>>Opened existing Git repository at: {self.repo_path}", Path(__file__).stem)
-        except (git.InvalidGitRepositoryError, git.NoSuchPathError):
+        except (InvalidGitRepositoryError, NoSuchPathError):
             if create_if_not_exist:
                 self.repo_path.mkdir(parents=True, exist_ok=True)
-                self.repo = git.Repo.init(self.repo_path)
+                self.repo = Repo.init(self.repo_path)
                 self.is_new_repo = True
                 actual_log_statement("info", f"{LOG_INS}:INFO>>Initialized new Git repository at: {self.repo_path}", Path(__file__).stem)
             else:
@@ -1025,26 +1321,27 @@ class RepoHandler:
         except Exception as e:
             actual_log_statement("exception", f"{LOG_INS}:EXCEPTION>>Failed to open or initialize repository at {self.repo_path}: {e}", Path(__file__).stem)
             raise
-        self.repo: Optional[GitOpsHelper] = self._initialize_git_ops_helper(create_if_not_exist)
+        self.repo: Optional[GitOpsHelper] = self._initialize_git_ops(create_if_not_exist)
 
         if self.repo and hasattr(self.repo, 'git_repo') and self.repo.git_repo:
-            self.gitignore_handler = GitignoreFileHandler(self.repo)
+            self.gitignore_handler = GitignoreHandler(self.repo)
         else:
             log_statement('warning', f"{LOG_INS}:WARNING>>Git repository not properly initialized for {self.data_path}. Gitignore handling will be disabled.", "RepoHandler")
             self.gitignore_handler = None # Or a dummy handler that does nothing
 
-        self.git_ops_helper: Optional[GitOpsHelper] = self._initialize_git_ops_helper(create_if_not_exist)
-        self.is_new_git_repo = self.git_ops_helper.is_new_repo if self.git_ops_helper else False
+        if not self.git_ops:
+            self.git_ops: Optional[GitOpsHelper] = self._initialize_git_ops(create_if_not_exist)
+        self.is_new_git_repo = self.git_ops.is_new_repo if self.git_ops else False
 
         self.metadata_handler = MetadataFileHandler(self.repo_path, metadata_filename, use_compression=metadata_compression)
         self.progress_handler = ProgressFileHandler(self.repo_path, progress_dir_name)
-        if self.git_ops_helper and self.git_ops_helper.is_valid_repo():
-            # Assuming GitignoreFileHandler constructor takes the GitOpsHelper instance
-            self.gitignore_handler = GitignoreFileHandler(self.git_ops_helper, gitignore_name=self.gitignore_name)
+        if self.git_ops:
+            # Assuming GitignoreHandler constructor takes the GitOpsHelper instance
+            self.gitignore_handler = GitignoreHandler(self.git_ops, gitignore_name=GITIGNORE_FILENAME)
+            self.gitignore_handler.get_gitignore_content(create_if_not_exist)
         else:
-            self.gitignore_handler = None
             log_statement('warning', f"{LOG_INS}:WARNING>>Git repository not properly initialized via GitOpsHelper for {self.repo_path}. Gitignore handling disabled.", Path(__file__).stem)
-
+            raise("GitOpsHandler Class Error")
         # Ensure metadata file exists and commit if it's a new repo or file missing
         # This implicitly creates an empty {} metadata file if it's brand new.
         self.metadata_handler.ensure_metadata_file_exists(
@@ -1056,7 +1353,57 @@ class RepoHandler:
             actual_log_statement('warning', f"{LOG_INS}:WARNING>>Metadata file is empty or could not be read", Path(__file__).stem)
         actual_log_statement('info', f"{LOG_INS}:INFO>>RepoHandler initialized successfully.", Path(__file__).stem)
 
-    def _initialize_git_ops_helper(self, create_if_not_exist: bool) -> Optional[GitOpsHelper]:
+    def _initialize_repo(self, create_if_missing: bool = True):
+        log_statement('info', f"{LOG_INS}:INFO>>Initializing Git Repository binding for {self.data_path}", Path(__file__).stem, False)
+        try:
+            if self.data_path.exists() and any(f.name == ".git" for f in self.data_path.iterdir() if f.is_dir()):
+                log_statement('info', f"{LOG_INS}:INFO>>Opened existing Git repository at: {self.data_path}", Path(__file__).stem, False)
+                self.repo = Repo(self.data_path)
+            elif create_if_missing:
+                if not self.data_path.exists():
+                    log_statement('info', f"{LOG_INS}:INFO>>Data path {self.data_path} does not exist -- Creating...", Path(__file__).stem, False)
+                    self.repo = Repo.init(self.data_path)
+            else:
+                log_statement('warning', f"{LOG_INS}:WARNING>>Git repository not found at {self.data_path} and create_if_missing value is {create_if_missing}.", Path(__file__).stem, False)
+                self.repo = None
+            
+            # Initialize GitOpsHelper after self.repo might be set
+            # Pass create_if_missing to determine if GitOpsHelper should also tryto create a repo if self.repo is None by this point
+            self._initialize_git_ops(create_if_missing)
+
+            if not self.git_ops:
+                log_statement('warning', f"{LOG_INS}:WARNING>>GitOpsHelper class not initialized for repository initialized at {self.data_path}.  Current number of entries in repository: {len(self.repo)}.\nSince Git Repository and Git Repository Helper is not properly initialized, .gitignore handling will be disabled.", Path(__file__).stem, False)
+            else:
+                log_statement('info', f"{LOG_INS}:INFO>>Git Repository and Git Operations Helper correctly initialized!  Git Operations and .gitignore handling enabled!")
+        
+        except InvalidGitRepositoryError:
+            log_statement('warning', f"{LOG_INS}:WARNING>>No valid Git repository found at {self.data_path}.  Attempting to initalize if allowed.", Path(__file__).stem, False)
+            if create_if_missing:
+                try:
+                    if not self.data_path.exists(): self.data_path.mkdir(parents=True, exist_ok=True)
+                    self.repo = Repo.init(self.data_path)
+                    log_statement('info', f"{LOG_INS}:INFO>>Successfully initialized new Git repository for folder {self.data_path} after InvalidGitRepositoryError.  Current number of repository entries: {len(self.repo)}", Path(__file__).stem, False)
+                    self._initialize_git_ops(True)
+                except Exception as e_init:
+                    log_statement('error', f"{LOG_INS}:ERROR>>Failed to initialize new repository at {self.data_path}.  ***\nReason:\n***\n{e_init}", Path(__file__).stem, True)
+                    self.repo = None
+                    self.git_ops = None
+            else:
+                self.repo = None
+                self.git_ops = None
+        except NoSuchPathError:
+            log_statement('error', f"{LOG_INS}:ERROR>>Data path at ***VALUE***\n{self.data_path}\n***/VALUE*** does not exist.", Path(__file__).stem, True)
+            self.repo = None
+            self.git_ops = None
+        except Exception as e:
+            log_statement('error', f"{LOG_INS}:ERROR>>Data path at \n***VALUE***\n{self.data_path}\n***/VALUE***\nReason: {e}", Path(__file__).stem, True)
+            self.repo = None
+            self._initialize_git_ops(False)
+            if not self.git_ops:
+                log_statement('warning', f"{LOG_INS}:WARNING>>Git repo not properly intialized via GitOpsHelper for {self.data_path} after exception.  Gitignore handling disabled.", Path(__file__).stem, True)
+
+
+    def _initialize_git_ops(self, create_if_not_exist: bool) -> Optional[GitOpsHelper]:
         """
         Initializes or loads a Git repository using the GitOpsHelper class.
 
@@ -1070,17 +1417,32 @@ class RepoHandler:
 
         Returns:
             Optional[GitOpsHelper]: An instance of GitOpsHelper. The helper's
-                                    .git_repo attribute will be a git.Repo object
+                                    .git_repo attribute will be a Repo object
                                     if successful, or None if setup failed.
                                     Returns None if self.data_path is invalid.
         """
         # Path(__file__).stem is assumed to be an attribute of RepoHandler
         log_statement('info', f"{LOG_INS}:INFO>>RepoHandler: Initializing GitOpsHelper for path: {self.data_path}, create: {create_if_not_exist}", Path(__file__).stem)
 
-        if not isinstance(self.data_path, Path):
+        if not self.data_path or not isinstance(self.data_path, Path) or not self.data_path.exists():
             log_statement('info', f"{LOG_INS}:INFO>>RepoHandler: self.data_path is not a Path object: {self.data_path}. Cannot initialize GitOpsHelper.", Path(__file__).stem)
-            return None
-
+            if not self.data_path.exists():
+                self.data_path.mkdir(parents=Treu, exist_ok=True)
+            if not isinstance(self.data_path, Path):
+                try:
+                    self.data_path = Path(self.data_path)
+                    log_statement('info', f"{LOG_INS}:INFO>>self.data_path value after creating Path instance from the original value:\n{self.data_path}", Path(__file__).stem, False)
+                except ValueError as e:
+                    err_msg = f"{LOG_INS}:ERROR>>ValueError for '{self.data_path}': '{e}'\nType for self.data_path: '{type(self.data_path)}'"
+                    log_statement('error', f"{err_msg}", Path(__file__).stem, True)
+                    raise(err_msg)
+                except Exception as e:
+                    err_msg = f"{LOG_INS}:ERROR>>Exception for '{self.data_path}': '{e}'\nType for self.data_path: '{type(self.data_path)}'"
+                    log_statement('error', f"{err_msg}", Path(__file__).stem, True)
+                    raise(err_msg)
+            elif isinstance(self.data_path, Path):
+                self.data_path = self.data_path.resolve()
+                log_statement('info', f"{LOG_INS}:INFO>>self.data_path value after creating Path instance from the original value:\n{self.data_path}", Path(__file__).stem, False)
         try:
             # GitOpsHelper handles its own internal logging for success/failure of git init/load
             helper = GitOpsHelper(
@@ -1095,7 +1457,6 @@ class RepoHandler:
                 # This means GitOpsHelper was instantiated, but its .git_repo is None.
                 # This is an expected outcome if, e.g., path is not a repo and create_if_not_exist is False.
                 log_statement('warning', f"{LOG_INS}:WARNING>>RepoHandler: GitOpsHelper instantiated, but Git repository is not available for {self.data_path}.", Path(__file__).stem)
-
             return helper
 
         except Exception as e:
@@ -1133,15 +1494,15 @@ class RepoHandler:
 
     def _create_file_metadata_entry_data(self, abs_path: Path) -> Optional[Dict[str, Any]]:
         """Gathers raw metadata for a file, including OS stats, custom hashes, and Git blob hash."""
-        if not _get_os_and_content_metadata_defined:
-            actual_log_statement('critical', f"{LOG_INS}:CRITICAL>>get_os_and_content_metadata helper is not available. Cannot create metadata entry.", Path(__file__).stem)
+        if not _get_file_metadata_defined:
+            actual_log_statement('critical', f"{LOG_INS}:CRITICAL>>_get_file_metadata helper is not available. Cannot create metadata entry.", Path(__file__).stem)
             return None
         
         # 1. Get OS and content hashes using the helper
         # Use hash algorithms defined in constants, e.g., SUPPORTED_HASH_ALGORITHMS for metadata
         # This list should align with what FileMetadataEntry.custom_hashes expects (e.g., ["md5", "sha256"])
         hashes_to_calc = SUPPORTED_HASH_ALGORITHMS # From constants.py, e.g., ['md5', 'sha256']
-        os_and_hash_meta = get_os_and_content_metadata(abs_path, hash_algorithms=hashes_to_calc, calculate_custom_hashes=True)
+        os_and_hash_meta = _get_file_metadata(abs_path, hash_algorithms=hashes_to_calc, calculate_custom_hashes=True)
 
         if not os_and_hash_meta:
             actual_log_statement('warning', f"{LOG_INS}:WARNING>>Failed to get OS/content metadata for {abs_path}.", Path(__file__).stem)
@@ -1155,7 +1516,7 @@ class RepoHandler:
         git_blob_hash = None
         try:
             with open(abs_path, 'rb') as f:
-                blob = self.repo.odb.store(git.Blob.input_stream(f, 'blob'))
+                blob = self.repo.odb.store(Blob.input_stream(f, 'blob'))
                 git_blob_hash = blob.hexsha
         except Exception as e:
             actual_log_statement('warning', f"{LOG_INS}:WARNING>>Could not calculate Git blob hash for {abs_path}: {e}", Path(__file__).stem, exc_info=False)
@@ -1171,6 +1532,148 @@ class RepoHandler:
             "git_object_hash_calculated_on_disk": git_blob_hash, # Temp name to distinguish from committed hash
         }
         return entry_data
+
+    def _load_or_initialize_df(self) -> pd.DataFrame:
+        # Replace: logger.debug(f"RepoHandler: Attempting to load DataFrame from {self.storage_path}")
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Attempting to load DataFrame from {self.storage_path}", Path(__file__).stem, False)
+        
+        # Check cache first
+        cached_df = self.df_cache.get('df')
+        if cached_df is not None:
+            log_statement('info', f"{LOG_INS}:INFO>>Loaded DataFrame from LRU cache.", Path(__file__).stem, False)
+            return cached_df
+
+        if self.storage_path.exists():
+            try:
+                df = decompress_file(str(self.storage_path))
+                if df is None: # Handle case where decompression returns None for empty/corrupt file
+                    log_statement('warning', f"{LOG_INS}:WARNING>>Decompression of {self.storage_path} returned None. Initializing empty DataFrame.", Path(__file__).stem, False)
+                    df = pd.DataFrame(columns=MAIN_REPO_HEADER)
+                else:
+                    log_statement('info', f"{LOG_INS}:INFO>>Successfully loaded DataFrame from {self.storage_path} with {len(df)} entries.", Path(__file__).stem, False)
+                
+                # Populate file_id_map from loaded DataFrame
+                if 'file_id' in df.columns and 'absolute_path' in df.columns:
+                    self.file_id_map = pd.Series(df.file_id.values, index=df.absolute_path).to_dict()
+
+            except Exception as e:
+                log_statement('error', f"{LOG_INS}:ERROR>>Failed to load or decompress DataFrame from {self.storage_path}: {e}. Initializing empty DataFrame.", Path(__file__).stem, True)
+                df = pd.DataFrame(columns=MAIN_REPO_HEADER)
+        else:
+            log_statement('info', f"{LOG_INS}:INFO>>Storage file {self.storage_path} not found. Initializing empty DataFrame.", Path(__file__).stem, False)
+            df = pd.DataFrame(columns=MAIN_REPO_HEADER)
+        
+        # Ensure all necessary columns are present, add if missing
+        for col in COL_SCHEMA:
+            if col not in df.columns:
+                log_statement('debug', f"{LOG_INS}:DEBUG>>Adding missing column '{col}' to DataFrame.", Path(__file__).stem, False)
+                if col == 'metadata_json': # Default for metadata_json should be "{}" for consistency
+                    df[col] = "{}"
+                else:
+                    df[col] = pd.NA # Use pandas NA for other types or let pandas infer
+
+        self.df_cache.put('df', df) # Cache the loaded/initialized DataFrame
+        log_statement('info', f"{LOG_INS}:INFO>>DataFrame cache 'df' initialized/updated with columns: {list(df.columns)} and max size: {self.df_cache.maxsize}.", Path(__file__).stem, False)
+        return df
+
+    def _save_df_to_storage(self):
+        if self.df is None:
+            log_statement('warning', f"{LOG_INS}:WARNING>>DataFrame is None, cannot save to storage.", Path(__file__).stem, False)
+            return
+
+        log_statement('info', f"{LOG_INS}:INFO>>Attempting to save DataFrame with {len(self.df)} entries to {self.storage_path}", Path(__file__).stem, False)
+        
+        lock_path = Path(str(self.storage_path) + ".lock") # Ensure lock path is string if Path constructor needs it
+        try:
+            with FileLock(lock_path, timeout=10): # Added FileLock for safety
+                # Ensure parent directory exists
+                self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+                # Compress and save the DataFrame
+                compress_file(self.df, str(self.storage_path), compression_type='zstd_json_lines') # Example type, adjust if needed
+                log_statement('info', f"{LOG_INS}:INFO>>Successfully saved DataFrame to {self.storage_path}", Path(__file__).stem, False)
+                self.df_cache.put('df', self.df.copy()) # Update cache after saving
+        except Timeout:
+            log_statement('error', f"{LOG_INS}:ERROR>>Timeout acquiring lock for {self.storage_path}. Save operation failed.", Path(__file__).stem, True)
+        except Exception as e:
+            log_statement('error', f"{LOG_INS}:ERROR>>Failed to save DataFrame to {self.storage_path}: {e}", Path(__file__).stem, True)
+
+
+    def save_dataframe_to_storage(self):
+        """Public method to save the current DataFrame to its storage file."""
+        log_statement('info', f"{LOG_INS}:INFO>>Public save_dataframe_to_storage called for {self.storage_path}", Path(__file__).stem, False)
+        self._save_df_to_storage()
+
+    def _load_repo_index(self) -> Dict[str, Any]:
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Attempting to load repository index from {self.repo_index_path}", Path(__file__).stem, False)
+        if self.repo_index_path.exists():
+            try:
+                index_data = decompress_file(input_filepath=self.repo_index_path, output_filepath=self.repo_index_path, remove_original=True, dec_to_df=True) # Assuming it might be compressed
+                if not index_data: # Handle empty or malformed JSON
+                    log_statement('warning', f"{LOG_INS}:WARNING>>Repository index file {self.repo_index_path} is empty or malformed. Returning default index.", Path(__file__).stem, False)
+                    return {"version": "1.0", "repositories": {}} # Default structure
+                log_statement('info', f"{LOG_INS}:INFO>>Successfully loaded repository index from {self.repo_index_path}", Path(__file__).stem, False)
+                return index_data
+            except Exception as e:
+                log_statement('error', f"{LOG_INS}:ERROR>>Failed to load or decompress repository index from {self.repo_index_path}: {e}. Returning default index.", Path(__file__).stem, True)
+                return {"version": "1.0", "repositories": {}} # Default structure on error
+        else:
+            log_statement('info', f"{LOG_INS}:INFO>>Repository index file {self.repo_index_path} not found. Returning default index.", Path(__file__).stem, False)
+            return {"version": "1.0", "repositories": {}} # Default structure
+
+
+    def _save_repo_index(self, index_data: Dict[str, Any]):
+        # Replace: logger.info(f"RepoHandler: Attempting to save repository index to {self.repo_index_path}")
+        log_statement('info', f"{LOG_INS}:INFO>>Attempting to save repository index to {self.repo_index_path}", Path(__file__).stem, False)
+        
+        lock_path = Path(str(self.repo_index_path) + ".lock")
+        try:
+            with FileLock(lock_path, timeout=10):
+                self.repo_index_path.parent.mkdir(parents=True, exist_ok=True)
+                # Assuming compress_file can handle dicts by converting to JSON then compressing
+                compress_file(index_data, str(self.repo_index_path), compression_type='zstd_json') # Example type
+                # Replace: logger.info(f"RepoHandler: Successfully saved repository index to {self.repo_index_path}")
+                log_statement('info', f"{LOG_INS}:INFO>>Successfully saved repository index to {self.repo_index_path}", Path(__file__).stem, False)
+        except Timeout:
+            # Replace: logger.error(f"RepoHandler: Timeout acquiring lock for {self.repo_index_path}. Save operation failed.", exc_info=True)
+            log_statement('error', f"{LOG_INS}:ERROR>>Timeout acquiring lock for {self.repo_index_path}. Save operation failed.", Path(__file__).stem, True)
+        except Exception as e:
+            # Replace: logger.error(f"RepoHandler: Failed to save repository index to {self.repo_index_path}: {e}", exc_info=True)
+            log_statement('error', f"{LOG_INS}:ERROR>>Failed to save repository index to {self.repo_index_path}: {e}", Path(__file__).stem, True)
+
+    def save_repo_index(self):
+        """Public method to save the current repository index."""
+        # This method might need to fetch the current index state if it's managed internally
+        # For now, assuming it's called when the index (e.g. from a RepositoryManager) needs saving
+        # This method implies RepoHandler itself doesn't hold the index, but knows how to save one if provided
+        # Or, if RepoHandler *does* manage an index attribute, it should save that.
+        # The original m1.py log indicated saving "DF and Index".
+        # Let's assume there's an internal index representation to be saved, or this is called by a manager.
+        # For now, this method is a placeholder if RepoHandler doesn't directly own the index data.
+        # If _save_repo_index is meant to be called with data, this public method needs modification
+        # or m1.py needs to call _save_repo_index with the appropriate data.
+        
+        # Based on the current structure, RepoHandler doesn't seem to *hold* the global repo index.
+        # It seems `m1.RepositoryManager` handles the index.
+        # So, RepoHandler might not need a public `save_repo_index()` without arguments.
+        # However, if it's intended to save its *own* data that constitutes an index for *this specific repo*,
+        # that's different.
+
+        # Let's assume `m1.py` wants to save the repo's main DataFrame (covered by `save_dataframe_to_storage`)
+        # and also trigger an update/save of this repo's entry in the *global* repository index, which
+        # is managed by `RepositoryManager` in `m1.py`.
+        # Therefore, `RepoHandler` itself might not need a generic `save_repo_index()` method.
+        # The call in `m1.py` `target_repo.save_repo_index()` would be problematic.
+
+        # Let's re-evaluate. If RepoHandler needs to save its own index (e.g. metadata_cache or file_id_map as an index)
+        # then it needs to be implemented. If it's about the global index, that's m1's job.
+        # The method _save_repo_index takes index_data.
+        # This implies the caller should provide it.
+        # For now, making this a no-op with a log until its role is clear.
+        log_statement('warning', f"{LOG_INS}:WARNING>>Public method `save_repo_index` called on RepoHandler. Its role needs clarification. If it's for the global index, RepositoryManager should handle it. If for this repo's specific index data, logic is needed.", Path(__file__).stem, False)
+        # If there's a specific index for *this* repo that needs saving, it would be:
+        # my_specific_index_data = self._build_my_specific_index() # e.g. from self.metadata_cache
+        # self._save_repo_index(my_specific_index_data) # but using self.repo_index_path might be wrong if that's for global.
+
 
     def find_duplicate_files(self, hash_type: str = DEFAULT_HASH_ALGORITHM) -> Dict[str, List[str]]:
         """
@@ -1325,7 +1828,7 @@ class RepoHandler:
                     actual_log_statement('info', f"{LOG_INS}:INFO>>File {rel_path_str} not on disk, but staged its removal from Git index.", Path(__file__).stem)
                 else:
                     actual_log_statement('warning', f"{LOG_INS}:WARNING>>File {rel_path_str} to be deleted from disk/Git was not found on disk and not staged. Metadata updated only.", Path(__file__).stem)
-            except git.exc.GitCommandError as e:
+            except GitCommandError as e:
                 # This can happen if the file was never added to git, or already removed.
                 if "did not match any files" in str(e).lower():
                      actual_log_statement('debug', f"{LOG_INS}:DEBUG>>Git rm: file {rel_path_str} did not match any files. Likely not tracked or already removed.", Path(__file__).stem)
@@ -1339,7 +1842,7 @@ class RepoHandler:
 
         final_commit_msg = commit_message or f"{removal_action.capitalize()} file and update metadata: {rel_path_str}"
         
-        if self.git_ops_helper.commit_changes(files_to_commit_abs_paths, final_commit_msg): # This stages metadata.json again
+        if self.git_ops.commit_changes(files_to_commit_abs_paths, final_commit_msg): # This stages metadata.json again
             last_commit_hash = self.repo.head.commit.hexsha
             # Update version history in metadata with this commit hash
             # Re-read, update the specific entry's last version_history item, write back (no new commit)
@@ -1401,14 +1904,14 @@ class RepoHandler:
         # Recalculate hash for current file on disk
         current_disk_hash_value = None
         try:
-            # Ensure get_os_and_content_metadata is available
-            if not _get_os_and_content_metadata_defined:
-                 actual_log_statement('critical', f"{LOG_INS}:CRITICAL>>get_os_and_content_metadata helper is not available. Cannot verify integrity.", Path(__file__).stem)
+            # Ensure _get_file_metadata is available
+            if not _get_file_metadata_defined:
+                 actual_log_statement('critical', f"{LOG_INS}:CRITICAL>>_get_file_metadata helper is not available. Cannot verify integrity.", Path(__file__).stem)
                  return "error_internal_helper_missing"
 
             # We need only one specific hash.
             # The helper calculates multiple by default. We can make it more specific if performance is an issue.
-            disk_meta_probe = get_os_and_content_metadata(abs_path, hash_algorithms=[hash_type.lower()], calculate_custom_hashes=True)
+            disk_meta_probe = _get_file_metadata(abs_path, hash_algorithms=[hash_type.lower()], calculate_custom_hashes=True)
             if disk_meta_probe and disk_meta_probe.get("custom_hashes"):
                 current_disk_hash_value = disk_meta_probe["custom_hashes"].get(hash_type.lower())
         except Exception as e:
@@ -1513,8 +2016,8 @@ class RepoHandler:
                 meta_entry = FileMetadataEntry.model_validate(meta_entry_dict)
                 current_disk_hashes = {}
                 # Use a focused call to get current hashes to avoid full _create_file_metadata_entry_data
-                if _get_os_and_content_metadata_defined:
-                    disk_meta_probe = get_os_and_content_metadata(abs_path, hash_algorithms=list(meta_entry.custom_hashes.keys()), calculate_custom_hashes=True)
+                if _get_file_metadata_defined:
+                    disk_meta_probe = _get_file_metadata(abs_path, hash_algorithms=list(meta_entry.custom_hashes.keys()), calculate_custom_hashes=True)
                     if disk_meta_probe:
                         current_disk_hashes = disk_meta_probe.get("custom_hashes", {})
 
@@ -1527,7 +2030,7 @@ class RepoHandler:
                 # Also check current Git blob hash vs what's stored for committed state
                 # This requires care: meta_entry.git_object_hash_current is for the file AS OF ITS LAST METADATA COMMIT.
                 # A new blob hash for current disk content:
-                current_disk_blob_hash = self.git_ops_helper.get_file_blob_hash(rel_path_str)
+                current_disk_blob_hash = self.git_ops.get_file_blob_hash(rel_path_str)
 
                 if hash_mismatch or (meta_entry.git_object_hash_current and current_disk_blob_hash != meta_entry.git_object_hash_current):
                     # Check if this modification is already staged
@@ -1573,8 +2076,8 @@ class RepoHandler:
             stored_hash = meta_entry.custom_hashes.get(hash_type_to_check.lower())
             if stored_hash:
                 current_disk_hash = None
-                if _get_os_and_content_metadata_defined:
-                    disk_meta_probe = get_os_and_content_metadata(abs_path, [hash_type_to_check.lower()], True)
+                if _get_file_metadata_defined:
+                    disk_meta_probe = _get_file_metadata(abs_path, [hash_type_to_check.lower()], True)
                     if disk_meta_probe and disk_meta_probe.get("custom_hashes"):
                         current_disk_hash = disk_meta_probe["custom_hashes"].get(hash_type_to_check.lower())
                 
@@ -1762,11 +2265,11 @@ class RepoHandler:
                  path_to_process_and_store_in_repo.unlink(missing_ok=True)
             return False
         
-        commit_successful = self.git_ops_helper.commit_changes(files_to_commit_abs, final_commit_message)
+        commit_successful = self.git_ops.commit_changes(files_to_commit_abs, final_commit_message)
 
         if commit_successful:
             last_commit_obj = self.repo.head.commit
-            committed_blob_hash_final = self.git_ops_helper.get_file_blob_hash(path_to_process_and_store_in_repo)
+            committed_blob_hash_final = self.git_ops.get_file_blob_hash(path_to_process_and_store_in_repo)
 
             final_meta_data_root = self.metadata_handler.read_metadata()
             final_metadata_collection_after_commit = MetadataCollection.model_validate(final_meta_data_root if final_meta_data_root else {})
@@ -1962,7 +2465,7 @@ class RepoHandler:
             files_to_commit_abs_with_metadata = files_to_stage_for_git_abs + [self.metadata_handler.metadata_filepath]
             final_batch_commit_msg = batch_commit_message or f"Batch update for {len(files_to_stage_for_git_abs)} files"
 
-            if self.git_ops_helper.commit_changes(files_to_commit_abs_with_metadata, final_batch_commit_msg):
+            if self.git_ops.commit_changes(files_to_commit_abs_with_metadata, final_batch_commit_msg):
                 last_commit_hash_batch = self.repo.head.commit.hexsha
                 committed_tree_batch = self.repo.head.commit.tree
                 
@@ -2062,7 +2565,7 @@ class RepoHandler:
             actual_log_statement('error', f"{LOG_INS}:ERROR>>Failed to write metadata for status update on {rel_path_str}.", Path(__file__).stem)
             return False
 
-        if self.git_ops_helper.commit_changes([self.metadata_handler.metadata_filepath], final_commit_message):
+        if self.git_ops.commit_changes([self.metadata_handler.metadata_filepath], final_commit_message):
             last_commit_hash = self.repo.head.commit.hexsha
             
             final_meta_data_root = self.metadata_handler.read_metadata()
@@ -2165,7 +2668,7 @@ class RepoHandler:
             actual_log_statement('error', f"{LOG_INS}:ERROR>>Failed to write metadata before commit for updated file {rel_path_str}.", Path(__file__).stem)
             return False
 
-        if self.git_ops_helper.commit_changes(files_to_commit, final_commit_message):
+        if self.git_ops.commit_changes(files_to_commit, final_commit_message):
             last_commit = self.repo.head.commit
             committed_tree = last_commit.tree
             git_blob_hash_in_commit = None
@@ -2295,11 +2798,11 @@ class RepoHandler:
         Scans the repository directory (excluding .git and metadata.json) for files
         and returns their metadata. This is a simplified version of the user's _scan_directory.
         """
-        actual_log_statement("info", f"{LOG_INS}:INFO>>Scanning directory {self.root_dir} for file metadata.", Path(__file__).stem, False)
+        actual_log_statement("info", f"{LOG_INS}:INFO>>Scanning directory {self.repo.root_dir} for file metadata.", Path(__file__).stem, False)
         
         files_metadata: Dict[str, Dict[str, Any]] = {}
         try:
-            for root, _, files in os.walk(self.root_dir):
+            for root, _, files in os.walk(self.repo.root_dir):
                 root_path = Path(root)
                 if ".git" in root_path.parts: # Skip .git directory
                     continue
@@ -2340,7 +2843,7 @@ class RepoHandler:
             # The user's _scan_directory implies updating existing_metadata with new_files.
             # It also adds all scanned file paths to the commit.
 
-            changed_files_from_status_str = self.git_ops_helper._execute_git_command(['status', '--porcelain'], suppress_errors=True)
+            changed_files_from_status_str = self.git_ops._execute_git_command(['status', '--porcelain'], suppress_errors=True)
             changed_paths_to_add_to_commit = [self.metadata_path] # Always add metadata file
 
             if changed_files_from_status_str:
@@ -2390,10 +2893,10 @@ class RepoHandler:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Getting summary metadata for the repository.", Path(__file__).stem, False)
         summary = {}
         try:
-            commits = list(self.git_repo.iter_commits()) # Expensive for large repos if used often
+            commits = list(self.repo.iter_commits()) # Expensive for large repos if used often
             summary["commit_count"] = len(commits)
-            summary["branch_count"] = len(self.git_repo.branches)
-            summary["tag_count"] = len(self.git_repo.tags)
+            summary["branch_count"] = len(self.repo.branches)
+            summary["tag_count"] = len(self.repo.tags)
 
             if commits:
                 # Date range from commits
@@ -2405,7 +2908,7 @@ class RepoHandler:
                 summary["date_range_max_utc"] = None
 
             # File count from `ls-files`
-            ls_files_output = self.git_ops_helper._execute_git_command(['ls-files'], suppress_errors=True)
+            ls_files_output = self.git_ops._execute_git_command(['ls-files'], suppress_errors=True)
             summary["file_count"] = len(ls_files_output.splitlines()) if ls_files_output else 0
             
             # Total size of blobs in the latest commit (can be computationally intensive)
@@ -2437,7 +2940,7 @@ class RepoHandler:
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>Starting parallel scan of repository files.", Path(__file__).stem, False)
         results = []
         try:
-            ls_files_output = self.git_ops_helper._execute_git_command(['ls-files'], suppress_errors=True)
+            ls_files_output = self.git_ops._execute_git_command(['ls-files'], suppress_errors=True)
             if not ls_files_output:
                 actual_log_statement("info", f"{LOG_INS}:INFO>>No files found by 'git ls-files' to scan.", Path(__file__).stem, False)
                 return []
@@ -2565,7 +3068,7 @@ class RepoHandler:
         cmd.append('-x') # Remove ignored files too
 
         try:
-            self.git_ops_helper._execute_git_command(cmd, suppress_errors=False)
+            self.git_ops._execute_git_command(cmd, suppress_errors=False)
             actual_log_statement("info", f"{LOG_INS}:INFO>>Repository workspace cleaned successfully.", Path(__file__).stem, False)
             return True
         except GitCommandError: # Error already logged
@@ -2573,7 +3076,69 @@ class RepoHandler:
         except Exception as e:
             actual_log_statement("error", f"{LOG_INS}:ERROR>>Unexpected error cleaning repository: {e}", Path(__file__).stem, True)
             return False
+        
+    def _get_relative_path(self, abs_path: Path) -> Optional[str]:
+        """Helper to get the relative path of a file within the repository."""
+        try:
+            rel_path = abs_path.relative_to(self.repo_path)
+            return rel_path.as_posix() # Convert to POSIX format for consistency
+        except ValueError:
+            actual_log_statement('error', f"{LOG_INS}:ERROR>>Path {abs_path} is not within the repository {self.repo_path}.", Path(__file__).stem)
+            return None
 
+# class RepoMetadata:
+#     def __init__(self, metadata_filename: str = METADATA_FILENAME):
+#         self.metadata_filename = metadata_filename
+#         self.metadata_path = Path(metadata_filename).resolve()
+#         self.metadata_handler = MetadataFileHandler(self.metadata_path)
+#         self.metadata_handler._initialize_metadata()
+#         initialize_progress(self)
+
+
+class RepoManager:
+    def __init__(self, repo_dir: Union[str, Path] = REPO_DIR, metadata_filename: str = METADATA_FILENAME, progress_dir_name: str = PROGRESS_DIR, create_repo_if_not_exists: bool = True, index_filename: str = INDEX_FILE.name, max_workers: int = MAX_WORKERS):
+        self.repo_dir = Path(self.repo_dir).resolve()
+        self.index_filename = index_filename
+
+        if not (isinstance(self.repo_dir, str) or isinstance(self.repo_dir, Path)):
+            try:
+                _ensure_pathResolve(self.repo_dir)
+            except ValueError as e:
+                raise ValueError(f"{LOG_INS}:ValueError>>Invalid repo_dir: {self.repo_dir}. Must be a string or Path object.  Current value: {self.repo_dir} -- Current Type: {type(self.repo_dir)}  Error: {e}") from e
+            
+        self.index_path = self.repo_dir / self.index_filename
+#         self.repo_handler = RepoHandler(repo_dir, metadata_filename, progress_dir_name, create_repo_if_not_exists)
+#         self.repo_handler._initialize_repo()
+#         self.repo_handler.initialize_metadata()
+#         self.repo_handler.initialize_progress()
+#         self.repo_handler.initialize_gitignore()
+#         self.repo_handler.initialize_git_lfs()
+#         self.repo_handler.initialize_submodules()
+#         self.repo_handler.initialize_backup_verification()
+#         self.repo_handler.initialize_file_integrity_checks()
+#         self.repo_handler.initialize_version_creation()
+#         self.repo_handler.initialize_file_tracking()
+#         self.repo_handler.initialize_file_status()
+#         self.repo_handler.initialize_file_history()
+#         self.repo_handler.initialize_dataframe_loading()
+#         self.repo_handler.initialize_dataframe_saving()
+#         self.repo_handler.initialize_parallel_scanning()
+#         self.repo_handler.initialize_git_cleaning()
+#         self.repo_handler.initialize_git_operations()
+#         self.repo_handler.initialize_gitignore_operations()
+#         self.repo_handler.initialize_git_lfs_operations()
+#         self.repo_handler.initialize_submodule_operations()
+#         self.repo_handler.initialize_backup_verification_operations()
+#         self.repo_handler.initialize_file_integrity_check_operations()
+#         self.repo_handler.initialize_version_creation_operations()
+#         self.repo_handler.initialize_file_tracking_operations()
+#         self.repo_handler.initialize_file_status_operations()
+#         self.repo_handler.initialize_file_history_operations()
+#         self.repo_handler.initialize_dataframe_loading_operations()
+#         self.repo_handler.initialize_dataframe_saving_operations()
+#         self.repo_handler.initialize_parallel_scanning_operations()
+#         self.repo_handler.initialize_git_cleaning_operations()
+        
 if __name__ == "__main__":
         # Example Usage (requires a directory to be a Git repository)
     # Ensure logging is configured if src.utils.logger is not available.
@@ -2596,10 +3161,10 @@ if __name__ == "__main__":
 
     try:
         repo_path = Path(ROOT_DIR).resolve()
-        repo = git.Repo(repo_path)
-        git_ops_helper = GitOpsHelper(repo)
+        repo = Repo(repo_path)
+        git_ops = GitOpsHelper(repo)
         metdata_handler = MetadataFileHandler(repo_path=ROOT_DIR)
-        repo_handler = RepoHandler(repository_path="/home/yosh/repos/TLATOv4.1/", metadata_filename="/home/yosh/repos/TLATOv4.1/repositories/metadata.json.zst", progress_dir_name="/home/yosh/repos/TLATOv4.1/progress_dir", create_repo_if_not_exists=True, )
+        repo_handler = RepoHandler(repo_path="/home/yosh/repos/TLATOv4.1/", metadata_filename="/home/yosh/repos/TLATOv4.1/repositories/metadata.json.zst", progress_dir_name="/home/yosh/repos/TLATOv4.1/progress_dir", create_repo_if_not_exists=True, )
         # Example: Get summary
         summary = repo_handler.get_summary_metadata()
         actual_log_statement("info", f"{LOG_INS}:INFO>>Repository Summary: {summary}", Path(__file__).stem, False)

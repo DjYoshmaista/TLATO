@@ -1,4 +1,5 @@
 # src/utils/compression.py
+import pandas as pd
 import zstandard as zstd
 import gzip
 import os
@@ -117,22 +118,53 @@ def decompress_gzip_content(gzipped_content: bytes) -> bytes:
         raise # Re-raise or return None/empty bytes
 
 
-def decompress_file(input_filepath: str, output_filepath: str):
+def decompress_file(input_filepath: str, output_filepath: str, remove_original: Optional[bool] = False, compression: Optional[str] = None, decompresslevel: Optional[int] = 22, dec_to_df: Optional[bool] = False, dec_to_json: Optional[bool] = False):
     """Decompresses a zstandard file."""
     try:
         if input_filepath.endswith('.zst') or input_filepath.endswith('.zstd'):
             dctx = zstd.ZstdDecompressor()
             with open(input_filepath, 'rb') as ifh, open(output_filepath, 'wb') as ofh:
                 dctx.copy_stream(ifh, ofh)
+            # If the original file is not needed, remove it
+            if os.path.exists(input_filepath) and remove_original:
+                os.remove(input_filepath)
             log_statement('debug', f"{LOG_INS}:DEBUG>>Decompressed '{input_filepath}' to '{output_filepath}'", Path(__file__).stem)
         elif input_filepath.endswith('.gz') or input_filepath.endswith('.gzip'):
-            dctx = gzip.GzipDecompressor()
-            with open(input_filepath, 'rb') as ifh, open(output_filepath, 'wb') as ofh:
-                dctx.compress(ifh, ofh)
+            with gzip.open(input_filepath, 'rb') as ifh, open(output_filepath, 'wb') as ofh:
+                shutil.copyfileobj(ifh, ofh)
+            # If the original file is not needed, remove it
+            if os.path.exists(input_filepath) and remove_original:
+                os.remove(input_filepath)
+            # Log the successful decompression
             log_statement('debug', f"{LOG_INS}:DEBUG>>Decompressed '{input_filepath}' to '{output_filepath}'", Path(__file__).stem)
         else:
             raise ValueError(f"Unsupported compression format for file: {input_filepath}")
-
+        if dec_to_df:
+            n = output_filepath.split('.')[-1]
+            if n == 'json':
+                # Read the decompressed file into a DataFrame
+                return pd.read_json(output_filepath, lines=True)
+            elif n == 'parquet':
+                # Read the decompressed file into a DataFrame
+                return pd.read_parquet(output_filepath)
+            elif n == 'txt':
+                # Read the decompressed file into a DataFrame
+                return pd.read_csv(output_filepath, sep='\t', header=None, quoting=3)
+            if n in ['csv', 'tsv', 'txt', 'text', 'xls', 'xlsx']:
+                # Read the decompressed file into a DataFrame
+                return pd.read_csv(output_filepath, sep=',', header=None, quoting=3)
+            else:
+                raise ValueError(f"Unsupported file format for DataFrame conversion: {n}")
+        return None
+    except ValueError as ve:
+        log_statement('error', f"{LOG_INS}:ERROR>>ValueError during decompression: {ve}", Path(__file__).stem)
+        # Clean up potentially incomplete output file
+        if os.path.exists(output_filepath):
+            try:
+                os.remove(output_filepath)
+            except OSError:
+                pass
+        raise
     except FileNotFoundError:
         log_statement('error', f"{LOG_INS}:ERROR>>Input file not found for decompression: {input_filepath}", Path(__file__).stem)
         raise

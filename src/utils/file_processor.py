@@ -1,11 +1,9 @@
 # --- Standalone Data Processing Functions ---
 # (These could be part of DataRepository or separate)
-from src.utils.logger import configure_logging, log_statement
+from src.utils.logger import log_statement
 from src.utils.compression import decompress_file, compress_file, stream_decompress_lines, stream_compress_lines
 import os
 import shutil
-
-configure_logging()
 
 class FileProcessor:
     def __init(self, input_filepath: str, output_filepath: str):
