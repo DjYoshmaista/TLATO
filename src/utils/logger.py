@@ -13,6 +13,8 @@ import logging.handlers
 import os
 import sys
 from pathlib import Path
+from typing import Optional
+from src.data.constants import *
 
 # --- Configuration ---
 LOG_LEVEL = logging.INFO  # Default root log level (change as needed)
@@ -35,8 +37,8 @@ DEFAULT_LOG_FILE_APP = DEFAULT_LOG_DIR / 'app.log'
 DEFAULT_LOG_FILE_ERR = DEFAULT_LOG_DIR / 'errors.log'
 
 # Log Rotation Settings
-MAX_BYTES = 100 * 1024 * 1024  # 10 MB
-BACKUP_COUNT = 50
+MAX_BYTES = 90 * 1024 * 1024  # 10 MB
+BACKUP_COUNT = 5
 
 # Log Format
 # LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)-8s - [%(filename)s:%(lineno)d] - %(message)s'
@@ -143,10 +145,9 @@ def configure_logging(
         if file_logging:
             init_logger.info(f"Logging configured. Main log: {log_file_path}, Error log: {error_log_file_path}")
         elif console_logging:
-            init_logger(loglevel=str("info"), logstatement=str(f"Logging configured (Console only)."), main_logger=str(__name__))
+            init_logger.info("Logging configured (Console only).")
         else:
             print("WARNING: All logging handlers disabled.") # Use print if logger might not output
-
         _logging_configured = True # Mark as configured
 
     except Exception as e:
@@ -157,12 +158,7 @@ def configure_logging(
         # Depending on the severity, the main app might need to exit
         # raise # Re-raise the exception so the main app knows config failed?
 
-# --- Define constants for use by other modules ---
-LOG_DIR = DEFAULT_LOG_DIR
-APP_LOG_FILE = DEFAULT_LOG_FILE_APP
-ERROR_LOG_FILE = DEFAULT_LOG_FILE_ERR
-
-def log_statement(loglevel, logstatement, main_logger, exc_info=None):
+def log_statement(loglevel: str = None, logstatement: str = None, main_logger: str | Path = None, exc_info: bool = None):
     """
     Logs a statement with the specified log level, logger, and optional exception info.
 
@@ -185,10 +181,6 @@ def log_statement(loglevel, logstatement, main_logger, exc_info=None):
 
     # Log the message with optional exception info and correct stacklevel
     main_log.log(log_level, logstatement, exc_info=exc_info, stacklevel=2)
-
-    # Additionally log to the "app.log" logger with correct stacklevel
-    app_log = logging.getLogger("app.log")
-    app_log.log(log_level, logstatement, exc_info=exc_info, stacklevel=2)
 
 # --- Example Usage (if run directly) ---
 if __name__ == '__main__':

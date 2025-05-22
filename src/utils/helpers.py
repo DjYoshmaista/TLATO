@@ -5,9 +5,9 @@ Central Configuration File
 Consolidates settings, paths, hyperparameters, and other configuration
 variables used throughout the application.
 """
-
 import os
 from pathlib import Path
+import subprocess
 import torch
 import sys
 import hashlib
@@ -15,9 +15,11 @@ import time
 from datetime import datetime as dt, timezone
 from typing import Optional, Dict, Any, Generator, Union
 import inspect
-from .logger import log_statement
-from .hashing import generate_data_hash, hash_filepath
+from src.utils.logger import log_statement
+from src.utils.hashing import generate_data_hash, hash_filepath
 from src.data.constants import *
+
+LOG_INS = "{__file__}:{__name__}"
 
 # --- Project Root ---
 # Assumes this file is in project_root/src/utils
@@ -232,10 +234,11 @@ def _ts_to_iso_utc(timestamp: float) -> str:
         return "" # Return empty string for invalid timestamps
 
 def _get_repo_hash(path_obj: Path):
+    global LOG_INS
     # Generates a consistent hash for a directory path.
-    log_statement(loglevel='info', logstatement=f"Getting repository hash for {path_obj}:", main_logger=__name__)
+    log_statement('info', f"{LOG_INS}:INFO>>Getting repository hash for {path_obj}:", Path(__file__).stem)
     normalized_path_str = str(path_obj.resolve())
-    log_statement(loglevel='info', logstatement=f"Generating hash for path {normalized_path_str}", main_logger=__name__)
+    log_statement('info', f"{LOG_INS}:INFO>>Generating hash for path {normalized_path_str}", Path(__file__).stem)
     return hashlib.sha256(normalized_path_str.encode()).hexdigest()[:16]
 
 def _get_max_workers(config=None):
@@ -272,21 +275,21 @@ def _generate_file_paths(start_path: Path) -> Generator[Path, None, None]:
                     yield Path(entry.path) # Ensure Path object
             except OSError as e:
                 # Log permission errors or other OS issues accessing directory entries
-                log_statement(loglevel='warning',
-                              logstatement=f"{LOG_INS} - OS Error accessing entry {entry.path}: {e}. Skipping entry.",
-                              main_logger=__name__)
+                log_statement('warning',
+                              f"{LOG_INS} - OS Error accessing entry {entry.path}: {e}. Skipping entry.",
+                              __name__)
             except Exception as e_inner:
-                 log_statement(loglevel='error',
-                              logstatement=f"{LOG_INS} - Unexpected error processing entry {entry.path}: {e_inner}",
-                              main_logger=__name__, exc_info=True)
+                 log_statement('error',
+                              f"{LOG_INS} - Unexpected error processing entry {entry.path}: {e_inner}",
+                              __name__, True)
     except OSError as e_outer:
-         log_statement(loglevel='error',
-                      logstatement=f"{LOG_INS} - OS Error scanning directory {start_path}: {e_outer}. Check permissions.",
-                      main_logger=__name__)
+         log_statement('error',
+                      f"{LOG_INS} - OS Error scanning directory {start_path}: {e_outer}. Check permissions.",
+                      __name__)
     except Exception as e_scan:
-        log_statement(loglevel='error',
-                      logstatement=f"{LOG_INS} - Unexpected error scanning directory {start_path}: {e_scan}",
-                      main_logger=__name__, exc_info=True)
+        log_statement('error',
+                      f"{LOG_INS} - Unexpected error scanning directory {start_path}: {e_scan}",
+                      __name__, True)
 
 def get_file_type_from_extension(file_path: Path) -> str:
     """Determines a simple file type based on its extension."""
@@ -356,9 +359,9 @@ def _read_content_snippet(file_path: Path, is_likely_text: bool) -> str:
                          snippet += f" (first {CONTENT_SNIPPET_BYTES} bytes, hex representation)"
                 except Exception:
                     snippet = f"[Binary data, {len(binary_data)} bytes, preview unavailable]"
-        log_statement("debug", f"{LOG_INS}:DEBUG>>Read content snippet for {file_path}", __file__, False)
+        log_statement("debug", f"{LOG_INS}:DEBUG>>Read content snippet for {file_path}", Path(__file__).stem, False)
     except Exception as e:
-        log_statement("warning", f"{LOG_INS}:WARNING>>Could not read content snippet for {file_path}: {e}", __file__, True)
+        log_statement("warning", f"{LOG_INS}:WARNING>>Could not read content snippet for {file_path}: {e}", Path(__file__).stem, True)
         snippet = f"[Error reading snippet: {e}]"
     return snippet
 
@@ -381,7 +384,7 @@ def process_file(file_path_str: str) -> Dict[str, Any]:
             - 'content_snippet': A small snippet of the file's content.
             - 'error': An error message if processing failed, None otherwise.
     """
-    log_statement("debug", f"{LOG_INS}:DEBUG>>Starting processing for file: {file_path_str}", __file__, False)
+    log_statement("debug", f"{LOG_INS}:DEBUG>>Starting processing for file: {file_path_str}", Path(__file__).stem, False)
 
     file_path = Path(file_path_str)
     result: Dict[str, Any] = {
@@ -398,11 +401,11 @@ def process_file(file_path_str: str) -> Dict[str, Any]:
     try:
         if not file_path.exists():
             result["error"] = "File not found."
-            log_statement("warning", f"{LOG_INS}:WARNING>>File not found: {file_path_str}", __file__, False)
+            log_statement("warning", f"{LOG_INS}:WARNING>>File not found: {file_path_str}", Path(__file__).stem, False)
             return result
         if not file_path.is_file():
             result["error"] = "Path is not a file."
-            log_statement("warning", f"{LOG_INS}:WARNING>>Path is not a file: {file_path_str}", __file__, False)
+            log_statement("warning", f"{LOG_INS}:WARNING>>Path is not a file: {file_path_str}", Path(__file__).stem, False)
             return result
 
         # Get basic file stats
@@ -419,24 +422,24 @@ def process_file(file_path_str: str) -> Dict[str, Any]:
             while chunk := f.read(8192): # Read in chunks
                 hasher.update(chunk)
         result["sha256_hash"] = hasher.hexdigest()
-        log_statement("debug", f"{LOG_INS}:DEBUG>>Calculated SHA256 hash for {file_path.name}", __file__, False)
+        log_statement("debug", f"{LOG_INS}:DEBUG>>Calculated SHA256 hash for {file_path.name}", Path(__file__).stem, False)
 
         # Determine file type and read snippet
         result["file_type"] = get_file_type_from_extension(file_path)
         is_likely_text = result["file_type"] in ["Text", "Markdown", "Python Script", "JSON Data", "CSV Data", "Log File", "XML Data", "HTML Document", "CSS Stylesheet", "JavaScript"]
         result["content_snippet"] = _read_content_snippet(file_path, is_likely_text)
 
-        log_statement("info", f"{LOG_INS}:INFO>>Successfully processed file: {file_path.name}", __file__, False)
+        log_statement("info", f"{LOG_INS}:INFO>>Successfully processed file: {file_path.name}", Path(__file__).stem, False)
 
     except PermissionError:
         result["error"] = "Permission denied."
-        log_statement("error", f"{LOG_INS}:ERROR>>Permission denied for file: {file_path_str}", __file__, True)
+        log_statement("error", f"{LOG_INS}:ERROR>>Permission denied for file: {file_path_str}", Path(__file__).stem, True)
     except IOError as e:
         result["error"] = f"IOError: {e}"
-        log_statement("error", f"{LOG_INS}:ERROR>>IOError for file {file_path_str}: {e}", __file__, True)
+        log_statement("error", f"{LOG_INS}:ERROR>>IOError for file {file_path_str}: {e}", Path(__file__).stem, True)
     except Exception as e:
         result["error"] = f"Unexpected error: {str(e)}"
-        log_statement("critical", f"{LOG_INS}:CRITICAL>>Unexpected error processing file {file_path_str}: {e}", __file__, True)
+        log_statement("critical", f"{LOG_INS}:CRITICAL>>Unexpected error processing file {file_path_str}: {e}", Path(__file__).stem, True)
 
     return result
 
@@ -464,7 +467,7 @@ def init_progbar(total: int, desc: str = "") -> Generator:
         from tqdm import tqdm
         return tqdm(total=total, desc=desc, unit="file")
     except ImportError:
-        log_statement("warning", f"{LOG_INS}:WARNING>>tqdm not available, using simple counter.", __file__, False)
+        log_statement("warning", f"{LOG_INS}:WARNING>>tqdm not available, using simple counter.", Path(__file__).stem, False)
         return range(total)  # Fallback to a simple range if tqdm is not available
 
 def _get_file_metadata(filepath: Path) -> Optional[Dict[str, Any]]:
@@ -477,7 +480,7 @@ def _get_file_metadata(filepath: Path) -> Optional[Dict[str, Any]]:
 
     try:
         if not filepath.is_file():
-            log_statement(loglevel='warning', logstatement=f"{LOG_INS} - Skipping non-file item: {filepath}", main_logger=__file__)
+            log_statement('warning', f"{LOG_INS}:WARNING>> - Skipping non-file item: {filepath}", Path(__file__).stem)
             return None
 
         stat = filepath.stat()
@@ -533,22 +536,21 @@ def _get_file_metadata(filepath: Path) -> Optional[Dict[str, Any]]:
                 # Default for any other unexpected columns
                 else: metadata[key] = ""
 
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS} - Successfully gathered metadata for {filepath.name}.", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS}:DEBUG>> - Successfully gathered metadata for {filepath.name}.", Path(__file__).stem)
         return metadata
 
     except PermissionError as pe:
-        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Permission error getting metadata for {filepath.name}: {pe}", main_logger=__file__)
+        log_statement('error', f"{LOG_INS}:ERROR>> - Permission error getting metadata for {filepath.name}: {pe}", Path(__file__).stem)
         return None
     except OSError as ose:
-        log_statement(loglevel='error', logstatement=f"{LOG_INS} - OS error getting metadata for {filepath.name}: {ose}", main_logger=__file__)
+        log_statement('error', f"{LOG_INS}:ERROR>> - OS error getting metadata for {filepath.name}: {ose}", Path(__file__).stem)
         return None
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"{LOG_INS} - Unexpected error getting metadata for {filepath.name}: {e}", main_logger=__file__)
+        log_statement('error', f"{LOG_INS}:ERROR>> - Unexpected error getting metadata for {filepath.name}: {e}", Path(__file__).stem)
         return None
 
 def save_dataframe_to_parquet_zst(df: pd.DataFrame, output_path: Path):
     """Saves a pandas DataFrame to a Zstandard-compressed Parquet file."""
-    func_logger = str(__name__) # Use module name for logger
     try:
         # Ensure parent directory exists
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -561,25 +563,25 @@ def save_dataframe_to_parquet_zst(df: pd.DataFrame, output_path: Path):
              except ImportError: pass # cudf not actually available
 
         if cudf is not None and isinstance(df, cudf.DataFrame):
-            log_statement(loglevel='debug', logstatement="Converting cuDF DataFrame to Pandas before Parquet save.", main_logger=func_logger)
+            log_statement('debug', "Converting cuDF DataFrame to Pandas before Parquet save.", Path(__file__).stem)
             df_pandas = df.to_pandas()
         elif isinstance(df, pd.DataFrame):
              df_pandas = df # Assume it's already a pandas DataFrame
         else:
-             log_statement(loglevel='error', logstatement=f"Unsupported DataFrame type for Parquet saving: {type(df)}", main_logger=func_logger)
+             log_statement('error', f"Unsupported DataFrame type for Parquet saving: {type(df)}", Path(__file__).stem)
              return False
 
         # Save using pandas to_parquet with zstd compression
         # Requires 'pyarrow' (recommended) or 'fastparquet' engine
         df_pandas.to_parquet(output_path, compression='zstd', engine='pyarrow', index=False)
 
-        log_statement(loglevel='info', logstatement=f"DataFrame saved to compressed Parquet: {output_path}", main_logger=func_logger)
+        log_statement('info', f"DataFrame saved to compressed Parquet: {output_path}", Path(__file__).stem)
         return True
     except ImportError:
-        log_statement(loglevel='error', logstatement="Error saving to Parquet: 'pyarrow' or 'fastparquet' library not found. Please install one (e.g., pip install pyarrow).", main_logger=func_logger)
+        log_statement('error', "Error saving to Parquet: 'pyarrow' or 'fastparquet' library not found. Please install one (e.g., pip install pyarrow).", Path(__file__).stem)
         return False
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Failed to save DataFrame to compressed Parquet {output_path}: {e}", main_logger=func_logger, exc_info=True)
+        log_statement('error', f"Failed to save DataFrame to compressed Parquet {output_path}: {e}", Path(__file__).stem, exc_info=True)
         # Clean up potentially incomplete file
         if output_path.exists():
             try: output_path.unlink()
@@ -588,7 +590,6 @@ def save_dataframe_to_parquet_zst(df: pd.DataFrame, output_path: Path):
 
 def compress_string_to_file(content_string: str, output_filepath: Path, encoding='utf-8'):
     """Compresses a string directly to a zstandard file."""
-    func_logger = str(__name__)
     # Define ZSTD constants locally if not imported globally
     ZSTD_COMPRESSION_LEVEL = 22 # Or import from config/constants
     ZSTD_THREADS = 0 # Or import from config/constants
@@ -598,37 +599,18 @@ def compress_string_to_file(content_string: str, output_filepath: Path, encoding
         cctx = zstd.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL, threads=ZSTD_THREADS)
         with open(output_filepath, 'wb') as f_out:
              f_out.write(cctx.compress(encoded_content))
-        log_statement(loglevel='debug', logstatement=f"Compressed string content to '{output_filepath}'", main_logger=func_logger)
+        log_statement('debug', f"Compressed string content to '{output_filepath}'", Path(__file__).stem)
         return True
     except FileNotFoundError:
-         log_statement(loglevel='error', logstatement=f"Output path directory likely invalid for compression: {output_filepath}", main_logger=func_logger)
+         log_statement('error', f"Output path directory likely invalid for compression: {output_filepath}", Path(__file__).stem)
          return False
     except Exception as e:
-         log_statement(loglevel='error', logstatement=f"Error compressing string to file '{output_filepath}': {e}", main_logger=func_logger, exc_info=True)
+         log_statement('error', f"Error compressing string to file '{output_filepath}': {e}", Path(__file__).stem, exc_info=True)
          # Clean up potentially incomplete output file
          if output_filepath.exists():
              try: output_filepath.unlink()
              except OSError: pass
          return False
-
-# --- Dummy DataLoader (from original helpers) ---
-class DummyDataLoader:
-    """A simple iterable that yields dummy batches."""
-    def __init__(self, batch_size=4, num_batches=10, input_dim=128, num_classes=6, device=DEFAULT_DEVICE):
-        self.batch_size = batch_size
-        self.num_batches = num_batches
-        self.input_dim = input_dim
-        self.num_classes = num_classes
-        self.device = device
-
-    def __iter__(self):
-        for _ in range(self.num_batches):
-            inputs = torch.randn(self.batch_size, self.input_dim, device=self.device)
-            targets = torch.randn(self.batch_size, self.num_classes, device=self.device)
-            yield inputs, targets
-
-    def __len__(self):
-        return self.num_batches
 
 # --- Save and Load State Functions (from original helpers) ---
 def save_state(model: torch.nn.Module, filename: str, optimizer: Optional[torch.optim.Optimizer] = None, scheduler: Optional[Any] = None, epoch: Optional[int] = None, **kwargs):
@@ -644,16 +626,16 @@ def save_state(model: torch.nn.Module, filename: str, optimizer: Optional[torch.
     try:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         torch.save(state, filepath)
-        log_statement(loglevel='info', logstatement=f"Checkpoint saved: {filepath}", main_logger=str(__name__))
+        log_statement('info', f"Checkpoint saved: {filepath}", str(__name__))
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Failed to save checkpoint {filepath}: {e}", main_logger=str(__name__), exc_info=True)
+        log_statement('error', f"Failed to save checkpoint {filepath}: {e}", str(__name__), exc_info=True)
 
 
 def load_state(model: torch.nn.Module, filename: str, optimizer: Optional[torch.optim.Optimizer] = None, scheduler: Optional[Any] = None, device: Optional[Union[str, torch.device]] = None, strict: bool = True) -> Optional[Dict[str, Any]]:
     """ Loads state from checkpoint, returning metadata. """
     filepath = CHECKPOINT_DIR / filename
     if not filepath.exists():
-        log_statement(loglevel='error', logstatement=f"Checkpoint file not found: {filepath}", main_logger=str(__name__))
+        log_statement('error', f"Checkpoint file not found: {filepath}", str(__name__))
         return None
     try:
         # Determine map_location based on device argument or model's current device
@@ -677,18 +659,168 @@ def load_state(model: torch.nn.Module, filename: str, optimizer: Optional[torch.
         if scheduler and checkpoint.get('scheduler_state_dict'):
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
-        log_statement(loglevel='info', logstatement=f"Checkpoint loaded successfully from {filepath} to device '{map_loc}'.", main_logger=str(__name__))
+        log_statement('info', f"Checkpoint loaded successfully from {filepath} to device '{map_loc}'.", str(__name__))
 
         # Return metadata (epoch and any other custom kwargs saved)
         metadata = {k: v for k, v in checkpoint.items() if k not in ['model_state_dict', 'optimizer_state_dict', 'scheduler_state_dict']}
         return metadata
 
     except FileNotFoundError: # Should be caught by initial check, but redundant safety
-         log_statement(loglevel='error', logstatement=f"Checkpoint file not found during load attempt: {filepath}", main_logger=str(__name__))
+         log_statement('error', f"Checkpoint file not found during load attempt: {filepath}", str(__name__))
          return None
     except Exception as e:
-        log_statement(loglevel='error', logstatement=f"Failed to load checkpoint from {filepath}: {e}", main_logger=str(__name__), exc_info=True)
+        log_statement('error', f"Failed to load checkpoint from {filepath}: {e}", str(__name__), exc_info=True)
         return None
+
+# --- LRUCache Function Implementation ---
+from functools import lru_cache
+from typing import Callable, Any
+from pathlib import Path
+import hashlib
+import os
+import time
+from datetime import datetime as dt, timezone
+from typing import Dict, Optional, Union, Generator
+import subprocess
+import pandas as pd
+import torch
+import numpy as np
+import logging
+from typing import TYPE_CHECKING
+from typing import Optional, Union, Callable, Generator, Dict, Any
+from collections import OrderedDict
+
+class LRUCache:
+    def __init__(self, maxsize: int):
+        self.cache = OrderedDict()
+        try:
+            self.capacity = int(maxsize) if maxsize is None else 16384
+        except (ValueError, TypeError):
+            self.capacity = 16384
+            log_statement('warning', f"{LOG_INS}:WARNING>>Invalid maxsize '{maxsize}' provided. Defaulting to 16384.", str(__name__))
+        self.hits = 0
+        self.misses = 0
+        self.is_repo_df = False
+        self.maxsize = maxsize
+
+    def is_repo(self):
+        if self.is_repo_df is None:
+            # Check if the cache is a DataFrame
+            self.is_repo_df = isinstance(self.cache, pd.DataFrame)
+        self.repo_is_df = True
+        return self.is_repo_df
+
+    def get(self, key: str) -> Optional[Any]:
+        if key not in self.cache:
+            self.misses += 1
+            return None
+        else:
+            # Item Found!  Crucially, move the accessed item to the end of the OrderedDict
+            # to maintain the LRU order
+            self.hits += 1
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        
+    def put(self, key: str, value: Any) -> None:
+        if key in self.cache:
+            # Item already exists, move it to the end
+            self.cache.move_to_end(key)
+        self.cache[key] = value
+        cache_size = len(self.cache)
+        try:
+            capacity_int = int(self.capacity)
+            if cache_size > capacity_int:
+                # Remove the first item (the least recently used)
+                self.cache.popitem(last=False)
+        except Exception as e:
+            log_statement('error', f"LRUCache: Error while managing cache size: {e}", str(__name__))
+            if isinstance(self.capacity, str) and self.capacity.isdigit():
+                self.capacity = 16384
+                if cache_size > self.capacity:
+                    self.cache.popitem(last=False)
+        log_statement('info', f"LRUCache: Added/Updated key '{key}' in cache.", str(__name__))
+        log_statement('info', f"LRUCache: Current cache size: {len(self.cache)} / {self.capacity}", str(__name__))
+        log_statement('info', f"LRUCache: Hits: {self.hits}, Misses: {self.misses}", str(__name__))
+    
+    def __repr__(self):
+        return f"LRUCache({self.capacity}, hits={self.hits}, misses={self.misses})"
+    
+    def __len__(self):
+        return len(self.cache)
+    
+    def __contains__(self, key: str) -> bool:
+        return key in self.cache
+    
+    def __getitem__(self, key: str) -> Optional[Any]:
+        return self.get(key)
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.put(key, value)
+
+    def clear(self) -> None:
+        """Clears the cache."""
+        self.cache.clear()
+        self.hits = 0
+        self.misses = 0
+        log_statement('info', "LRUCache: Cleared all items from cache.", str(__name__))
+
+    def items(self):
+        return self.cache.items()
+    
+    def keys(self):
+        return self.cache.keys()
+    
+    def values(self):
+        return self.cache.values()
+    
+# --- Ensure Directory Exists Helper Function ---
+def ensure_dir_exists(dir):
+    """
+    Ensures the specified directory exists. Attempts multiple methods to create the directory
+    if it does not exist, with extensive logging and error handling.
+
+    Args:
+        dir (str or Path): The directory path to ensure exists.
+
+    Raises:
+        OSError: If all attempts to create the directory fail.
+    """
+    dir = Path(dir)  # Ensure dir is a Path object
+
+    if dir.exists() and dir.is_dir():
+        log_statement('info', f"Directory already exists: {dir}", Path(__file__).stem)
+        return
+
+    log_statement('warning', f"Directory does not exist, attempting to create: {dir}", Path(__file__).stem)
+
+    # Attempt 1: Use mkdir with parents=True
+    try:
+        dir.mkdir(parents=True, exist_ok=True)
+        log_statement('info', f"Successfully created directory using mkdir: {dir}", Path(__file__).stem)
+        return
+    except Exception as e:
+        log_statement('error', f"Failed to create directory using mkdir: {e}", Path(__file__).stem, exc_info=True)
+
+        # Attempt 2: Use os.makedirs
+        try:
+            os.makedirs(dir, exist_ok=True)
+            log_statement('info', f"Successfully created directory using os.makedirs: {dir}", Path(__file__).stem)
+            return
+        except Exception as e:
+            log_statement('error', f"Failed to create directory using os.makedirs: {e}", Path(__file__).stem, exc_info=True)
+
+            # Attempt 3: Use subprocess to call system-level mkdir
+            try:
+                subprocess.run(['mkdir', '-p', str(dir)], check=True)
+                log_statement('info', f"Successfully created directory using subprocess: {dir}", Path(__file__).stem)
+                return
+            except Exception as e:
+                log_statement('error', f"Failed to create directory using subprocess: {e}", Path(__file__).stem, exc_info=True)
+
+    # If all attempts fail, raise an error
+    error_message = f"{LOG_INS}:ERROR>>All attempts to create directory failed: {dir}"
+    log_statement('critical', error_message, Path(__file__).stem)
+    raise OSError(error_message)
 
 # --- Dummy Input Function (from original helpers) ---
 def dummy_input(batch_size: int = 4, seq_len: int = 10, features: int = 128, device = None):
@@ -758,9 +890,9 @@ def dummy_input(batch_size: int = 4, seq_len: int = 10, features: int = 128, dev
 #     self.assertEqual(self.scheduler.state_dict(), loaded_scheduler.state_dict())
 #         self.assertEqual(loaded_meta['epoch'], epoch_to_save)
 #         self.assertEqual(loaded_meta['info'], extra_meta['info'])
-#         log_statement(loglevel=str("debug"), logstatement=str("Save and load cycle completed successfully."), main_logger=__file__)
+#         log_statement(str("debug"), str("Save and load cycle completed successfully.")Path(__file__).stem)
 #         # Clean up
 #         if self.test_filepath.exists():
 #             os.remove(self.test_filepath)
-#         log_statement(loglevel=str("debug"), logstatement=str(f"Removed test checkpoint file: {self.test_filepath}"), main_logger=__file__)
-#         log_statement(loglevel=str("debug"), logstatement=str("Save and load cycle completed successfully."), main_logger=__file__)
+#         log_statement(str("debug"), str(f"Removed test checkpoint file: {self.test_filepath}")Path(__file__).stem)
+#         log_statement(str("debug"), str("Save and load cycle completed successfully.")Path(__file__).stem)

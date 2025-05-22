@@ -9,6 +9,10 @@ import re
 import shutil
 import inspect
 import pandas as pd
+import io
+import random
+import subprocess
+import difflib
 import concurrent.futures
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Tuple
@@ -31,7 +35,7 @@ except ImportError:
     actual_log_statement('warning', f"{LOG_INS}:WARNING>>gzip Compression Utilities from src.utils.compression not available.  File compression features will be disabled", Path(__file__).stem)
 from src.utils.config import *
 from src.data.constants import *
-from src.utils.helpers import process_file, LRUCache, _ensure_pathResolve
+from src.utils.helpers import process_file, LRUCache, _ensure_pathResolve, ensure_dir_exists
 from src.core.models import FileMetadataEntry, FileVersion, MetadataCollection # Pydantic models
 from src.utils.hashing import *
 
@@ -65,25 +69,13 @@ except ImportError:
             "os_created_utc": datetime.now(timezone.utc).isoformat(),
             "custom_hashes": {algo: "placeholder_hash" for algo in (hash_algorithms or ["md5","sha256"])} if calculate_custom_hashes else {}
         }
-# Configure basic logging for the module if not already configured by an external logger.
-# The user specified a `log_statement` function, which implies an existing setup.
-# For this refactoring, I will define a placeholder `log_statement` and `LOG_INS`
-# generation based on the user's description. It's assumed the actual `configure_logging`
-# and `log_statement` are available in `src.utils.logger`.
 
-# Placeholder for logging setup - In a real scenario, this would come from src.utils.logger
-# Ensure this is adapted to the actual logging infrastructure.
-LOG_LEVELS = {
-    "debug": logging.DEBUG,
-    "info": logging.INFO,
-    "warning": logging.WARNING,
-    "error": logging.ERROR,
-    "critical": logging.CRITICAL,
-    "exception": logging.ERROR, # 'exception' level usually logs ERROR with exc_info
-}
+LOG_INS = f"{__file__}:{__name__}:"
 
 # Global utility for structured log messages
 def _get_log_ins(frame, class_name: Optional[str] = None) -> str:
+    global LOG_INS
+    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     if not frame: return "unknown_module::unknown_func::unknown_line"
     module_name = Path(frame.f_code.co_filename).stem
     func_name = frame.f_code.co_name
@@ -103,11 +95,15 @@ class GitOpsHelper:
                  create_if_not_exist: bool = False, 
                  repo: Optional[Repo] = None, 
                  root_dir: Path = ROOT_DIR):
+        global LOG_INS
+        self.l_ins = LOG_INS
         self.path: Path = repo_path
         self.git_dir: Path = self.path / ".git"
         self.root_dir = root_dir
-        self.gifh = GitignoreHandler(repo, git_ops=self)
-
+        self.repo = None
+        self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
+        self.git_module = git
+        self.create_if_not_exist = create_if_not_exist
         if self.git_dir.exists() and self.git_dir.is_dir():
             log_statement('info', f"{LOG_INS}:INFO>>Git directory exists at {self.git_dir}.", Path(__file__).stem)
             try:
@@ -127,6 +123,8 @@ class GitOpsHelper:
             log_statement('error', f"{LOG_INS}:ERROR>>Git directory does not exist at {self.git_dir} and create_if_not_exist is False.", Path(__file__).stem)
             self.repo = None
             raise GitCommandError(f"Git directory does not exist at {self.git_dir}.")
+        
+        self.gifh = GitignoreHandler(self.repo, git_ops=self)
         if self.repo:
             self.gitignore_path = self.path / GITIGNORE_FILENAME
             self._ensure_gitignore()
@@ -299,6 +297,8 @@ class GitOpsHelper:
 class MetadataFileHandler:
     """Handles reading and writing of the JSON metadata file."""
     def __init__(self, repo_path: Path, metadata_filename: str = METADATA_FILENAME, use_compression: str = 'zst'):
+        global LOG_INS
+        self.l_ins = LOG_INS
         self.repo_path = repo_path
         self.metadata_filename_actual = metadata_filename # Store base name
         self.use_compression = COMPRESSION_USED # e.g., "gzip"
@@ -427,10 +427,12 @@ class MetadataFileHandler:
             except Exception as e:
                 actual_log_statement('exception', f"{LOG_INS}:EXCEPTION>>Error writing metadata to {self.metadata_filepath}: {e}", Path(__file__).stem)
                 return False
+
 class ProgressFileHandler:
     """Handles saving and loading of progress files."""
-
     def __init__(self, root_dir: Path, repo_path: Path, progress_dir_name: str = PROGRESS_DIR, git_ops: Optional[GitOpsHelper] = None):
+        global LOG_INS
+        self.l_ins = LOG_INS
         self.progress_dir = f"{repo_path}/{progress_dir_name}"
         Path(self.progress_dir).mkdir(parents=True, exist_ok=True)
         self._log_ins_class = self.__class__.__name__
@@ -485,11 +487,25 @@ class ProgressFileHandler:
 class GitignoreHandler:
     """Handles reading and modifying the .gitignore file."""
     def __init__(self, repo: Repo, gitignore_name=".gitgnore", git_ops: GitOpsHelper = None, gitignore_path: Optional[Path] = None):
+        global LOG_INS
+        self.l_ins = LOG_INS
         self.repo = repo
-        self.repo_path = PROJECT_FOLDER
         self.git_ops = git_ops
-        self.gitignore_path = Optional[Path] = None
         self.gitignore_name = gitignore_name
+
+        if gitignore_path:
+            self.gitignore_path = gitignore_path
+            log_statement('info', f"{LOG_INS}:INFO>>Using gitignore_path '{gitignore_path}' for self.gitignore_path '{self.gitignore_path}'", Path(__file__).stem)
+        elif self.git_ops and hasattr(self.git_ops, 'path'):
+            self.gitignore_path = self.git_ops.path / self.gitignore_name
+            log_statement('info', f"{LOG_INS}:INFO>>Using self.git_ops.path '{self.git_ops.path}' -- '{self.gitignore_path}'", Path(__file__).stem)
+        elif hasattr(self.repo, 'path'):
+            self.gitignore_path = Path(".") / self.gitignore_name
+            log_statement('info', f"{LOG_INS}:INFO>>Using self.repo.working_dir '{self.repo.path}' -- '{self.gitignore_path}'", Path(__file__).stem)
+        else:
+            self.gitignore_path = Path(".") / self.gitignore_name
+            log_statement('warning', f"{LOG_INS}:WARNING>>Could not determine a proper path for .gitignore.  Using default: {self.gitignore_path}", Path(__file__).stem)
+
         # Ensure .gitignore file exists
         if self.git_ops and hasattr(self.git_ops, 'git_repo') and self.git_ops.git_repo:
             try:
@@ -793,8 +809,9 @@ class GitignoreHandler:
         
 class RepoAnalyzer:
     """Analyzes the Git repository for information (read-only operations)."""
-
     def __init__(self, git_ops: GitOpsHelper):
+        global LOG_INS
+        self.l_ins = LOG_INS
         self.git_ops = git_ops
 
     def get_status_for_file(self, filepath: Path) -> Optional[str]:
@@ -1057,6 +1074,8 @@ class RepoAnalyzer:
 class RepoModifier:
     """Modifies the Git repository state (commits, branches, tags, etc.)."""
     def __init__(self, git_ops: GitOpsHelper, metadata_handler: MetadataFileHandler):
+        global LOG_INS
+        self.l_ins = LOG_INS
         self.git_ops = git_ops
         self.metadata_handler = metadata_handler
 
@@ -1266,38 +1285,72 @@ class RepoHandler:
     """Main class for handling a Git repository and its metadata."""
     def __init__(
         self,
-        data_path: Union[str, Path],
-        storage_path: Union[str, Path],
-        repo_path: Union[str, Path],
+        data_path: Union[str, Path] = None,
+        storage_path: Union[str, Path] = None,
+        repo_path: Union[str, Path] = None,
         repo_name: Optional[str] = None,
+        
         metadata_filename: str = METADATA_FILENAME, # From constants
         progress_dir_name: str = PROGRESS_DIR, # From constants
         create_if_not_exist: bool = True, 
         use_dvc: bool = False,
-        metadata_compression: Optional[str] = None, # New argument, e.g., "gzip"
+        metadata_compression: Optional[str] = 'zst', # New argument, e.g., "gzip"
         git_ops: GitOpsHelper = None,
         metadata_handler: MetadataFileHandler = None,
         repo_hash=None,
         ignore_rules=None,
-        repo_index_entry=None
+        repo_index_entry=None,
+        enable_git=True
     ):
+        global LOG_INS
+        LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
+        self.l_ins = LOG_INS
         actual_log_statement("debug", f"{LOG_INS}:DEBUG>>RepoHandler initializing with path: {repo_path}", Path(__file__).stem)
 
         # Ensure data_path is Path object
         self.data_path = _ensure_pathResolve(data_path)
         
         # Ensure storage_path is Path object
-        self.storage_path = _ensure_pathResolve(storage_path)
-
+        if storage_path and not isinstance(storage_path, Path):
+            self.storage_path = _ensure_pathResolve(storage_path)
+            if self.storage_path.is_dir():
+                repo_hash = hashlib.sha256(str(self.data_path).encode()).hexdigest()[:16]
+                self.storage_path = self.storage_path / f"data_repository_{repo_hash}.csv.zst"
+                log_statement('warning', f"{LOG_INS}:WARNING>>Storage path was directory, adjusted to file: {self.storage_path}", Path(__file__).stem)
+            log_statement('warning', f"{LOG_INS}:WARNING>>Storage path was not a Path object, converted: {self.storage_path}", Path(__file__).stem, False)
+        elif storage_path and storage_path.is_dir():
+            self.repo_hash = repo_hash or generate_data_hash(Path(data_path or repo_path or "."))
+            self.storage_path = storage_path / f"data_repository_{self.repo_hash}.json"
+            log_statement('warning', f"{LOG_INS}:WARNING>>Storage path was directory, adjusted to file: {self.storage_path}", Path(__file__).stem, False)
+        elif storage_path and storage_path.is_file():
+            self.storage_path = storage_path
+            log_statement('info', f"{LOG_INS}:INFO>>Storage path is a file: {self.storage_path}", Path(__file__).stem, False)
+        else:
+            hash_val = repo_hash if repo_hash or generate_data_hash(Path(data_path) or Path(repo_path) or ".") else None
+            self.storage_path = BASE_DATA_DIR / "repositories" / f"data_repository_{hash_val}.json"
         self.repo_name = repo_name if repo_name else self.data_path.name
         self.metadata_file_path = self.data_path / METADATA_FILENAME
         self.repo_index_path = self.storage_path.parent / f"{self.storage_path.name.split('.')[0]}_index.json"
         self._lock = threading.Lock()
         self.repo = None
+        self.repo_save = None
         self.git_ops = None
+        if enable_git:
+            try:
+                data_dir = Path(data_path) if data_path else Path(repo_path) if repo_path else None
+                if data_dir and data_dir.is_dir():
+                    self.git_ops = GitOpsHelper(data_dir, create_if_not_exist=False)
+                    actual_log_statement('error', f"{LOG_INS}:ERROR>>GitOpsHelper initialized with existing directory: {data_dir}", Path(__file__).stem, True)
+                else:
+                    self.git_ops = GitOpsHelper(data_path, use_dvc=use_dvc, create=create_if_not_exist)
+                    actual_log_statement('error', f"{LOG_INS}:ERROR>>GitOpsHelper initialized with non-existing directory: {data_dir}", Path(__file__).stem, True)
+            except Exception as e:
+                actual_log_statement("error", f"{LOG_INS}:ERROR>>Failed to initialize GitOpsHelper: {e}", Path(__file__).stem, True)
+                raise
         self.ignore_rules = DEFAULT_GITIGNORE_CONTENT if ignore_rules is None else self.ignore_rules.append(ignore_rules)
         self.metadata_cache = {}
         self.df_cache = LRUCache(maxsize=DF_CACHE_MAXSIZE)
+        self.is_repo_df = self.df_cache.is_repo_df
         self.df = self._load_or_initialize_df()
 
         self.modifier = RepoModifier(git_ops, metadata_handler)
@@ -1331,17 +1384,17 @@ class RepoHandler:
 
         if not self.git_ops:
             self.git_ops: Optional[GitOpsHelper] = self._initialize_git_ops(create_if_not_exist)
-        self.is_new_git_repo = self.git_ops.is_new_repo if self.git_ops else False
+        self.is_new_git_repo = True if self.git_ops else False
 
         self.metadata_handler = MetadataFileHandler(self.repo_path, metadata_filename, use_compression=metadata_compression)
         self.progress_handler = ProgressFileHandler(self.repo_path, progress_dir_name)
         if self.git_ops:
             # Assuming GitignoreHandler constructor takes the GitOpsHelper instance
             self.gitignore_handler = GitignoreHandler(self.git_ops, gitignore_name=GITIGNORE_FILENAME)
-            self.gitignore_handler.get_gitignore_content(create_if_not_exist)
+            self.gitignore_handler.get_gitignore_content()
         else:
             log_statement('warning', f"{LOG_INS}:WARNING>>Git repository not properly initialized via GitOpsHelper for {self.repo_path}. Gitignore handling disabled.", Path(__file__).stem)
-            raise("GitOpsHandler Class Error")
+            
         # Ensure metadata file exists and commit if it's a new repo or file missing
         # This implicitly creates an empty {} metadata file if it's brand new.
         self.metadata_handler.ensure_metadata_file_exists(
@@ -1447,8 +1500,7 @@ class RepoHandler:
             # GitOpsHelper handles its own internal logging for success/failure of git init/load
             helper = GitOpsHelper(
                 repo_path=self.repo_path,
-                create_if_not_exist=create_if_not_exist,
-                logger_name=Path(__file__).stem  # You can pass RepoHandler's logger name, or a derived one
+                create_if_not_exist=create_if_not_exist
             )
 
             if helper.is_valid_repo():
@@ -1534,15 +1586,20 @@ class RepoHandler:
         return entry_data
 
     def _load_or_initialize_df(self) -> pd.DataFrame:
-        # Replace: logger.debug(f"RepoHandler: Attempting to load DataFrame from {self.storage_path}")
         log_statement('debug', f"{LOG_INS}:DEBUG>>Attempting to load DataFrame from {self.storage_path}", Path(__file__).stem, False)
         
         # Check cache first
-        cached_df = self.df_cache.get('df')
+        if isinstance(self.df_cache, LRUCache):
+            cached_df = self.df_cache.get('df')
         if cached_df is not None:
+            # Cache Hit: Return cached DataFrame
             log_statement('info', f"{LOG_INS}:INFO>>Loaded DataFrame from LRU cache.", Path(__file__).stem, False)
             return cached_df
-
+        # Cache miss. Load or compute the DataFrame.  Logic to load from file:
+        if self.storage_path.is_dir():
+            log_statement('error', f"{LOG_INS}:ERROR>>Storage path {self.storage_path} is a directory, not a file. Cannot load DataFrame.", Path(__file__).stem, True)
+            return pd.DataFrame(columns=MAIN_REPO_HEADER)
+        
         if self.storage_path.exists():
             try:
                 df = decompress_file(str(self.storage_path))
@@ -1576,7 +1633,7 @@ class RepoHandler:
         log_statement('info', f"{LOG_INS}:INFO>>DataFrame cache 'df' initialized/updated with columns: {list(df.columns)} and max size: {self.df_cache.maxsize}.", Path(__file__).stem, False)
         return df
 
-    def _save_df_to_storage(self):
+    def _save_df_to_storage(self, is_repo_df: bool = False):
         if self.df is None:
             log_statement('warning', f"{LOG_INS}:WARNING>>DataFrame is None, cannot save to storage.", Path(__file__).stem, False)
             return
@@ -1585,11 +1642,13 @@ class RepoHandler:
         
         lock_path = Path(str(self.storage_path) + ".lock") # Ensure lock path is string if Path constructor needs it
         try:
-            with FileLock(lock_path, timeout=10): # Added FileLock for safety
+            with FileLock(lock_path, timeout=10):
                 # Ensure parent directory exists
                 self.storage_path.parent.mkdir(parents=True, exist_ok=True)
                 # Compress and save the DataFrame
-                compress_file(self.df, str(self.storage_path), compression_type='zstd_json_lines') # Example type, adjust if needed
+                if self.is_repo_df:
+                    self.storage_path = self.storage_path / "repositories"
+                compress_file(self.df, str(self.storage_path), compression='zstd', remove_original=False)
                 log_statement('info', f"{LOG_INS}:INFO>>Successfully saved DataFrame to {self.storage_path}", Path(__file__).stem, False)
                 self.df_cache.put('df', self.df.copy()) # Update cache after saving
         except Timeout:
@@ -1597,12 +1656,443 @@ class RepoHandler:
         except Exception as e:
             log_statement('error', f"{LOG_INS}:ERROR>>Failed to save DataFrame to {self.storage_path}: {e}", Path(__file__).stem, True)
 
+    def _save_df_internal(self, df, storage_path):
+        """
+        Save DataFrame to storage with compression, diff display, and Git integration.
+        
+        Args:
+            df (pd.DataFrame): DataFrame to save
+            storage_path (Union[str, Path]): Path to save the file
+        
+        Returns:
+            bool: Success or failure
+        """        
+        # Ensure storage_path is a Path object
+        storage_path = Path(storage_path) if not isinstance(storage_path, Path) else storage_path
+        
+        # Make sure parent directory exists
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 1. Check if a previous version exists
+        original_df = None
+        if storage_path.exists() and storage_path.is_file():
+            try:
+                # Load the existing file
+                log_statement('info', f"Loading existing DataFrame from {storage_path} for diff comparison", __name__)
+                if storage_path.suffix.endswith('.zst'):
+                    # Decompress existing file
+                    with open(storage_path, 'rb') as f_in:
+                        dctx = zstd.ZstdDecompressor()
+                        with dctx.stream_reader(f_in) as reader:
+                            buffer = io.BytesIO(reader.read())
+                            buffer.seek(0)
+                            # Determine format based on suffix before .zst
+                            base_suffix = storage_path.suffixes[-2] if len(storage_path.suffixes) >= 2 else '.csv'
+                            if base_suffix == '.parquet':
+                                original_df = pd.read_parquet(buffer)
+                            else:  # Default to CSV
+                                original_df = pd.read_csv(buffer)
+                else:
+                    # Direct read if not compressed
+                    if storage_path.suffix == '.parquet':
+                        original_df = pd.read_parquet(storage_path)
+                    else:
+                        original_df = pd.read_csv(storage_path)
+                        
+                log_statement('info', f"Successfully loaded existing DataFrame with {len(original_df)} rows", __name__)
+            except Exception as e:
+                log_statement('warning', f"Could not load existing file for diff: {e}", __name__)
+                original_df = None
+        
+        # 2. Calculate and display diffs if original exists
+        if original_df is not None and not original_df.empty:
+            # Generate diff information
+            try:
+                # Normalize column names to ensure proper comparison
+                shared_columns = list(set(original_df.columns) & set(df.columns))
+                
+                # Create formatted strings for diff comparison
+                original_str = original_df[shared_columns].head(20).to_string()  # Limit to 20 rows for performance
+                new_str = df[shared_columns].head(20).to_string()
+                
+                # Calculate summary statistics
+                rows_added = len(df) - len(original_df) if len(df) > len(original_df) else 0
+                rows_removed = len(original_df) - len(df) if len(original_df) > len(df) else 0
+                
+                # Additional column changes
+                cols_added = set(df.columns) - set(original_df.columns)
+                cols_removed = set(original_df.columns) - set(df.columns)
+                
+                # Calculate difflib diff
+                diff = list(difflib.unified_diff(
+                    original_str.splitlines(),
+                    new_str.splitlines(),
+                    lineterm='',
+                    n=3  # Context lines
+                ))
+                
+                # Display diff summary to user
+                print("\n" + "="*80)
+                print(f"REPOSITORY CHANGES SUMMARY:")
+                print(f"Files in repository: {len(df)} (previously: {len(original_df)})")
+                print(f"Rows added: {rows_added}, Rows removed: {rows_removed}")
+                
+                if cols_added:
+                    print(f"Columns added: {', '.join(cols_added)}")
+                if cols_removed:
+                    print(f"Columns removed: {', '.join(cols_removed)}")
+                    
+                # Display a sample of the diff (first 10 lines)
+                if len(diff) > 0:
+                    print("\nSample of changes:")
+                    for i, line in enumerate(diff):
+                        if i < 10:  # Just show first 10 lines of diff
+                            if line.startswith('+'):
+                                print(f"\033[92m{line}\033[0m")  # Green for additions
+                            elif line.startswith('-'):
+                                print(f"\033[91m{line}\033[0m")  # Red for removals
+                            else:
+                                print(line)
+                    
+                    if len(diff) > 10:
+                        print(f"... and {len(diff) - 10} more changes (not shown)")
+                
+                print("="*80)
+                
+                # 3. Prompt user for action
+                while True:
+                    choice = input("\nWould you like to: [S]ave changes, [R]eview full diff, [E]dit dataframe, or [C]ancel? ").lower()
+                    
+                    if choice == 's':
+                        print("Proceeding to save changes...")
+                        break
+                    elif choice == 'r':
+                        # Show full diff in a pager
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False) as tmp:
+                            for line in diff:
+                                tmp.write(line + '\n')
+                        
+                        # Use 'less' to view the diff
+                        try:
+                            subprocess.run(['less', '-R', tmp.name])
+                        finally:
+                            os.unlink(tmp.name)
+                    elif choice == 'e':
+                        print("Opening DataFrame editor...")
+                        # Save DataFrame to temp CSV
+                        with tempfile.NamedTemporaryFile(suffix='.csv', mode='w', delete=False) as tmp:
+                            df.to_csv(tmp.name, index=False)
+                            tmp_path = tmp.name
+                        
+                        # Try to determine system editor
+                        editor = os.environ.get('EDITOR', 'nano')
+                        if not editor:
+                            editor = 'nano'  # Default fallback
+                        
+                        # Open editor
+                        try:
+                            subprocess.run([editor, tmp_path])
+                            
+                            # Read edited file back
+                            edited_df = pd.read_csv(tmp_path)
+                            
+                            # Confirm the edits
+                            print(f"Loaded edited DataFrame with {len(edited_df)} rows and {len(edited_df.columns)} columns.")
+                            confirm = input("Apply these edits? [y/n]: ").lower()
+                            if confirm.startswith('y'):
+                                df = edited_df
+                                print("Edits applied.")
+                            else:
+                                print("Edits discarded.")
+                        except Exception as e:
+                            print(f"Error during editing: {e}")
+                        finally:
+                            # Clean up temp file
+                            try:
+                                os.unlink(tmp_path)
+                            except:
+                                pass
+                    elif choice == 'c':
+                        print("Operation cancelled. No changes saved.")
+                        return False
+                    else:
+                        print("Invalid choice, please try again.")
+                        
+            except Exception as e:
+                log_statement('error', f"Error calculating diffs: {e}", __name__, exc_info=True)
+                choice = input("\nError calculating diffs. Still save the DataFrame? [y/n]: ").lower()
+                if not choice.startswith('y'):
+                    return False
+        
+        # 4. Save the DataFrame
+        try:
+            log_statement('info', f"Saving DataFrame with {len(df)} rows to {storage_path}", __name__)
+            
+            # Choose format based on file extension
+            is_compressed = storage_path.suffix.endswith('.zst')
+            base_suffix = storage_path.suffixes[-2] if is_compressed and len(storage_path.suffixes) >= 2 else storage_path.suffix
+            
+            # Create a temp file for verification
+            with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+            
+            # Save to temp file first
+            log_statement('debug', f"Saving to temporary file: {temp_path}", __name__)
+            
+            if is_compressed:
+                # Save with compression
+                buffer = io.BytesIO()
+                
+                if base_suffix == '.parquet':
+                    df.to_parquet(buffer)
+                else:  # Default to CSV
+                    df.to_csv(buffer, index=False)
+                
+                buffer.seek(0)
+                
+                # Compress the data
+                compressed_data = zstd.compress(buffer.getvalue(), 22)  # Level 22 compression
+                
+                # Write compressed data to temp file
+                with open(temp_path, 'wb') as f_out:
+                    f_out.write(compressed_data)
+            else:
+                # Direct save without compression
+                if base_suffix == '.parquet':
+                    df.to_parquet(temp_path)
+                else:
+                    df.to_csv(temp_path, index=False)
+            
+            # 5. Verify the saved file
+            log_statement('debug', f"Verifying saved file integrity", __name__)
+            
+            # Load the temp file back
+            verification_df = None
+            
+            try:
+                if is_compressed:
+                    with open(temp_path, 'rb') as f_in:
+                        dctx = zstd.ZstdDecompressor()
+                        decompressed_data = dctx.decompress(f_in.read())
+                        buffer = io.BytesIO(decompressed_data)
+                        buffer.seek(0)
+                        
+                        if base_suffix == '.parquet':
+                            verification_df = pd.read_parquet(buffer)
+                        else:
+                            verification_df = pd.read_csv(buffer)
+                else:
+                    if base_suffix == '.parquet':
+                        verification_df = pd.read_parquet(temp_path)
+                    else:
+                        verification_df = pd.read_csv(temp_path)
+                
+                # Improved verification logic
+                if len(verification_df) != len(df) or len(verification_df.columns) != len(df.columns):
+                    log_statement('warning', 
+                                f"Dimensions mismatch during verification. Original: {len(df)}x{len(df.columns)}, "
+                                f"Verification: {len(verification_df)}x{len(verification_df.columns)}", 
+                                __name__)
+                    # Continue with more detailed check
+                
+                # Check a random sample of rows to ensure data integrity
+                verification_success = True
+                sample_size = min(10, len(df))
+                if len(df) > 0:
+                    sample_indices = random.sample(range(len(df)), sample_size)
+                    
+                    for idx in sample_indices:
+                        # Check if sample rows match on key columns
+                        for col in verification_df.columns:
+                            if col in df.columns:
+                                # For string columns, compare directly
+                                if isinstance(df.iloc[idx][col], str) and isinstance(verification_df.iloc[idx][col], str):
+                                    if df.iloc[idx][col] != verification_df.iloc[idx][col]:
+                                        log_statement('warning', 
+                                                    f"String data mismatch at row {idx}, column {col}. "
+                                                    f"Original: {df.iloc[idx][col]}, Verification: {verification_df.iloc[idx][col]}", 
+                                                    __name__)
+                                        verification_success = False
+                                        break
+                                # For numeric columns, allow small tolerance
+                                elif (pd.api.types.is_numeric_dtype(df[col]) and 
+                                    pd.api.types.is_numeric_dtype(verification_df[col])):
+                                    if pd.isna(df.iloc[idx][col]) != pd.isna(verification_df.iloc[idx][col]):
+                                        log_statement('warning', 
+                                                    f"Numeric NA mismatch at row {idx}, column {col}. "
+                                                    f"Original NA: {pd.isna(df.iloc[idx][col])}, Verification NA: {pd.isna(verification_df.iloc[idx][col])}", 
+                                                    __name__)
+                                        verification_success = False
+                                        break
+                                    elif not pd.isna(df.iloc[idx][col]) and not pd.isna(verification_df.iloc[idx][col]):
+                                        if abs(float(df.iloc[idx][col]) - float(verification_df.iloc[idx][col])) > 1e-10:
+                                            log_statement('warning', 
+                                                        f"Numeric data mismatch at row {idx}, column {col}. "
+                                                        f"Original: {df.iloc[idx][col]}, Verification: {verification_df.iloc[idx][col]}", 
+                                                        __name__)
+                                            verification_success = False
+                                            break
+                
+                if verification_success:
+                    log_statement('info', f"Verification successful. Moving temp file to final location.", __name__)
+                    
+                    # Move temp file to final location
+                    import shutil
+                    shutil.move(str(temp_path), str(storage_path))
+                else:
+                    log_statement('error', f"Verification failed: Data integrity issues detected.", __name__)
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
+                    return False
+                    
+            except Exception as verify_err:
+                log_statement('error', f"Verification failed: {verify_err}", __name__, exc_info=True)
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                return False
+            
+            # 6. Create Git commit if possible
+            try:
+                if hasattr(self, 'git_ops') and self.git_ops is not None and self.git_ops.repo is not None:
+                    log_statement('info', f"Creating Git commit for repository changes", __name__)
+                    
+                    # First check if the file is in the Git repo
+                    repo_root = Path(self.git_ops.repo.working_dir)
+                    
+                    # Try to get relative path to the repo
+                    try:
+                        rel_path = storage_path.relative_to(repo_root)
+                        is_in_repo = True
+                    except ValueError:
+                        # File is outside the repo
+                        is_in_repo = False
+                    
+                    if is_in_repo:
+                        # Add file to Git
+                        self.git_ops.repo.git.add(str(rel_path))
+                        
+                        # Check if there are changes to commit
+                        if self.git_ops.repo.is_dirty():
+                            # Get commit message from user
+                            print("\nPlease enter a commit message for the repository changes.")
+                            
+                            # Create temp file for commit message
+                            with tempfile.NamedTemporaryFile(mode='w', delete=False) as msg_file:
+                                msg_file.write("\n\n# Enter commit message above this line.\n")
+                                msg_file.write("# Lines starting with '#' will be ignored.\n")
+                                msg_file.write(f"# Repository file: {storage_path.name}\n")
+                                
+                                if 'rows_added' in locals() and 'rows_removed' in locals():
+                                    msg_file.write(f"# Changes: {rows_added} rows added, {rows_removed} rows removed\n")
+                                
+                                if 'cols_added' in locals() and cols_added:
+                                    msg_file.write(f"# Columns added: {', '.join(cols_added)}\n")
+                                if 'cols_removed' in locals() and cols_removed:
+                                    msg_file.write(f"# Columns removed: {', '.join(cols_removed)}\n")
+                                
+                                msg_file_path = msg_file.name
+                            
+                            # Determine editor
+                            editor = os.environ.get('EDITOR', 'nano')
+                            if not editor:
+                                editor = 'nano'
+                            
+                            # Open editor for commit message
+                            try:
+                                subprocess.run([editor, msg_file_path])
+                                
+                                # Read back commit message
+                                with open(msg_file_path, 'r') as f:
+                                    commit_lines = [line for line in f.readlines() if not line.strip().startswith('#')]
+                                    commit_message = ''.join(commit_lines).strip()
+                                
+                                if commit_message:
+                                    # Commit changes
+                                    self.git_ops.repo.git.commit('-m', commit_message)
+                                    print(f"Changes committed to Git with message: {commit_message}")
+                                else:
+                                    print("Empty commit message. Changes staged but not committed.")
+                            finally:
+                                # Clean up temp file
+                                try:
+                                    os.unlink(msg_file_path)
+                                except:
+                                    pass
+                        else:
+                            log_statement('info', f"No changes detected in Git working directory.", __name__)
+                    else:
+                        log_statement('info', f"Storage file {storage_path} is outside Git repository {repo_root}. No Git commit created.", __name__)
+                else:
+                    log_statement('info', f"Git operations not available for this repository. Skipping commit.", __name__)
+            except Exception as git_err:
+                log_statement('warning', f"Error during Git operations: {git_err}", __name__)
+                print(f"Could not create Git commit: {git_err}")
+            
+            # 7. Update cache if using LRUCache
+            try:
+                if hasattr(self, 'df_cache') and self.df_cache is not None:
+                    # Ensure df_cache.capacity is an integer
+                    if hasattr(self.df_cache, 'capacity'):
+                        if not isinstance(self.df_cache.capacity, int):
+                            try:
+                                self.df_cache.capacity = int(self.df_cache.capacity)
+                            except (ValueError, TypeError):
+                                self.df_cache.capacity = 100  # Default if conversion fails
+                    
+                    # Now update the cache
+                    self.df_cache.put('df', df.copy())
+                    log_statement('info', f"Updated DataFrame cache with latest data ({len(df)} rows)", __name__)
+            except Exception as cache_err:
+                log_statement('warning', f"Error updating DataFrame cache: {cache_err}", __name__)
+            
+            return True
+            
+        except Exception as save_err:
+            log_statement('error', f"Error saving DataFrame: {save_err}", __name__, exc_info=True)
+            # Clean up temp file if it exists
+            if 'temp_path' in locals():
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+            return False
 
     def save_dataframe_to_storage(self):
-        """Public method to save the current DataFrame to its storage file."""
-        log_statement('info', f"{LOG_INS}:INFO>>Public save_dataframe_to_storage called for {self.storage_path}", Path(__file__).stem, False)
-        self._save_df_to_storage()
-
+        """Public method to save DataFrame to storage with better path handling."""
+        # Ensure we have a storage path that is a file path, not a directory
+        if not hasattr(self, 'storage_path') or self.storage_path is None:
+            log_statement('error', f"No storage path set for saving DataFrame", __name__)
+            return False
+        
+        # Convert storage_path to Path if it's a string
+        if isinstance(self.storage_path, str):
+            self.storage_path = Path(self.storage_path)
+        
+        # Check if storage_path is a directory, construct proper file path if needed
+        if self.storage_path.is_dir():
+            log_statement('warning', f"Storage path '{self.storage_path}' is a directory, not a file", __name__)
+            
+            # Generate a proper filename using the repo hash
+            if not hasattr(self, 'repo_hash') or not self.repo_hash:
+                source_path = Path(self.repo_path or self.data_path or ".")
+                self.repo_hash = generate_data_hash(source_path)
+                log_statement('info', f"Generated repo hash for {source_path}: {self.repo_hash}", __name__)
+                
+            new_storage_path = self.storage_path / f"data_repository_{self.repo_hash}.csv.zst"
+            log_statement('info', f"Adjusted storage path to: {new_storage_path}", __name__)
+            self.storage_path = new_storage_path
+        
+        # Make sure parent directory exists
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Now proceed with saving
+        log_statement('info', f"Saving DataFrame with {len(self.df)} entries to {self.storage_path}", __name__)
+        return self._save_df_internal(self.df, self.storage_path)
+    
     def _load_repo_index(self) -> Dict[str, Any]:
         log_statement('debug', f"{LOG_INS}:DEBUG>>Attempting to load repository index from {self.repo_index_path}", Path(__file__).stem, False)
         if self.repo_index_path.exists():
@@ -1621,18 +2111,33 @@ class RepoHandler:
             return {"version": "1.0", "repositories": {}} # Default structure
 
 
-    def _save_repo_index(self, index_data: Dict[str, Any]):
+    def _save_repo_index(self, index_data: Dict[str, Dict]):
         # Replace: logger.info(f"RepoHandler: Attempting to save repository index to {self.repo_index_path}")
         log_statement('info', f"{LOG_INS}:INFO>>Attempting to save repository index to {self.repo_index_path}", Path(__file__).stem, False)
-        
-        lock_path = Path(str(self.repo_index_path) + ".lock")
+        lock = threading.RLock()
         try:
-            with FileLock(lock_path, timeout=10):
-                self.repo_index_path.parent.mkdir(parents=True, exist_ok=True)
-                # Assuming compress_file can handle dicts by converting to JSON then compressing
-                compress_file(index_data, str(self.repo_index_path), compression_type='zstd_json') # Example type
-                # Replace: logger.info(f"RepoHandler: Successfully saved repository index to {self.repo_index_path}")
-                log_statement('info', f"{LOG_INS}:INFO>>Successfully saved repository index to {self.repo_index_path}", Path(__file__).stem, False)
+            with lock:
+                REPO_DIR = Path(DATA_REPO_DIR)
+                INDEX_FILENAME = "repository_index.json"
+                REPO_DIR.mkdir(parents=True, exist_ok=True)
+
+                index_file_path = REPO_DIR / INDEX_FILENAME
+                try:
+                    with open(index_file_path, 'w') as f:
+                        json.dump(index_data, f, indent=4)
+                    log_statement('info', f"{LOG_INS}:INFO>>Successfully saved repository index to {index_file_path}", Path(__file__).stem, False)
+                    compress_file(index_data, str(self.repo_index_path, compression_type='zstd', remove_original=False) )
+                except Exception as e:
+                    log_statement('error', f"{LOG_INS}:ERROR>>Failed to save repository index to {index_file_path}: {e}", Path(__file__).stem, True)
+
+        # lock_path = Path(str(self.repo_index_path) + ".lock")
+        # try:
+        #     with FileLock(lock_path, timeout=10):
+        #         self.repo_index_path.parent.mkdir(parents=True, exist_ok=True)
+        #         # Assuming compress_file can handle dicts by converting to JSON then compressing
+        #         compress_file(index_data, str(self.repo_index_path), compression_type='zstd', ) # Example type
+        #         # Replace: logger.info(f"RepoHandler: Successfully saved repository index to {self.repo_index_path}")
+        #         log_statement('info', f"{LOG_INS}:INFO>>Successfully saved repository index to {self.repo_index_path}", Path(__file__).stem, False)
         except Timeout:
             # Replace: logger.error(f"RepoHandler: Timeout acquiring lock for {self.repo_index_path}. Save operation failed.", exc_info=True)
             log_statement('error', f"{LOG_INS}:ERROR>>Timeout acquiring lock for {self.repo_index_path}. Save operation failed.", Path(__file__).stem, True)
@@ -3096,9 +3601,19 @@ class RepoHandler:
 
 
 class RepoManager:
-    def __init__(self, repo_dir: Union[str, Path] = REPO_DIR, metadata_filename: str = METADATA_FILENAME, progress_dir_name: str = PROGRESS_DIR, create_repo_if_not_exists: bool = True, index_filename: str = INDEX_FILE.name, max_workers: int = MAX_WORKERS):
-        self.repo_dir = Path(self.repo_dir).resolve()
+    def __init__(self, repo_dir: Union[str, Path] = REPO_DIR, metadata_filename: str = METADATA_FILENAME, progress_dir_name: str = PROGRESS_DIR, create_if_not_exists: bool = True, index_filename: str = INDEX_FILE.name, max_workers: int = MAX_WORKERS):
+        global LOG_INS
+        LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
+        self.l_ins = LOG_INS
+        self.repo_dir = Path(repo_dir).resolve()
         self.index_filename = index_filename
+        self.metadata_file = metadata_filename
+        self.progress_dir = progress_dir_name
+        self.create_if_not_exists = create_if_not_exists
+        self.max_workers = max_workers
+        self.index_path = self.repo_dir / self.index_filename
+        self.metadata_path = self.repo_dir / self.metadata_file
+        self.progress_path = self.repo_dir / self.progress_dir
 
         if not (isinstance(self.repo_dir, str) or isinstance(self.repo_dir, Path)):
             try:
@@ -3138,7 +3653,48 @@ class RepoManager:
 #         self.repo_handler.initialize_dataframe_saving_operations()
 #         self.repo_handler.initialize_parallel_scanning_operations()
 #         self.repo_handler.initialize_git_cleaning_operations()
+
+    def load_or_initialize_repository_index(self) -> Dict[str, Any]:
+        # Original line 305-308 check for constants (now self.repo_dir and self.index_file_name):
+        if not (isinstance(self.repo_dir, Path) and isinstance(self.index_file_name, str)):
+            critical_msg = (f"Repository directory or index file name not configured correctly. "
+                            f"Repo dir type: {type(self.repo_dir)}, value: '{self.repo_dir}'. "
+                            f"Index file name type: {type(self.index_file_name)}, value: '{self.index_file_name}'.")
+            log_statement('critical', f"{LOG_INS}:CRITICAL>>{critical_msg}", Path(__file__).stem, False) # exc_info typically False for critical config error
+            # This error implies a fundamental setup problem.
+            # Depending on desired behavior, might raise an exception or return a default.
+            # For now, it matches the log's severity.
+            # The original log message was: "REPO_DIR or INDEX_FILE_NAME_CONST not configured correctly as Path/str."
+            # The new message gives more specific type info.
         
+        ensure_dir_exists(self.repo_dir) # Uses helper
+        log_statement('debug', f"{LOG_INS}:DEBUG>>Ensuring repository index directory exists: {self.repo_dir}", Path(__file__).stem, False)
+
+        if self.index_path.exists():
+            try:
+                with open(self.index_path, 'r') as f:
+                    index_data = json.load(f)
+                log_statement('info', f"{LOG_INS}:INFO>>Loaded repository index from '{self.index_path}' with {len(index_data.get('repositories', {}))} entries.", Path(__file__).stem, False)
+                return index_data
+            except json.JSONDecodeError:
+                log_statement('error', f"{LOG_INS}:ERROR>>Error decoding JSON from repository index file: {self.index_path}. Initializing new index.", Path(__file__).stem, True)
+            except Exception as e:
+                log_statement('error', f"{LOG_INS}:ERROR>>Failed to load repository index from {self.index_path}: {e}. Initializing new index.", Path(__file__).stem, True)
+        else:
+            log_statement('info', f"{LOG_INS}:INFO>>Repository index file not found at {self.index_path}. Initializing new index.", Path(__file__).stem, False)
+        
+        # Default index structure
+        return {"version": "1.0", "repositories": {}} # Should match REPO_INDEX_VERSION_CONST if used
+
+    def save_repository_index(self, index_data: Dict[str, Any]):
+        ensure_dir_exists(self.repo_dir)
+        try:
+            with open(self.index_path, 'w') as f:
+                json.dump(index_data, f, indent=4)
+            log_statement('info', f"{LOG_INS}:INFO>>Saved repository index to {self.index_path}", Path(__file__).stem, False)
+        except Exception as e:
+            log_statement('error', f"{LOG_INS}:ERROR>>Failed to save repository index to {self.index_path}: {e}", Path(__file__).stem, True)
+
 if __name__ == "__main__":
         # Example Usage (requires a directory to be a Git repository)
     # Ensure logging is configured if src.utils.logger is not available.

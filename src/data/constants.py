@@ -212,12 +212,12 @@ _project_folder_str = os.getenv("TLATO41DIR")
 if not _project_folder_str:
     raise ValueError("Environment variable TLATO41DIR is not set.")
 PROJECT_FOLDER = Path(_project_folder_str)
-REPO_DIR = Path(PROJECT_FOLDER / "src/data/repositories")
+REPO_DIR = f"{_project_folder_str}src/data/repositories"
 MAIN_REPO_FILENAME = "main_repository.csv.zst"
 PROCESSED_REPO_FILENAME = "processed_repository.csv.zst"
 TOKENIZED_REPO_FILENAME = "tokenized_repository.csv.zst"
 DATALOADER_METADATA_FILENAME = "dataloader_metadata.json.zst" # Example for DataLoader info
-DATA_REPO_DIR = REPO_DIR / "data_repository"
+DATA_REPO_DIR = REPO_DIR + "data_repository"
 LOG_DIR = PROJECT_FOLDER / "logs"
 STATE_DIR = PROJECT_FOLDER / "states"
 GITIGNORE_FILENAME = PROJECT_FOLDER / ".gitignore"
@@ -230,7 +230,11 @@ INDEX_KEY_METADATA = "metadata"
 INDEX_KEY_CHILDREN = "children" # List of child repository hashes
 TOKENIZED_DATA_DIR = f"{os.getenv("TLATO41DIR")}/data/tokenized"
 
-LOG_INS = f'{__name__}:{__file__}:{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:'
+# LOG_INS = f"'{__name__}':'{__file__}':{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
+
+# --- Compression Constants ---
+ZSTD_COMPRESSION_LEVEL = 22
+ZSTD_THREADS = 16
 
 # --- Repository Index Metadata Keys ---
 INDEX_META_FILE_COUNT = "file_count"

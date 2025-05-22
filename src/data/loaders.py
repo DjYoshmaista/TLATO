@@ -22,6 +22,7 @@ from typing import List, Optional
 from src.utils.config import DataLoaderConfig, DEFAULT_DEVICE, COMPRESSION_ENABLED, TOKENIZED_DATA_DIR
 from src.utils.logger import log_statement
 
+LOG_INS = f"{__file__}:{__name__}"
 class EnhancedDataLoader:
     """
     Loads pre-processed and tokenized data batches, optimized for training.
@@ -48,6 +49,9 @@ class EnhancedDataLoader:
             base_dir_filter (str | Path, optional): If provided, tries to load only files originating
                                                     from this base path. (Needs robust implementation).
         """
+        global LOG_INS
+        self.l_ins = LOG_INS
+
         self.data_dir = Path(data_dir or DataLoaderConfig.ENHANCED_LOADER_DATA_DIR)
         self.batch_size = batch_size or DataLoaderConfig.ENHANCED_LOADER_BATCH_SIZE
         self.device = device or DEFAULT_DEVICE
@@ -60,12 +64,12 @@ class EnhancedDataLoader:
         self._validate_data_dir()
         self.files = self._get_files() # Apply filtering here
 
-        log_statement(loglevel=str("info"), logstatement=str(f"EnhancedDataLoader initialized: Dir='{self.data_dir}', BatchSize={self.batch_size}, Device='{self.device}', Pattern='{self.file_pattern}', Filter='{self.base_dir_filter}', Files={len(self.files)}"), main_logger=str(__name__))
+        log_statement('info', f"{self.l_ins}:INFO>>EnhancedDataLoader initialized: Dir='{self.data_dir}', BatchSize={self.batch_size}, Device='{self.device}', Pattern='{self.file_pattern}', Filter='{self.base_dir_filter}', Files={len(self.files)}", Path(__file__).stem)
 
     def _validate_data_dir(self):
         """Checks if the data directory exists."""
         if not self.data_dir.is_dir():
-            log_statement(loglevel=str("error"), logstatement=str(f"Data directory not found: {self.data_dir}"), main_logger=str(__name__))
+            log_statement('error', f"Data directory not found: {self.data_dir}", Path(__file__).stem)
             raise FileNotFoundError(f"Data directory {self.data_dir} not found")
 
     def _get_files(self) -> List[Path]:
@@ -73,20 +77,20 @@ class EnhancedDataLoader:
         # (Filtering logic requires improvement - see previous notes)
         all_files = sorted(list(self.data_dir.glob(self.file_pattern)))
         if not all_files:
-             log_statement(loglevel=str("warning"), logstatement=str(f"No files found matching pattern '{self.file_pattern}' in '{self.data_dir}'."), main_logger=str(__name__))
+             log_statement('warning', f"No files found matching pattern '{self.file_pattern}' in '{self.data_dir}'.", Path(__file__).stem)
              return []
 
         if not self.base_dir_filter:
-             log_statement(loglevel=str("debug"), logstatement=str(f"Found {len(all_files)} files. No base_dir filter applied."), main_logger=str(__name__))
+             log_statement('debug', f"Found {len(all_files)} files. No base_dir filter applied.", Path(__file__).stem)
              return all_files
         else:
              # TODO: Implement robust filtering based on DataRepository lookup.
              # Current placeholder returns all files.
-             log_statement(loglevel=str("warning"), logstatement=str(f"Base directory filtering ('{self.base_dir_filter}') requires DataRepository integration for accuracy. Currently returning all found files."), main_logger=str(__name__))
+             log_statement('warning', f"Base directory filtering ('{self.base_dir_filter}') requires DataRepository integration for accuracy. Currently returning all found files.", Path(__file__).stem)
              filtered_files = all_files
-             log_statement(loglevel=str("debug"), logstatement=str(f"Found {len(all_files)} files, filtered to {len(filtered_files)} (placeholder filter) based on base_dir: {self.base_dir_filter}"), main_logger=str(__name__))
+             log_statement('debug', f"Found {len(all_files)} files, filtered to {len(filtered_files)} (placeholder filter) based on base_dir: {self.base_dir_filter}", Path(__file__).stem)
              if not filtered_files:
-                  log_statement(loglevel=str("warning"), logstatement=str(f"No files matched pattern '{self.file_pattern}' AND base_dir filter '{self.base_dir_filter}' (placeholder filter)."), main_logger=str(__name__))
+                  log_statement('warning', f"No files matched pattern '{self.file_pattern}' AND base_dir filter '{self.base_dir_filter}' (placeholder filter).", Path(__file__).stem)
              return filtered_files
 
     def __iter__(self):
@@ -110,16 +114,16 @@ class EnhancedDataLoader:
                         decompressed_data = dctx.decompress(ifh.read())
                     buffer = io.BytesIO(decompressed_data)
                     data = torch.load(buffer, map_location=self.device)
-                    # log_statement(loglevel=str("debug"), logstatement=str(f"Loaded compressed tensor from {fpath.name}"), main_logger=str(__name__)) # Reduce log noise
+                    # log_statement('debug', f"Loaded compressed tensor from {fpath.name}", Path(__file__).stem) # Reduce log noise
                 else:
                     data = torch.load(fpath, map_location=self.device)
-                    # log_statement(loglevel=str("debug"), logstatement=str(f"Loaded uncompressed tensor from {fpath.name}"), main_logger=str(__name__)) # Reduce log noise
+                    # log_statement('debug', f"Loaded uncompressed tensor from {fpath.name}", Path(__file__).stem) # Reduce log noise
 
                 # --- Batching Logic ---
                 if isinstance(data, dict):
                     inputs, targets = data.get('inputs'), data.get('targets')
                     if inputs is None or targets is None:
-                        log_statement(loglevel=str("error"), logstatement=str(f"Dict loaded from {fpath.name} missing keys 'inputs' or 'targets'. Skipping."), main_logger=str(__name__))
+                        log_statement('error', f"Dict loaded from {fpath.name} missing keys 'inputs' or 'targets'. Skipping.", Path(__file__).stem)
                         continue
                     current_batch_inputs, current_batch_targets = [], []
                     # Use zip for potentially variable length inputs/targets if needed
@@ -136,14 +140,14 @@ class EnhancedDataLoader:
                     for i in range(0, len(tensor_data), self.batch_size):
                         yield tensor_data[i:min(i + self.batch_size, len(tensor_data))]
                 else:
-                     log_statement(loglevel=str("error"), logstatement=str(f"Unsupported data type {type(data)} loaded from {fpath.name}. Skipping."), main_logger=str(__name__))
+                     log_statement('error', f"Unsupported data type {type(data)} loaded from {fpath.name}. Skipping.", Path(__file__).stem)
                      continue
 
             except FileNotFoundError:
-                 log_statement(loglevel=str("error"), logstatement=str(f"File not found during iteration: {fpath.name}"), main_logger=str(__name__))
+                 log_statement('error', f"File not found during iteration: {fpath.name}", Path(__file__).stem)
                  continue
             except Exception as e:
-                logger.error(f"Error loading/processing file {fpath.name}: {str(e)}", exc_info=True)
+                log_statement('error', f"Error loading/processing file {fpath.name}: {str(e)}", Path(__file__).stem, True)
                 continue # Skip file on error
 
     def __len__(self):
@@ -158,7 +162,7 @@ class EnhancedDataLoader:
         if self._cached_len is not None:
             return self._cached_len
 
-        log_statement(loglevel=str("info"), logstatement=str("Calculating total batches for EnhancedDataLoader (might take time)..."), main_logger=str(__name__))
+        log_statement('info', "Calculating total batches for EnhancedDataLoader (might take time)...", Path(__file__).stem)
         total_samples = 0
         file_iterator = tqdm(self.files, desc="Calculating Length", unit="file", disable=len(self.files) <= 1)
 
@@ -180,24 +184,24 @@ class EnhancedDataLoader:
                     inputs = data.get('inputs')
                     if inputs is not None and hasattr(inputs, '__len__'):
                         total_samples += len(inputs)
-                    else: log_statement(loglevel=str("warning"), logstatement=str(f"Cannot determine sample count from dict in {fpath.name}."), main_logger=str(__name__))
+                    else: log_statement('warning', f"Cannot determine sample count from dict in {fpath.name}.", Path(__file__).stem)
                 elif isinstance(data, torch.Tensor):
                     total_samples += len(data) # Assumes first dimension is samples
-                else: log_statement(loglevel=str("warning"), logstatement=str(f"Unsupported data type {type(data)} in {fpath.name} for length calc."), main_logger=str(__name__))
+                else: log_statement('warning', f"Unsupported data type {type(data)} in {fpath.name} for length calc.", Path(__file__).stem)
 
-            except FileNotFoundError: log_statement(loglevel=str("error"), logstatement=str(f"File not found during len calc: {fpath.name}"), main_logger=str(__name__))
+            except FileNotFoundError: log_statement('error', f"File not found during len calc: {fpath.name}", Path(__file__).stem)
             except Exception as e: logger.error(f"Error reading {fpath.name} for len calc: {e}", exc_info=True)
 
-        if total_samples == 0: log_statement(loglevel=str("warning"), logstatement=str("Total sample count is zero. __len__ returns 0."), main_logger=str(__name__))
+        if total_samples == 0: log_statement('warning', "Total sample count is zero. __len__ returns 0.", Path(__file__).stem)
         num_batches = (total_samples + self.batch_size - 1) // self.batch_size if self.batch_size > 0 else 0
         self._cached_len = num_batches
-        log_statement(loglevel=str("info"), logstatement=str(f"Length calculation complete. Total samples: {total_samples}, Batches: {num_batches}"), main_logger=str(__name__))
+        log_statement('info', f"{self.l_ins}:INFO>>Length calculation complete. Total samples: {total_samples}, Batches: {num_batches}", Path(__file__).stem)
         return self._cached_len
 
     def reset_cache(self):
         """Resets the cached length calculation."""
         self._cached_len = None
-        log_statement(loglevel=str("info"), logstatement=str("EnhancedDataLoader length cache reset."), main_logger=str(__name__))
+        log_statement('info', "EnhancedDataLoader length cache reset.", Path(__file__).stem)
 
 class SyntheticDataLoader:
     """
@@ -220,19 +224,19 @@ class SyntheticDataLoader:
 
         self._validate_data_dir()
         self.files = self._get_files()
-        log_statement(loglevel=str("info"), logstatement=str(f"SyntheticDataLoader initialized: Dir='{self.data_dir}', BS={self.batch_size}, Dev='{self.device}', Files={len(self.files)}"), main_logger=str(__name__))
+        log_statement('info', f"{self.l_ins}:INFO>>SyntheticDataLoader initialized: Dir='{self.data_dir}', BS={self.batch_size}, Dev='{self.device}', Files={len(self.files)}", Path(__file__).stem)
 
     def _validate_data_dir(self):
         """ Checks if the data directory exists. """
         if not self.data_dir.is_dir():
-            log_statement(loglevel=str("error"), logstatement=str(f"Synthetic data directory not found: {self.data_dir}"), main_logger=str(__name__))
+            log_statement('error', f"Synthetic data directory not found: {self.data_dir}", Path(__file__).stem)
             raise FileNotFoundError(f"Synthetic data directory {self.data_dir} not found")
 
     def _get_files(self) -> List[Path]:
         """ Gets the list of files matching the pattern. """
         files = sorted(list(self.data_dir.glob(self.file_pattern)))
         if not files:
-            log_statement(loglevel=str("warning"), logstatement=str(f"No synthetic files found matching pattern '{self.file_pattern}' in directory '{self.data_dir}'."), main_logger=str(__name__))
+            log_statement('warning', f"No synthetic files found matching pattern '{self.file_pattern}' in directory '{self.data_dir}'.", Path(__file__).stem)
         return files
 
     def __iter__(self):
@@ -253,9 +257,9 @@ class SyntheticDataLoader:
                             target_tensor = torch.tensor(sample['target'], dtype=torch.float32, device=self.device)
                             batch_inputs.append(input_tensor); batch_targets.append(target_tensor)
                             if len(batch_inputs) >= self.batch_size: yield self._format_batch(batch_inputs, batch_targets); batch_inputs, batch_targets = [], []
-                        except (json.JSONDecodeError, KeyError) as e: log_statement(loglevel=str("error"), logstatement=str(f"Error line {line_num+1} in {fpath.name}: {e}"), main_logger=str(__name__))
+                        except (json.JSONDecodeError, KeyError) as e: log_statement('error', f"Error line {line_num+1} in {fpath.name}: {e}", Path(__file__).stem)
                         except Exception as e_inner: logger.error(f"Error proc line {line_num+1} in {fpath.name}: {e_inner}", exc_info=True)
-            except FileNotFoundError: log_statement(loglevel=str("error"), logstatement=str(f"File not found during iter: {fpath.name}"), main_logger=str(__name__))
+            except FileNotFoundError: log_statement('error', f"File not found during iter: {fpath.name}", Path(__file__).stem)
             except Exception as e_outer: logger.error(f"Error reading {fpath.name}: {e_outer}", exc_info=True)
         if batch_inputs: yield self._format_batch(batch_inputs, batch_targets)
 
@@ -263,14 +267,14 @@ class SyntheticDataLoader:
         """ Stacks lists of tensors into batch tensors. """
         # (Implementation remains the same as previous version)
         try: return torch.stack(inputs), torch.stack(targets)
-        except Exception as e: log_statement(loglevel=str("error"), logstatement=str(f"Failed batch stack: {e}"), main_logger=str(__name__)); return torch.tensor([]), torch.tensor([])
+        except Exception as e: log_statement('error', f"Failed batch stack: {e}", Path(__file__).stem); return torch.tensor([]), torch.tensor([])
 
     def __len__(self):
         """ Calculates total batches by counting lines in JSONL files (cached). """
         if self._cached_len is not None:
             return self._cached_len
 
-        log_statement(loglevel=str("info"), logstatement=str("Calculating total batches for SyntheticDataLoader (counting lines)..."), main_logger=str(__name__))
+        log_statement('info', "Calculating total batches for SyntheticDataLoader (counting lines)...", Path(__file__).stem)
         total_samples = 0
         file_iterator = tqdm(self.files, desc="Calculating Synth Length", unit="file", disable=len(self.files) <= 1)
         for fpath in file_iterator:
@@ -278,19 +282,19 @@ class SyntheticDataLoader:
                 with open(fpath, 'r', encoding='utf-8') as f:
                     line_count = sum(1 for line in f if line.strip()) # Count non-empty lines
                 total_samples += line_count
-            except FileNotFoundError: log_statement(loglevel=str("error"), logstatement=str(f"File not found during len calc: {fpath.name}"), main_logger=str(__name__))
+            except FileNotFoundError: log_statement('error', f"File not found during len calc: {fpath.name}", Path(__file__).stem)
             except Exception as e: logger.error(f"Error reading {fpath.name} for len calc: {e}", exc_info=True)
 
-        if total_samples == 0: log_statement(loglevel=str("warning"), logstatement=str("Total synthetic sample count is zero. __len__ returns 0."), main_logger=str(__name__))
+        if total_samples == 0: log_statement('warning', "Total synthetic sample count is zero. __len__ returns 0.", Path(__file__).stem)
         num_batches = (total_samples + self.batch_size - 1) // self.batch_size if self.batch_size > 0 else 0
         self._cached_len = num_batches
-        log_statement(loglevel=str("info"), logstatement=str(f"Length calculation complete. Total synthetic samples: {total_samples}, Batches: {num_batches}"), main_logger=str(__name__))
+        log_statement('info', f"{self.l_ins}:INFO>>Length calculation complete. Total synthetic samples: {total_samples}, Batches: {num_batches}", Path(__file__).stem)
         return self._cached_len
 
     def reset_cache(self):
         """ Resets the cached length calculation. """
         self._cached_len = None
-        log_statement(loglevel=str("info"), logstatement=str("SyntheticDataLoader length cache reset."), main_logger=str(__name__))
+        log_statement('info', f"{self.l_ins}:INFO>>SyntheticDataLoader length cache reset.", Path(__file__).stem)
 
 def hash_folder_path(folder_path: str) -> str:
     """Generates a hash for the given folder path."""
@@ -313,7 +317,7 @@ def set_data_directory():
             file_path = os.path.join(root, file)
             all_files.append(file_path)
 
-    print(f"Found {len(all_files)} files. Generating repository...")
+    log_statement('info', f"{self.l_ins}:INFO>>Found {len(all_files)} files. Generating repository...", Path(__file__).stem)
     with open(repository_file, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["File Path", "Size (Bytes)", "Last Modified", "Created", "Extension"])
@@ -331,30 +335,6 @@ def set_data_directory():
                 print(f"Error processing file {file_path}: {e}")
 
     print(f"Repository file created: {repository_file}")
-
-def process_linguistic_data():
-    """Processes linguistic data (lemmatization, stopword removal, etc.)."""
-    print("Processing linguistic data...")
-    # Placeholder for actual processing logic
-    print("Linguistic data processing complete.")
-
-def tokenize_data():
-    """Tokenizes the processed data."""
-    print("Tokenizing data...")
-    # Placeholder for actual tokenization logic
-    print("Data tokenization complete.")
-
-def train_on_tokenized_files():
-    """Trains on the tokenized data."""
-    print("Training on tokenized files...")
-    # Placeholder for actual training logic
-    print("Training complete.")
-
-def load_saved_model_files():
-    """Loads saved model files."""
-    print("Loading saved model files...")
-    # Placeholder for actual model loading logic
-    print("Model loading complete.")
 
 def main_menu():
     """Displays the main menu and handles user input."""

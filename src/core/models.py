@@ -39,7 +39,7 @@ except ImportError:
     class GATConv: pass
     class Data: pass
     class Batch: pass
-
+LOG_INS = f"{__file__}:{__name__}:"
 class FileVersion(BaseModel):
     """Represents a specific version of a file in its application-level history."""
     version_number: int = Field(VER_NO, description="Sequential application-level version number.")
@@ -167,10 +167,10 @@ class FileMetadataEntry(BaseModel):
             return v.astimezone(timezone.utc)
         raise TypeError(f"Unsupported type for datetime field: {type(v)}")
         
-    class Config:
-        validate_assignment = True
-        # Ensure Pydantic can handle Path objects if they are ever passed directly (though we convert to str for filepath_relative)
-        arbitrary_types_allowed = True # If Path objects were stored directly in models
+class Config:
+    validate_assignment = True
+    # Ensure Pydantic can handle Path objects if they are ever passed directly (though we convert to str for filepath_relative)
+    arbitrary_types_allowed = True # If Path objects were stored directly in models
 
 class MetadataCollection(RootModel[Dict[str, FileMetadataEntry]]):
     """
@@ -230,10 +230,14 @@ class GATLayer(nn.Module):
     """
     def __init__(self, input_dim, output_dim, heads=8, dropout=0.1, **kwargs):
         super().__init__()
+        global LOG_INS
+        LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
+        self.l_ins = LOG_INS
+
         if not PYG_AVAILABLE:
             raise ImportError("GATLayer requires PyTorch Geometric to be installed.")
 
-        log_statement(loglevel=str("info"), logstatement=str(f"Initializing GATLayer: In={input_dim}, Out={output_dim}, Heads={heads}"), main_logger=str(__name__))
+        log_statement('info', f"Initializing GATLayer: In={input_dim}, Out={output_dim}, Heads={heads}", Path(__file__).stem)
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.heads = heads
@@ -257,7 +261,7 @@ class GATLayer(nn.Module):
                   (Or potentially just the updated node features tensor).
         """
         if not PYG_AVAILABLE:
-             log_statement(loglevel=str("error"), logstatement=str("Cannot perform GATLayer forward pass: PyTorch Geometric not available."), main_logger=str(__name__))
+             log_statement('error', "Cannot perform GATLayer forward pass: PyTorch Geometric not available.", Path(__file__).stem)
              # Return input features or raise error
              return data # Or return data.x, or raise RuntimeError
 
@@ -270,7 +274,7 @@ class GATLayer(nn.Module):
         # Alternatively, just return the tensor x
         data.x = F.elu(x) # Apply activation (ELU is common after GAT)
 
-        log_statement(loglevel=str("debug"), logstatement=str(f"GATLayer output shape: {data.x.shape}"), main_logger=str(__name__))
+        log_statement('debug', f"GATLayer output shape: {data.x.shape}", Path(__file__).stem)
         return data # Or return data.x
 
 
@@ -294,10 +298,13 @@ class ZoneClassifier(nn.Module):
             **kwargs: Additional arguments for internal layers (e.g., hidden_dim).
         """
         super().__init__()
+        global LOG_INS
+        LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
+        self.l_ins = LOG_INS
         self.input_features = input_features
         self.num_classes = num_classes
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        log_statement(loglevel=str("info"), logstatement=str(f"Initializing ZoneClassifier: In={input_features}, Classes={num_classes}, Device={self.device}"), main_logger=str(__name__))
+        log_statement('info', f"Initializing ZoneClassifier: In={input_features}, Classes={num_classes}, Device={self.device}", Path(__file__).stem)
 
         # --- Example Architecture ---
         # This is a *very* basic example. Replace with your actual model design.
@@ -324,7 +331,7 @@ class ZoneClassifier(nn.Module):
              # Fallback or alternative architecture if PyG is not used
              # Example: Simple MLP assuming input is a flat tensor per batch item
              # This might not match the dummy_input shape in helpers.py - adjust as needed!
-             log_statement(loglevel=str("warning"), logstatement=str("ZoneClassifier falling back to MLP architecture due to missing PyTorch Geometric."), main_logger=str(__name__))
+             log_statement('warning', "ZoneClassifier falling back to MLP architecture due to missing PyTorch Geometric.", Path(__file__).stem)
              # Assuming input needs flattening or different handling
              # Example: Flatten sequence data (batch, seq, feat) -> (batch, seq*feat)
              # self.flatten = nn.Flatten()
@@ -338,7 +345,7 @@ class ZoneClassifier(nn.Module):
 
         # Move model to the specified device
         self.to(self.device)
-        log_statement(loglevel=str("info"), logstatement=str(f"ZoneClassifier moved to device: {self.device}"), main_logger=str(__name__))
+        log_statement('info', f"ZoneClassifier moved to device: {self.device}", Path(__file__).stem)
 
 
     def forward(self, input_data):
@@ -356,12 +363,12 @@ class ZoneClassifier(nn.Module):
 
         if PYG_AVAILABLE and isinstance(input_data, (Data, Batch)):
             # --- Graph-based forward pass ---
-            log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (GNN) input type: {type(input_data)}, x shape: {input_data.x.shape}"), main_logger=str(__name__))
+            log_statement('debug', f"ZoneClassifier (GNN) input type: {type(input_data)}, x shape: {input_data.x.shape}", Path(__file__).stem)
 
             # Ensure data is on the correct device
             if input_data.x.device != self.device:
                  input_data = input_data.to(self.device)
-                 log_statement(loglevel=str("warning"), logstatement=str(f"Input data moved to device {self.device} during forward pass."), main_logger=str(__name__))
+                 log_statement('warning', f"Input data moved to device {self.device} during forward pass.", Path(__file__).stem)
 
 
             x = self.gat_layer1(input_data).x # Get updated node features
@@ -374,27 +381,27 @@ class ZoneClassifier(nn.Module):
                  # Import pooling if needed: from torch_geometric.nn import global_mean_pool
                  # x = global_mean_pool(x, input_data.batch)
                  # Placeholder: simple mean if pooling not imported/used
-                 log_statement(loglevel=str("warning"), logstatement=str("Applying simple mean pooling as PyG pooling function is not explicitly used."), main_logger=str(__name__))
+                 log_statement('warning', "Applying simple mean pooling as PyG pooling function is not explicitly used.", Path(__file__).stem)
                  x = x.mean(dim=0, keepdim=True) # Simple mean pooling - likely needs proper PyG pooling
             else:
                  # Handle single graph Data object - e.g., mean pool all nodes
                  x = x.mean(dim=0, keepdim=True) # Pool across nodes
 
-            log_statement(loglevel=str("debug"), logstatement=str(f"Shape after pooling: {x.shape}"), main_logger=str(__name__))
+            log_statement('debug', f"Shape after pooling: {x.shape}", Path(__file__).stem)
 
             # Apply final linear layers
             x = F.relu(self.linear1(x))
             x = self.dropout(x)
             x = self.linear2(x)
-            log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (GNN) output shape: {x.shape}"), main_logger=str(__name__))
+            log_statement('debug', f"ZoneClassifier (GNN) output shape: {x.shape}", Path(__file__).stem)
             return x
 
         elif isinstance(input_data, torch.Tensor):
              # --- Tensor-based forward pass (e.g., MLP fallback) ---
-             log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (Tensor) input shape: {input_data.shape}"), main_logger=str(__name__))
+             log_statement('debug', f"ZoneClassifier (Tensor) input shape: {input_data.shape}", Path(__file__).stem)
              if input_data.device != self.device:
                   input_data = input_data.to(self.device)
-                  log_statement(loglevel=str("warning"), logstatement=str(f"Input tensor moved to device {self.device} during forward pass."), main_logger=str(__name__))
+                  log_statement('warning', f"Input tensor moved to device {self.device} during forward pass.", Path(__file__).stem)
 
              # Adapt based on expected tensor input and MLP structure
              # Example: if input is (batch, seq, feat) and MLP expects (batch, features)
@@ -404,10 +411,10 @@ class ZoneClassifier(nn.Module):
              x = self.relu(self.linear1(input_data))
              x = self.dropout(x)
              x = self.linear2(x)
-             log_statement(loglevel=str("debug"), logstatement=str(f"ZoneClassifier (Tensor) output shape: {x.shape}"), main_logger=str(__name__))
+             log_statement('debug', f"ZoneClassifier (Tensor) output shape: {x.shape}", Path(__file__).stem)
              return x
         else:
-            log_statement(loglevel=str("error"), logstatement=str(f"ZoneClassifier received unsupported input type: {type(input_data)}"), main_logger=str(__name__))
+            log_statement('error', f"ZoneClassifier received unsupported input type: {type(input_data)}", Path(__file__).stem)
             raise TypeError(f"Unsupported input type for ZoneClassifier: {type(input_data)}")
 
 def load_model_from_checkpoint(
@@ -444,85 +451,85 @@ def load_model_from_checkpoint(
         Optional[nn.Module]: The loaded model instance on the specified device,
                              or None if loading fails.
     """
-    frame = inspect.currentframe()
-    LOG_INS_CUST = f"{LOG_INS}::load_model_from_checkpoint::{frame.f_lineno if frame else 'UnknownLine'}"
+    global LOG_INS
+    LOG_INS_CUST = LOG_INS + f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
 
-    log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Attempting to load model checkpoint from: {checkpoint_path}", main_logger=__file__)
-    log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Args - model_class={model_class.__name__}, device='{device}', strict={strict_load}, eval_mode={eval_mode}, model_args={model_args}, model_kwargs={model_kwargs}", main_logger=__file__)
+    log_statement('info', f"{LOG_INS_CUST}:INFO>>Attempting to load model checkpoint from: {checkpoint_path}", __file__)
+    log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Args - model_class={model_class.__name__}, device='{device}', strict={strict_load}, eval_mode={eval_mode}, model_args={model_args}, model_kwargs={model_kwargs}", __file__)
 
     # --- Validate Inputs ---
     if not checkpoint_path.exists():
-        log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint file not found: {checkpoint_path}", main_logger=__file__)
+        log_statement('error', f"{LOG_INS_CUST}:ERROR>>Checkpoint file not found: {checkpoint_path}", __file__)
         return None
     if not checkpoint_path.is_file():
-        log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint path is not a file: {checkpoint_path}", main_logger=__file__)
+        log_statement('error', f"{LOG_INS_CUST}:ERROR>>Checkpoint path is not a file: {checkpoint_path}", __file__)
         return None
     if not device:
-         log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Target device cannot be empty.", main_logger=__file__)
+         log_statement('error', f"{LOG_INS_CUST}:ERROR>>Target device cannot be empty.", __file__)
          return None
 
     try:
         # --- Load Checkpoint Dictionary ---
         # map_location=device ensures tensors are loaded onto the correct device directly
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Loading checkpoint dictionary using torch.load with map_location='{device}'...", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Loading checkpoint dictionary using torch.load with map_location='{device}'...", __file__)
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Checkpoint dictionary loaded. Keys: {list(checkpoint.keys())}", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Checkpoint dictionary loaded. Keys: {list(checkpoint.keys())}", __file__)
 
         # --- Validate Checkpoint Content ---
         if not isinstance(checkpoint, dict):
-             log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint file did not contain a dictionary: {checkpoint_path}", main_logger=__file__)
+             log_statement('error', f"{LOG_INS_CUST}:ERROR>>Checkpoint file did not contain a dictionary: {checkpoint_path}", __file__)
              return None
         if 'model_state_dict' not in checkpoint:
-            log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint dictionary missing 'model_state_dict' key: {checkpoint_path}", main_logger=__file__)
+            log_statement('error', f"{LOG_INS_CUST}:ERROR>>Checkpoint dictionary missing 'model_state_dict' key: {checkpoint_path}", __file__)
             return None
         if 'epoch' in checkpoint: # Log epoch if available
-             log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Checkpoint is from epoch: {checkpoint.get('epoch')}", main_logger=__file__)
+             log_statement('info', f"{LOG_INS_CUST}:INFO>>Checkpoint is from epoch: {checkpoint.get('epoch')}", __file__)
         if 'extra_meta' in checkpoint: # Log extra metadata if available
-             log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Checkpoint contains extra metadata: {checkpoint.get('extra_meta')}", main_logger=__file__)
+             log_statement('info', f"{LOG_INS_CUST}:INFO>>Checkpoint contains extra metadata: {checkpoint.get('extra_meta')}", __file__)
 
 
         # --- Instantiate Model Architecture ---
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Instantiating model architecture: {model_class.__name__}(*{model_args}, **{model_kwargs})", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Instantiating model architecture: {model_class.__name__}(*{model_args}, **{model_kwargs})", __file__)
         model = model_class(*model_args, **model_kwargs)
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Model instance created.", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Model instance created.", __file__)
 
 
         # --- Load State Dictionary ---
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Loading state_dict into model instance (strict={strict_load})...", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Loading state_dict into model instance (strict={strict_load})...", __file__)
         try:
             load_result = model.load_state_dict(checkpoint['model_state_dict'], strict=strict_load)
             # Log results of non-strict loading if applicable
             if not strict_load:
                  if load_result.missing_keys:
-                      log_statement(loglevel='warning', logstatement=f"{LOG_INS_CUST}:WARNING>>State dict loaded with missing keys (strict=False): {load_result.missing_keys}", main_logger=__file__)
+                      log_statement('warning', f"{LOG_INS_CUST}:WARNING>>State dict loaded with missing keys (strict=False): {load_result.missing_keys}", __file__)
                  if load_result.unexpected_keys:
-                      log_statement(loglevel='warning', logstatement=f"{LOG_INS_CUST}:WARNING>>State dict loaded with unexpected keys (strict=False): {load_result.unexpected_keys}", main_logger=__file__)
-            log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Model state_dict loaded successfully.", main_logger=__file__)
+                      log_statement('warning', f"{LOG_INS_CUST}:WARNING>>State dict loaded with unexpected keys (strict=False): {load_result.unexpected_keys}", __file__)
+            log_statement('info', f"{LOG_INS_CUST}:INFO>>Model state_dict loaded successfully.", __file__)
         except RuntimeError as state_dict_error:
              # Common errors: size mismatches, key mismatches (if strict=True)
-             log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>RuntimeError loading state_dict: {state_dict_error}. Ensure model architecture matches checkpoint.", main_logger=__file__, exc_info=True)
+             log_statement('error', f"{LOG_INS_CUST}:ERROR>>RuntimeError loading state_dict: {state_dict_error}. Ensure model architecture matches checkpoint.", __file__, True)
              return None
         except KeyError as key_error:
             # If 'model_state_dict' key itself was missing (should be caught earlier, but good practice)
-            log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>KeyError loading state_dict (likely missing 'model_state_dict'): {key_error}", main_logger=__file__)
+            log_statement('error', f"{LOG_INS_CUST}:ERROR>>KeyError loading state_dict (likely missing 'model_state_dict'): {key_error}", __file__)
             return None
 
 
         # --- Move Model to Device (should be mostly redundant if map_location worked, but ensures consistency) ---
-        log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Moving loaded model to device: '{device}'...", main_logger=__file__)
+        log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Moving loaded model to device: '{device}'...", __file__)
         model.to(device)
 
 
         # --- Set Evaluation Mode ---
         if eval_mode:
-            log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Setting model to evaluation mode (model.eval()).", main_logger=__file__)
+            log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Setting model to evaluation mode (model.eval()).", __file__)
             model.eval()
         else:
-            log_statement(loglevel='debug', logstatement=f"{LOG_INS_CUST}:DEBUG>>Leaving model in training mode (eval_mode=False).", main_logger=__file__)
+            log_statement('debug', f"{LOG_INS_CUST}:DEBUG>>Leaving model in training mode (eval_mode=False).", __file__)
 
 
         # --- Return Loaded Model ---
-        log_statement(loglevel='info', logstatement=f"{LOG_INS_CUST}:INFO>>Model loaded successfully from {checkpoint_path} onto device '{device}'.", main_logger=__file__)
+        log_statement('info', f"{LOG_INS_CUST}:INFO>>Model loaded successfully from {checkpoint_path} onto device '{device}'.", __file__)
         # Optionally return other checkpoint info if needed, but standard practice is often just the model
         # return {
         #      'model': model,
@@ -534,17 +541,17 @@ def load_model_from_checkpoint(
 
     except FileNotFoundError:
         # Should be caught by initial check, but handle again just in case
-        log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Checkpoint file not found during load: {checkpoint_path}", main_logger=__file__)
+        log_statement('error', f"{LOG_INS_CUST}:ERROR>>Checkpoint file not found during load: {checkpoint_path}", __file__)
         return None
     except (pickle.UnpicklingError, EOFError, zipfile.BadZipFile) as load_err: # Catch common torch.load errors
-         log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>Failed to load/unpickle checkpoint file {checkpoint_path}. File may be corrupted or incompatible: {load_err}", main_logger=__file__, exc_info=True)
+         log_statement('error', f"{LOG_INS_CUST}:ERROR>>Failed to load/unpickle checkpoint file {checkpoint_path}. File may be corrupted or incompatible: {load_err}", __file__, True)
          return None
     except RuntimeError as rte: # Catch potential device loading issues
-         log_statement(loglevel='error', logstatement=f"{LOG_INS_CUST}:ERROR>>RuntimeError during model loading (potentially device related): {rte}", main_logger=__file__, exc_info=True)
+         log_statement('error', f"{LOG_INS_CUST}:ERROR>>RuntimeError during model loading (potentially device related): {rte}", __file__, True)
          return None
     except Exception as e:
         # Catch unexpected errors during the process
-        log_statement(loglevel='critical', logstatement=f"{LOG_INS_CUST}:CRITICAL>>CRITICAL: Unexpected error loading model from checkpoint {checkpoint_path}: {e}", main_logger=__file__, exc_info=True)
+        log_statement('critical', f"{LOG_INS_CUST}:CRITICAL>>CRITICAL: Unexpected error loading model from checkpoint {checkpoint_path}: {e}", __file__, True)
         return None
 
 if __name__ == "__main__":
