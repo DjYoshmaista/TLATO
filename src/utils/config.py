@@ -9,12 +9,18 @@ variables used throughout the application.
 import os
 from pathlib import Path
 import torch
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
 from src.utils.logger import log_statement
 import pandas as pd
 import sys
 import zstandard as zstd
 from src.data.constants import *
 from src.utils.compression import *
+from src.core.repo_handler import RepoHandlerConfig
+
+LOG_INS = f"{Path(__file__).stem}:{inspect.currentframe().f_lineno}"
+REPO_HANDLER_AVAILABLE = True
 
 # --- Project Root ---
 # Assumes this file is in project_root/src/utils
@@ -58,7 +64,177 @@ GPU_MIN_COMPUTE_CAPABILITY = 7.0 # From gpu_switch.py usage
 COMPRESSION_ENABLED = True # Global flag to enable/disable zstd compression output
 COMPRESSION_LEVEL = 22 # Max compression level for zstandard (1-22)
 
+
+# Multiple status patterns to check that indicate files ready for processing
+processable_statuses = [
+    ProcessingStatus.NEW.value,
+    ProcessingStatus.DISCOVERED.value,
+    'new',
+    'discovered', 
+    'scanned',
+    'ready',
+    'pending',
+    'unprocessed',
+    'loaded'
+]
+
 # --- Data Processing Configuration ---
+# Configuration management
+@dataclass
+class DataProcessingConfig:
+    """Configuration for data processing operations, extends RepoHandlerConfig with dynamic batch size"""
+    project_root: Path = field(default_factory=lambda: PROJECT_ROOT)
+    source_directory: Optional[Path] = None  # Directory to scan for source files
+    output_directory: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
+    max_workers: int = 16
+    use_compression: bool = True
+    create_if_missing: bool = True
+    
+    # ENHANCED: Dynamic batch processing configuration with extensive validation
+    batch_size: int = 50  # Process files in batches - now user-configurable
+    min_batch_size: int = 1  # ADDED: Minimum allowed batch size
+    max_batch_size: int = 10000  # ADDED: Maximum allowed batch size
+    default_batch_size: int = 50  # ADDED: Default fallback batch size
+    progress_save_interval: int = 100  # Save progress every 100 files
+    metadata_write_interval: int = 250  # Write metadata every 250 operations
+    
+    # Processing-specific settings
+    enable_semantic_labeling: bool = True
+    enable_tokenization: bool = True
+    enable_model_training: bool = False
+    
+    # Model settings
+    default_model_name: str = "bert-base-uncased"
+    checkpoint_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "checkpoints")
+    log_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "logs")
+    
+    # Device settings
+    device: str = "auto"
+    
+    def __post_init__(self):
+        """ADDED: Validate and sanitize configuration parameters with extensive logging"""
+        log_prefix = f"{Path(__file__).stem}:DataProcessingConfig:__post_init__"
+        
+        try:
+            # Validate batch size with comprehensive checks
+            original_batch_size = self.batch_size
+            
+            if not isinstance(self.batch_size, int):
+                log_statement('warning', f"{log_prefix}:WARNING>>Invalid batch_size type {type(self.batch_size)}, converting to int", 
+                             Path(__file__).stem)
+                try:
+                    self.batch_size = int(self.batch_size)
+                except (ValueError, TypeError) as e:
+                    log_statement('error', f"{log_prefix}:ERROR>>Cannot convert batch_size to int: {e}, using default", 
+                                 Path(__file__).stem)
+                    self.batch_size = self.default_batch_size
+            
+            if self.batch_size < self.min_batch_size:
+                log_statement('warning', f"{log_prefix}:WARNING>>batch_size {self.batch_size} below minimum {self.min_batch_size}, adjusting", 
+                             Path(__file__).stem)
+                self.batch_size = self.min_batch_size
+            elif self.batch_size > self.max_batch_size:
+                log_statement('warning', f"{log_prefix}:WARNING>>batch_size {self.batch_size} above maximum {self.max_batch_size}, adjusting", 
+                             Path(__file__).stem)
+                self.batch_size = self.max_batch_size
+            
+            if self.batch_size != original_batch_size:
+                log_statement('info', f"{log_prefix}:INFO>>batch_size adjusted from {original_batch_size} to {self.batch_size}", 
+                             Path(__file__).stem)
+            
+            # Validate other interval settings
+            if self.progress_save_interval < 1:
+                log_statement('warning', f"{log_prefix}:WARNING>>progress_save_interval too small, setting to 10", 
+                             Path(__file__).stem)
+                self.progress_save_interval = 10
+            
+            if self.metadata_write_interval < 1:
+                log_statement('warning', f"{log_prefix}:WARNING>>metadata_write_interval too small, setting to 25", 
+                             Path(__file__).stem)
+                self.metadata_write_interval = 25
+            
+            log_statement('debug', f"{log_prefix}:DEBUG>>Configuration validated: batch_size={self.batch_size}, progress_save_interval={self.progress_save_interval}", 
+                         Path(__file__).stem)
+            
+        except Exception as e:
+            log_statement('error', f"{log_prefix}:ERROR>>Error during configuration validation: {e}, using defaults", 
+                         Path(__file__).stem, exc_info=True)
+            self.batch_size = self.default_batch_size
+            self.progress_save_interval = 100
+            self.metadata_write_interval = 250
+    
+    def update_batch_size(self, new_batch_size: int) -> bool:
+        """ADDED: Update batch size with validation and logging"""
+        log_prefix = f"{Path(__file__).stem}:DataProcessingConfig:update_batch_size"
+        
+        try:
+            original_batch_size = self.batch_size
+            
+            # Validate new batch size
+            if not isinstance(new_batch_size, int):
+                try:
+                    new_batch_size = int(new_batch_size)
+                except (ValueError, TypeError) as e:
+                    log_statement('error', f"{log_prefix}:ERROR>>Invalid batch_size type: {e}", 
+                                 Path(__file__).stem)
+                    return False
+            
+            if new_batch_size < self.min_batch_size:
+                log_statement('error', f"{log_prefix}:ERROR>>batch_size {new_batch_size} below minimum {self.min_batch_size}", 
+                             Path(__file__).stem)
+                return False
+            elif new_batch_size > self.max_batch_size:
+                log_statement('error', f"{log_prefix}:ERROR>>batch_size {new_batch_size} above maximum {self.max_batch_size}", 
+                             Path(__file__).stem)
+                return False
+            
+            self.batch_size = new_batch_size
+            log_statement('info', f"{log_prefix}:INFO>>batch_size updated from {original_batch_size} to {new_batch_size}", 
+                         Path(__file__).stem)
+            return True
+            
+        except Exception as e:
+            log_statement('error', f"{log_prefix}:ERROR>>Error updating batch_size: {e}", 
+                         Path(__file__).stem, exc_info=True)
+            return False
+    
+    def get_batch_size_info(self) -> Dict[str, Any]:
+        """ADDED: Get comprehensive batch size information"""
+        return {
+            'current_batch_size': self.batch_size,
+            'min_batch_size': self.min_batch_size,
+            'max_batch_size': self.max_batch_size,
+            'default_batch_size': self.default_batch_size,
+            'is_at_minimum': self.batch_size == self.min_batch_size,
+            'is_at_maximum': self.batch_size == self.max_batch_size,
+            'is_default': self.batch_size == self.default_batch_size
+        }
+    
+    def get_repository_path(self) -> Path:
+        """Get the repository path (always project root)."""
+        return self.project_root
+    
+    def get_processed_data_path(self, source_path: Path) -> Path:
+        """Get the path where processed data should be stored."""
+        if source_path.is_absolute():
+            # Convert absolute path to relative path under data directory
+            # Remove the root slash and create path under data
+            relative_path = str(source_path).lstrip('/')
+            return self.output_directory / relative_path
+        else:
+            return self.output_directory / source_path
+    
+    def to_repo_handler_config(self) -> 'RepoHandlerConfig':
+        """Convert to RepoHandlerConfig for repository operations"""
+        if not REPO_HANDLER_AVAILABLE:
+            return {}
+        
+        return RepoHandlerConfig(
+            repo_path=self.get_repository_path(),
+            create_if_missing=self.create_if_missing,
+            use_compression=self.use_compression,
+            max_workers=self.max_workers
+        )
 class DataProcessingConfig:
     SCAN_FILE_EXTENSIONS = ['.txt', '.html', '.rtf', '.doc', '.docx', '.zst', '.zstd', '.zip', '.gz', '.tar', '.tsv', '.yaml', '.xml', '.yml', '.csv', '.json', '.jsonl', '.md', '.py', '.log', '.pdf', '.xlsx', '.xls', '.zst']
     SUPPORTED_FORMATS = SCAN_FILE_EXTENSIONS

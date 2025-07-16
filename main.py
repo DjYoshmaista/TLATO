@@ -19,13 +19,13 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 # ------------    LOG_INS Definition    --------------
-LOG_INS = f"{__file__}:{__name__}:"
-
 from datetime import datetime
 import random
 import os
 import torch # Keep for potential direct use or type hinting
 from src.utils.logger import configure_logging, log_statement
+from src.data.constants import *
+from src.utils.config import *
 configure_logging()
 from m1 import data_processing_submenu
 
@@ -86,7 +86,7 @@ except Exception as dir_e:
 
 # Import project utilities first (might be used by other components)
 try:
-    from src.utils.helpers import clear_screen, print_welcome_message, save_state, load_state, dummy_input
+    from src.utils.helpers import *
     # gpu_switch contains the logic to check for GPUs and capability
     from src.utils.gpu_switch import get_compute_backend, check_gpu_support, get_pycuda_compute_capability, set_compute_device
     UTILS_AVAILABLE = True
@@ -157,7 +157,8 @@ except ImportError as e:
             Module = _DummyNNModule
             MSELoss = _DummyMSELoss
             CrossEntropyLoss = _DummyCrossEntropyLoss
-
+from dotenv import load_dotenv
+load_dotenv()
 try:
     # Analysis components might use embeddings generated on GPU/CPU
     from src.analysis.labeler import SemanticLabeler

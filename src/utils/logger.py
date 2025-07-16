@@ -17,8 +17,8 @@ from typing import Optional
 from src.data.constants import *
 
 # --- Configuration ---
-LOG_LEVEL = logging.INFO  # Default root log level (change as needed)
-CONSOLE_LOG_LEVEL = logging.DEBUG # Level for console output
+LOG_LEVEL = logging.ERROR  # Default root log level (change as needed)
+CONSOLE_LOG_LEVEL = logging.ERROR # Level for console output
 FILE_LOG_LEVEL = logging.DEBUG    # Level for file output
 
 # Define default log directory relative to this file's location

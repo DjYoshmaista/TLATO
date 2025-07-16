@@ -20,19 +20,25 @@ import logging
 import numpy as np
 from pathlib import Path
 import torch.nn.functional as F
-from typing import List, Dict, Tuple
-from ..utils.logger import configure_logging, log_statement
-
-configure_logging()
+from typing import Optional, List, Dict, Tuple
+from src.utils.logger import log_statement
+import inspect
+LOG_INS = f"{Path(__file__).stem}:{inspect.currentframe().f_lineno}"
+try:
+    from src.context.container import *
+    log_statement('info', "DataProcessingContext and DataProcessingContainer imported successfully from src/context/container.py.", Path(__file__).stem)
+except ImportError:
+    log_statement('error', "DataProcessingContext import failed. Ensure src/context/container.py is correctly set up.", Path(__file__).stem)
 
 # Import project configuration and utilities
 try:
-    from ..utils.config import TrainingConfig, LabelerConfig, DEFAULT_DEVICE, CHECKPOINT_DIR, LOG_DIR
-    from ..utils.helpers import save_state, load_state
+    from src.core.repo_handler import get_log_prefix
+    from src.utils.config import TrainingConfig, LabelerConfig, DEFAULT_DEVICE, CHECKPOINT_DIR, LOG_DIR
+    from src.utils.helpers import save_state, load_state
 except ImportError:
     # Fallback to local configuration if src.utils.config is not available
-    from ..utils.config import TrainingConfig, LabelerConfig, DEFAULT_DEVICE, CHECKPOINT_DIR, LOG_DIR
-    from ..utils.helpers import save_state, load_state
+    from src.utils.config import TrainingConfig, LabelerConfig, DEFAULT_DEVICE, CHECKPOINT_DIR, LOG_DIR
+    from src.utils.helpers import save_state, load_state
 from src.core.models import ZoneClassifier # Example model
 from src.data.loaders import EnhancedDataLoader # Example loader
 # Import transformers safely
@@ -41,11 +47,7 @@ try:
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
-    # Define dummy classes to avoid runtime errors if transformers is missing,
-    # although the class initialization will fail.
-    class AutoTokenizer: pass
-    class AutoModel: pass
-    logging.error("Transformers library not found. SemanticLabeler requires it to function.")
+    log_statement('error', f"{LOG_INS}:ERROR>>Transformers library not found. SemanticLabeler requires it to function.")
 
 # Ensure the CHECKPOINT_DIR and LOG_DIR exist
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -61,7 +63,7 @@ logging.basicConfig(
 )
 
 # Ensure the logger is set up correctly
-log_statement(loglevel=str("info"), logstatement=str("Logger initialized for training module."), main_logger=str(__name__))
+log_statement('info', f"{get_log_prefix(inspect.currentframe())}:INFO>>Logger initialized for training module.", Path(__file__).stem)
 
 class SemanticLabeler:
     """
@@ -71,7 +73,7 @@ class SemanticLabeler:
     Supports a basic recursive labeling mechanism primarily for depth checking.
     """
 
-    def __init__(self, device: str | torch.device = None):
+    def __init__(self, context: Optional[DataProcessingContext] = None, device: str | torch.device = None):
         """
         Initializes the SemanticLabeler.
 
@@ -86,15 +88,16 @@ class SemanticLabeler:
             ImportError: If the 'transformers' library is not installed.
             RuntimeError: If model/tokenizer loading fails.
         """
+        self.context = context or DataProcessingContext()  # Use provided context or default
         if not TRANSFORMERS_AVAILABLE:
              # Log critical error and raise exception to prevent instantiation
-             log_statement(loglevel=str("critical"), logstatement=str("Transformers library is not installed, which is essential for SemanticLabeler."), main_logger=str(__name__))
+             log_statement('critical', f"{self.log_prefix}:CRITICAL>>Transformers library is not installed, which is essential for SemanticLabeler.", Path(__file__).stem)
              raise ImportError("Transformers library is required for SemanticLabeler but not found.")
 
         try:
              self.config = LabelerConfig()
         except NameError:
-             log_statement(loglevel=str("error"), logstatement=str("LabelerConfig class not found. Using internal defaults."), main_logger=str(__name__))
+             log_statement('error', f"{self.log_prefix}:ERROR>>LabelerConfig class not found. Using internal defaults.", Path(__file__).stem)
              # Use internal defaults if config import failed (less ideal)
              class InternalLabelerConfig:
                  SIMILARITY_THRESHOLD = 0.7
@@ -102,7 +105,7 @@ class SemanticLabeler:
                  TOKENIZER_MODEL = 'bert-base-uncased'
                  EMBEDDING_MODEL = 'bert-base-uncased'
              self.config = InternalLabelerConfig()
-
+        self.log_prefix = get_log_prefix(inspect.currentframe()) # Get log prefix for consistent logging
         # Determine device, defaulting to config.DEFAULT_DEVICE
         self.device = device or DEFAULT_DEVICE
         self.tokenizer = None
@@ -111,20 +114,20 @@ class SemanticLabeler:
 
         try:
             # Load Tokenizer specified in config
-            log_statement(loglevel=str("info"), logstatement=str(f"Loading tokenizer: {self.config.TOKENIZER_MODEL}"), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Loading tokenizer: {self.config.TOKENIZER_MODEL}", Path(__file__).stem)
             self.tokenizer = AutoTokenizer.from_pretrained(self.config.TOKENIZER_MODEL)
 
             # Load Model specified in config and move to device
-            log_statement(loglevel=str("info"), logstatement=str(f"Loading embedding model: {self.config.EMBEDDING_MODEL} onto device: {self.device}"), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Loading embedding model: {self.config.EMBEDDING_MODEL} onto device: {self.device}", Path(__file__).stem)
             self.model = AutoModel.from_pretrained(self.config.EMBEDDING_MODEL).to(self.device)
             self.model.eval() # Set model to evaluation mode is crucial
-            log_statement(loglevel=str("info"), logstatement=str("SemanticLabeler model and tokenizer loaded successfully."), main_logger=str(__name__))
+            log_statement('info', f"{self.log_prefix}:INFO>>SemanticLabeler model and tokenizer loaded successfully.", Path(__file__).stem)
 
             # Generate reference embeddings for known labels
             self._generate_reference_embeddings()
 
         except Exception as e:
-            log_statement(loglevel=str("critical"), logstatement=str(f"Failed to initialize SemanticLabeler model/tokenizer from Hugging Face: {e}", exc_info=True), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Failed to initialize SemanticLabeler model/tokenizer from Hugging Face: {e}", Path(__file__).stem, exc_info=True,)
             # Propagate error to prevent usage of partially initialized object
             raise RuntimeError(f"SemanticLabeler initialization failed: {e}")
 
@@ -140,12 +143,12 @@ class SemanticLabeler:
         """
         # Ensure component initialization succeeded
         if not self.tokenizer or not self.model:
-            log_statement(loglevel=str("error"), logstatement=str("Tokenizer or model not properly loaded. Cannot generate embedding."), main_logger=str(__name__))
+            log_statement('error', f"{self.log_prefix}:ERROR>>Tokenizer or model not properly loaded. Cannot generate embedding.", Path(__file__).stem)
             return None
         try:
             # Handle empty input text
             if not text:
-                 log_statement(loglevel=str("warning"), logstatement=str("Attempted to get embedding for empty text."), main_logger=str(__name__))
+                 log_statement('warning', f"{self.log_prefix}:WARNING>>Attempted to get embedding for empty text.", Path(__file__).stem)
                  return None
 
             # Tokenize text and prepare inputs for the model
@@ -169,7 +172,7 @@ class SemanticLabeler:
 
         except Exception as e:
             # Log any error during embedding generation
-            log_statement(loglevel=str("error"), logstatement=str(f"Failed to generate embedding for text '{text[:50]}...': {e}", exc_info=True), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Failed to generate embedding for text '{text[:50]}...': {e}", Path(__file__).stem, exc_info=True)
             return None
 
     def _generate_reference_embeddings(self):
@@ -177,7 +180,7 @@ class SemanticLabeler:
         Generates and stores reference embeddings for the predefined semantic labels.
         This method is called during initialization.
         """
-        log_statement(loglevel=str("info"), logstatement=str("Generating reference embeddings for predefined labels..."), main_logger=str(__name__))
+        log_statement('info', f"{self.log_prefix}:INFO>>Generating reference embeddings for predefined labels...", Path(__file__).stem)
         # Define descriptive text prompts for each known label
         # These descriptions aim to capture the essence of the labels.
         reference_texts = {
@@ -192,14 +195,14 @@ class SemanticLabeler:
             if embedding is not None:
                 # Store the generated embedding associated with its label
                 self.reference_embeddings[label] = embedding # Already on self.device
-                log_statement(loglevel=str("debug"), logstatement=str(f"Generated reference embedding for label: {label}"), main_logger=str(__name__))
+                log_statement('debug', f"{self.log_prefix}:DEBUG>>Generated reference embedding for label: {label}", Path(__file__).stem)
             else:
                 # Log error if embedding generation fails for a label
-                log_statement(loglevel=str("error"), logstatement=str(f"Failed to generate reference embedding for label: {label}. This label might not be assigned correctly."), main_logger=str(__name__))
+                log_statement('warning', f"{self.log_prefix}:WARNING>>Failed to generate reference embedding for label: {label}. This label might not be assigned correctly.", Path(__file__).stem)
 
         # Log a warning if no reference embeddings could be generated
         if not self.reference_embeddings:
-             log_statement(loglevel=str("warning"), logstatement=str("No reference embeddings were successfully generated. Labeling will likely default to 'unclassified'."), main_logger=str(__name__))
+             log_statement('warning', f"{self.log_prefix}:WARNING>>No reference embeddings were successfully generated. Labeling will likely default to 'unclassified'.", Path(__file__).stem)
 
     def generate_label(self, embedding: torch.Tensor) -> str:
         """
@@ -218,17 +221,17 @@ class SemanticLabeler:
         """
         # Check if model initialization was successful
         if self.model is None:
-             log_statement(loglevel=str("error"), logstatement=str("Model not loaded. Cannot generate label."), main_logger=str(__name__))
+             log_statement('error', f"{self.log_prefix}:ERROR>>Model not loaded. Cannot generate label.", Path(__file__).stem)
              return "error: model_not_loaded" # Return error string as observed in tests
 
         # Validate input type
         if not isinstance(embedding, torch.Tensor):
-            log_statement(loglevel=str("error"), logstatement=str(f"Invalid input type for embedding: {type(embedding)}. Expected torch.Tensor."), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Invalid input type for embedding: {type(embedding)}. Expected torch.Tensor.", Path(__file__).stem)
             return "error: invalid_input_type"
 
         # Check if reference embeddings are available
         if not self.reference_embeddings:
-            log_statement(loglevel=str("warning"), logstatement=str("No reference embeddings available for comparison. Returning 'unclassified'."), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>No reference embeddings available for comparison. Returning 'unclassified'.", Path(__file__).stem)
             return "unclassified" # Return "unclassified" as per test logic
 
         # Ensure input embedding is on the correct device and has the right shape
@@ -236,15 +239,15 @@ class SemanticLabeler:
              # Get expected embedding size from the loaded model's config
              expected_size = self.model.config.hidden_size
              if embedding.shape != (expected_size,):
-                  log_statement(loglevel=str("error"), logstatement=str(f"Input embedding has incorrect shape {embedding.shape}. Expected ({expected_size},)."), main_logger=str(__name__))
+                  log_statement('warning', f"{self.log_prefix}:WARNING>>Input embedding has incorrect shape {embedding.shape}. Expected ({expected_size},).", Path(__file__).stem)
                   return "error: incorrect_embedding_shape"
 
              embedding = embedding.to(self.device) # Move to the same device as reference embeddings
         except AttributeError:
-             log_statement(loglevel=str("error"), logstatement=str("Could not determine expected embedding size from model config."), main_logger=str(__name__))
+             log_statement('error', f"{self.log_prefix}:ERROR>>Could not determine expected embedding size from model config.", Path(__file__).stem)
              return "error: unknown_model_embedding_size"
         except Exception as e:
-             log_statement(loglevel=str("error"), logstatement=str(f"Failed to move input embedding to device {self.device} or validate shape: {e}"), main_logger=str(__name__))
+             log_statement('warning', f"{self.log_prefix}:WARNING>>Failed to move input embedding to device {self.device} or validate shape: {e}", Path(__file__).stem)
              return f"error: device_transfer_or_shape_error"
 
         best_label = "unclassified" # Default label
@@ -257,7 +260,7 @@ class SemanticLabeler:
                 # Both tensors must be on the same device and require unsqueezing for batch dimension
                 similarity = F.cosine_similarity(embedding.unsqueeze(0), ref_embedding.unsqueeze(0), dim=1)
                 similarity_score = similarity.item() # Extract float value
-                log_statement(loglevel=str("debug"), logstatement=str(f"Similarity score for label '{label}': {similarity_score:.4f}"), main_logger=str(__name__))
+                log_statement('debug', f"{self.log_prefix}:DEBUG>>Similarity score for label '{label}': {similarity_score:.4f}", Path(__file__).stem)
 
                 # Check if similarity exceeds threshold and is the best match so far
                 if similarity_score > self.config.SIMILARITY_THRESHOLD and similarity_score > max_similarity:
@@ -266,11 +269,11 @@ class SemanticLabeler:
 
             except Exception as e:
                 # Log error during similarity calculation but continue checking other labels
-                log_statement(loglevel=str("error"), logstatement=str(f"Error calculating similarity for label '{label}': {e}", exc_info=True), main_logger=str(__name__))
+                log_statement('warning', f"{self.log_prefix}:WARNING>>Error calculating similarity for label '{label}': {e}", Path(__file__).stem, exc_info=True)
                 # Don't return an error string here, let 'unclassified' be the fallback if all fail
 
         # Log the final decision and return the best label found (or default)
-        log_statement(loglevel=str("debug"), logstatement=str(f"Final determined label: {best_label} (Max Similarity: {max_similarity:.4f}, Threshold: {self.config.SIMILARITY_THRESHOLD})"), main_logger=str(__name__))
+        log_statement('debug', f"{self.log_prefix}:DEBUG>>Final determined label: {best_label} (Max Similarity: {max_similarity:.4f}, Threshold: {self.config.SIMILARITY_THRESHOLD})", Path(__file__).stem)
         return best_label
 
     def recursive_labeling(self, embeddings: List[torch.Tensor], depth: int = 0) -> List[str]:
@@ -288,13 +291,13 @@ class SemanticLabeler:
         """
         # Check recursion depth against the configured limit
         if depth >= self.config.MAX_RECURSION_DEPTH:
-            log_statement(loglevel=str("warning"), logstatement=str(f"Max recursion depth ({self.config.MAX_RECURSION_DEPTH}) reached at depth {depth}."), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Max recursion depth ({self.config.MAX_RECURSION_DEPTH}) reached at depth {depth}.", Path(__file__).stem)
             # Return the specific string expected by the test
             return ["max_depth_exceeded"] * len(embeddings)
 
         # Validate input type
         if not isinstance(embeddings, list):
-            log_statement(loglevel=str("error"), logstatement=str(f"Invalid input type for embeddings: {type(embeddings)}. Expected List[torch.Tensor]."), main_logger=str(__name__))
+            log_statement('warning', f"{self.log_prefix}:WARNING>>Invalid input type for embeddings: {type(embeddings)}. Expected List[torch.Tensor].", Path(__file__).stem)
             return ["error: invalid_input_type"] # Return list with error string
 
         labels = []
@@ -306,7 +309,7 @@ class SemanticLabeler:
             # Note: No actual recursive call logic here based on current tests/usage.
             # If label indicated a need for deeper analysis, recursive calls could be added here.
 
-        log_statement(loglevel=str("debug"), logstatement=str(f"Recursive labeling at depth {depth} finished processing {len(labels)} embeddings."), main_logger=str(__name__))
+        log_statement('debug', f"{self.log_prefix}:DEBUG>>Recursive labeling at depth {depth} finished processing {len(labels)} embeddings.", Path(__file__).stem)
         return labels # Return the list of generated labels
 
     # --- Optional: Validation Loop ---
@@ -318,7 +321,7 @@ class SemanticLabeler:
     #     with torch.no_grad():
     #         # ... forward pass, calculate loss ...
     #     avg_val_loss = total_val_loss / len(self.validation_loader)
-    #     log_statement(loglevel=str("info"), logstatement=str("f"Epoch {self.current_epoch} Validation Loss: {avg_val_loss:.4f}")
+    #     log_statement('info', f"{self.log_prefix}:INFO>>f"Epoch {self.current_epoch} Validation Loss: {avg_val_loss:.4f}")
     #     self.model.train() # Set back to training mode
     #     return avg_val_loss
 

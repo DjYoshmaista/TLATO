@@ -17,10 +17,22 @@ from pathlib import Path
 import pickle
 import zipfile
 # src/core/models.py
-from pydantic import BaseModel, RootModel, Field, HttpUrl, field_validator as validator
-from typing import Optional, List, Dict, Any, Union
-from datetime import datetime, timezone # Ensure timezone is imported
 from pathlib import Path
+from typing import Optional, Dict, List, Any, Union
+from datetime import datetime
+
+try:
+    # Try Pydantic v2 first
+    from pydantic import BaseModel, RootModel, HttpUrl, Field, ConfigDict, field_validator
+    PYDANTIC_V2 = True
+except ImportError:
+    # Fall back to Pydantic v1
+    from pydantic import BaseModel, Field, validator
+    PYDANTIC_V2 = False
+    # Create a dummy ConfigDict for v1 compatibility
+    ConfigDict = lambda **kwargs: None
+
+from datetime import datetime, timezone # Ensure timezone is imported
 from src.utils.logger import log_statement
 from src.data.constants import *
 from src.utils.config import *
@@ -52,7 +64,7 @@ class FileVersion(BaseModel):
 
     """Represents a specific version of a file in its application-level history."""
     # Ensure timestamps are correctly handled
-    @validator('timestamp_utc', mode='before', check_fields=True)
+    @field_validator('timestamp_utc', mode='before', check_fields=True)
     def ensure_timestamp_utc(cls, v):
         if isinstance(v, str):
             try:
@@ -104,32 +116,65 @@ class FileMetadataEntry(BaseModel):
     original_filename_if_compressed: Optional[str] = Field(None, description="Original filename if the stored file in the repository is a compressed version (e.g., 'data.csv' if 'data.csv.gz' is stored).")
     compression_type: Optional[str] = Field(None, description="Type of compression used on the file stored in the repository (e.g., 'gzip').")
 
-    @validator('filepath_relative', mode='before', check_fields=True)
+    @field_validator('filepath_relative', mode='before', check_fields=True)
     def normalize_filepath_relative(cls, v):
         if isinstance(v, str):
             return Path(v).as_posix() # Ensure POSIX-style separators
         return v
 
-    @validator('extension', mode='before', check_fields=True)
-    def set_extension_from_filename_or_filepath(cls, v, values, **kwargs):
-        if v: # If extension is explicitly provided
-            return v.lower().lstrip('.')
-        
-        filename = values.get('filename')
-        if filename:
-            ext = Path(filename).suffix
-            if ext:
-                return ext.lower().lstrip('.')
-        
-        # If no filename, try to derive from filepath_relative
-        filepath_relative = values.get('filepath_relative')
-        if filepath_relative:
-            ext = Path(filepath_relative).suffix
-            if ext:
-                return ext.lower().lstrip('.')
-        return None
+    if PYDANTIC_V2:
+        @field_validator('extension', mode='before')
+        @classmethod
+        def set_extension_from_filename_or_filepath(cls, v, info):
+            """Set extension from filename or filepath if extension is not provided."""
+            if v:  # If extension is already provided, use it
+                return v
+            
+            # Get the data from ValidationInfo object (Pydantic v2)
+            data = info.data if hasattr(info, 'data') else {}
+            
+            # Try to extract extension from filename first
+            filename = data.get('filename')
+            if filename:
+                ext = Path(filename).suffix.lower().lstrip('.')
+                if ext:
+                    return ext
+            
+            # Try to extract extension from filepath_relative
+            filepath_relative = data.get('filepath_relative')
+            if filepath_relative:
+                ext = Path(filepath_relative).suffix.lower().lstrip('.')
+                if ext:
+                    return ext
+            
+            # Return empty string if no extension found
+            return ''
+    else:
+        @validator('extension', pre=True, always=True)
+        @classmethod
+        def set_extension_from_filename_or_filepath(cls, v, values):
+            """Set extension from filename or filepath if extension is not provided."""
+            if v:  # If extension is already provided, use it
+                return v
+            
+            # Try to extract extension from filename first
+            filename = values.get('filename')
+            if filename:
+                ext = Path(filename).suffix.lower().lstrip('.')
+                if ext:
+                    return ext
+            
+            # Try to extract extension from filepath_relative
+            filepath_relative = values.get('filepath_relative')
+            if filepath_relative:
+                ext = Path(filepath_relative).suffix.lower().lstrip('.')
+                if ext:
+                    return ext
+            
+            # Return empty string if no extension found
+            return ''
 
-    @validator('filename', mode='before', check_fields=True)
+    @field_validator('filename', mode='before', check_fields=True)
     def set_filename_from_filepath(cls, v, values, **kwargs):
         if v: # If filename is explicitly provided
             return v
@@ -139,7 +184,7 @@ class FileMetadataEntry(BaseModel):
         return None
 
     # Universal validator for all datetime fields to ensure they are UTC and correctly parsed/set
-    @validator('os_last_modified_utc', 'os_created_utc', 'date_added_to_metadata_utc', 
+    @field_validator('os_last_modified_utc', 'os_created_utc', 'date_added_to_metadata_utc', 
                'last_metadata_update_utc', # 'last_processing_date_utc' (if added back)
                mode='before', check_fields=True)
     def ensure_datetime_utc(cls, v):

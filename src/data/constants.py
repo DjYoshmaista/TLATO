@@ -10,9 +10,9 @@ dotenv.load_dotenv()
 VER_NO = '1.000a'
 
 # Project Name
-PROJECT_NAME = "TLATO41"
+PROJECT_NAME = "TLATOv001a"
 # Project Description
-PROJECT_DESCRIPTION = "TLATO41 is a data repository and processing system designed to handle large datasets efficiently."
+PROJECT_DESCRIPTION = "TLATOv001a is a data repository and processing system designed to handle large datasets efficiently."
 # Project Author
 PROJECT_AUTHOR = "Yoshmaista"
 # Project Author Email
@@ -31,6 +31,8 @@ DISK_SPACE_FREE = os.statvfs('/').f_frsize * os.statvfs('/').f_bavail / (1024. *
 DISK_SPACE_USED = os.statvfs('/').f_frsize * (os.statvfs('/').f_blocks - os.statvfs('/').f_bavail) / (1024. ** 3) # in GB
 # Disk Space Total
 DISK_SPACE_TOTAL = os.statvfs('/').f_frsize * os.statvfs('/').f_blocks / (1024. ** 3) # in GB
+
+BASE_DATA_DIR = Path(__file__).parent.parent.parent / "data"  # Adjust based on project structure
 
 # src/data/constants.py
 # Default .gitignore content
@@ -212,12 +214,12 @@ _project_folder_str = os.getenv("TLATO41DIR")
 if not _project_folder_str:
     raise ValueError("Environment variable TLATO41DIR is not set.")
 PROJECT_FOLDER = Path(_project_folder_str)
-REPO_DIR = f"{_project_folder_str}src/data/repositories"
+REPO_DIR = Path(f"{_project_folder_str}/data/repositories/")
 MAIN_REPO_FILENAME = "main_repository.csv.zst"
 PROCESSED_REPO_FILENAME = "processed_repository.csv.zst"
 TOKENIZED_REPO_FILENAME = "tokenized_repository.csv.zst"
 DATALOADER_METADATA_FILENAME = "dataloader_metadata.json.zst" # Example for DataLoader info
-DATA_REPO_DIR = REPO_DIR + "data_repository"
+DATA_REPO_DIR = REPO_DIR / "data_repository"
 LOG_DIR = PROJECT_FOLDER / "logs"
 STATE_DIR = PROJECT_FOLDER / "states"
 GITIGNORE_FILENAME = PROJECT_FOLDER / ".gitignore"
@@ -246,6 +248,8 @@ METADATA_FILENAME = "metadata.json.zst"
 # --- Core File Metadata ---
 COL_FILEPATH = 'filepath'         # Absolute path to the original file
 COL_FILENAME = 'filename'       # Just the file name
+COL_PROCESSED_FILENAME = 'proc_filename' # Filename of processed file
+COL_TOKENIZED_FILENAME = 'tok_filename' # Filename of the tokenized file
 COL_SIZE = 'size_bytes'         # File size in bytes
 COL_MTIME = 'mtime_ts'          # Modification timestamp (float seconds since epoch)
 COL_CTIME = 'ctime_ts'          # Creation timestamp (float seconds since epoch)
@@ -272,12 +276,12 @@ HASH_SHA1 = "sha1"
 # Default list of hash algorithms to calculate for the 'custom_hashes' field in metadata
 DEFAULT_CONTENT_HASH_ALGORITHMS = [HASH_MD5, HASH_SHA256] 
 # General list of supported algorithms by the hashing utilities (broader than what's stored in metadata by default)
-SUPPORTED_HASH_ALGORITHMS = [HASH_MD5, HASH_SHA1, HASH_SHA256, "sha512", "blake2b", "ed25591"] # Example
-SUPPORTED_HASH_TYPES_FOR_CUSTOM = ["md5", "sha256", "sha1", "sha512", "blake2b", "ed25591"] # Align with what your hashing utility produces
+SUPPORTED_HASH_ALGORITHMS = [HASH_MD5, HASH_SHA1, HASH_SHA256, "sha512", "blake2b", "blake2s", "sha3_256", "sha3_512"] # Example
+SUPPORTED_HASH_TYPES_FOR_CUSTOM = SUPPORTED_HASH_ALGORITHMS
 HASH_BUFFER_SIZE = 65536  # 64k buffer
-DEFAULT_HASH_ALGORITHM = HASH_SHA1
+DEFAULT_HASH_ALGORITHM = HASH_SHA256
 
-ROOT_DIR = os.getenv("TLATO41ROOTDIR")
+ROOT_DIR = os.getenv("TLATO41ROOTDIR") or Path(os.getcwd()).parent.parent
 
 # --- Optional/Additional Metadata (Add if used) ---
 COL_DESIGNATION = 'designation'     # Unique integer ID (if needed)
@@ -380,9 +384,12 @@ STATUS_PROCESSING = "processing"   # File sent for processing
 STATUS_PROCESSED = "processed"    # File processing complete
 STATUS_TOKENIZING = "tokenizing"   # File sent for tokenization
 STATUS_TOKENIZED = "tokenized"    # File tokenization complete
+STATUS_FAILED = "failed"
 STATUS_ERROR = "error"        # Error occurred during processing/hashing/tokenization
 STATUS_DISCOVERED = "discovered"     # Or use 'discovered' if loading isn't a distinct step
 STATUS_MISSING = "missing"
+STATUS_DELETED = 'deleted'  # File was deleted from the repository
+STATUS_ARCHIVED = 'archived'  # File was archived in the repository
 
 # --- Data Classification Types ---
 # These constants represent the classified nature of the data content
@@ -390,9 +397,13 @@ TYPE_TEXTUAL = "TEXTUAL"           # Primarily natural language text
 TYPE_NUMERICAL = "NUMERICAL"         # Primarily structured numerical data (tabular)
 TYPE_TOKENIZED_NUMERICAL = "TOKENIZED_NUM" # Data resembling numerical tensors/vectors post-tokenization
 TYPE_TOKENIZED_SUBWORD = "TOKENIZED_SUB" # Data resembling subword/text tokens post-tokenization
+TYPE_JSONL = "JSONL"
 TYPE_TOKENIZED_JSONL = "TOKENIZED_JSONL" # Data resembling JSONL tokens post-tokenization" \
+TYPE_CSV = "CSV"
 TYPE_TOKENIZED_CSV = "TOKENIZED_CSV" # Data resembling CSV tokens post-tokenization
+TYPE_XML = "XML"
 TYPE_TOKENIZED_XML = "TOKENIZED_XML" # Data resembling XML tokens post-tokenization
+TYPE_TEXT = "TEXT"
 TYPE_TOKENIZED_TEXT = "TOKENIZED_TEXT" # Data resembling text tokens post-tokenization
 TYPE_UNKNOWN = "UNKNOWN"           # Could not reliably classify
 TYPE_EMPTY = "EMPTY"             # File was read but contained no usable data

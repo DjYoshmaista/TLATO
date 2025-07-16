@@ -6,7 +6,7 @@ import os
 import io
 import shutil
 from pathlib import Path
-from typing import Optional, Any, List, Union
+from typing import Optional, Any, List, Union, Dict
 from src.data.constants import *
 from src.utils.logger import log_statement
 
@@ -27,7 +27,6 @@ def det_ext(filepath: str) -> str:
         String indicating the type of file based on extension
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     _, ext = os.path.splitext(filepath)
     ext = ext.lower()
     
@@ -56,7 +55,6 @@ def parse_filename(filepath: Union[str, Path]) -> str:
         The basename of the filepath
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
 
     # Convert to string if it's a Path object
     if isinstance(filepath, Path):
@@ -76,7 +74,6 @@ def separate_filename_ext(filename: str) -> tuple:
         Tuple of (base_filename, extension)
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     base, ext = os.path.splitext(filename)
     return base, ext.lower()
 
@@ -94,7 +91,6 @@ def check_filename(input_filepath: str, output_filepath: str, filetype: Optional
         List containing processed filename
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     if not isinstance(input_filepath, str):
         return [os.path.basename(str(input_filepath))]
     
@@ -121,7 +117,6 @@ def set_filename(input_filename: Optional[str] = None, input_filepath: Any = Non
         Complete path for the output file
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
 
     # Determine extension based on input type
     if isinstance(input_filepath, str):
@@ -181,7 +176,6 @@ def compress_files(file_list: List[Union[str, Path]], output_dir: str, compressi
     -->Initialize action scope tracker
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
 
     action_scope = {
         'action': None,
@@ -252,7 +246,6 @@ def overwrite_query(compression: str, remove_original: bool, filepath: str) -> t
             scope: Scope of the action: 'single', 'folder', 'all', 'none_folder', 'none_all'
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     while True:
         print(f"Processing file: {os.path.basename(filepath)}")
         answer = input(f"Output file exists. Options:\n"
@@ -307,7 +300,6 @@ def compress_file(input_filepath: Any, output_filepath: str, compression: Option
         action_scope is the updated action_scope dictionary
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     temp_csv = None
     
     # Initialize action_scope if not provided
@@ -456,39 +448,271 @@ def compress_file(input_filepath: Any, output_filepath: str, compression: Option
             except OSError:
                 pass
 
+def _load_compressed_csv(filepath: Path) -> Optional[pd.DataFrame]:
+    """Load DataFrame from zstd compressed CSV"""
+    try:
+        dctx = zstd.ZstdDecompressor()
+        with open(filepath, 'rb') as f:
+            with dctx.stream_reader(f) as reader:
+                text_stream = io.TextIOWrapper(reader, encoding='utf-8')
+                df = pd.read_csv(text_stream)
+        return df
+    except Exception as e:
+        log_statement('error', f"Error loading compressed CSV: {e}", __file__)
+        return None
+
+def compress_dataframe(df: pd.DataFrame, 
+                      output_filepath: Union[str, Path],
+                      compression: str = 'zstd',
+                      compression_level: int = 3) -> bool:
+    """
+    Compress a pandas DataFrame to a file.
+    
+    Args:
+        df: The DataFrame to compress
+        output_filepath: Path where the compressed file will be saved
+        compression: Type of compression ('zstd', 'gzip')
+        compression_level: Compression level (1-22 for zstd, 1-9 for gzip)
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    global LOG_INS
+    try:
+        output_path = Path(output_filepath)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Convert DataFrame to CSV string
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_data = csv_buffer.getvalue().encode('utf-8')
+        
+        if compression == 'zstd':
+            # Use zstandard compression
+            cctx = zstd.ZstdCompressor(level=compression_level)
+            compressed_data = cctx.compress(csv_data)
+            
+            with open(output_path, 'wb') as f:
+                f.write(compressed_data)
+                
+        elif compression == 'gzip':
+            # Use gzip compression
+            with gzip.open(output_path, 'wb', compresslevel=compression_level) as f:
+                f.write(csv_data)
+        else:
+            # No compression, just save as CSV
+            df.to_csv(output_path, index=False)
+            
+        log_statement('info', f"{LOG_INS}:INFO>>Successfully compressed DataFrame to {output_path} using {compression}", Path(__file__).stem)
+        return True
+        
+    except Exception as e:
+        log_statement('error', f"{LOG_INS}:ERROR>>Failed to compress DataFrame to {output_filepath}: {e}", Path(__file__).stem)
+        return False
+
+def decompress_dataframe(input_filepath: Union[str, Path],
+                        compression: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """
+    Decompress a file and load it as a pandas DataFrame.
+    
+    Args:
+        input_filepath: Path to the compressed file
+        compression: Type of compression ('zstd', 'gzip'). If None, infers from extension.
+    
+    Returns:
+        pd.DataFrame or None if failed
+    """
+    global LOG_INS
+    try:
+        input_path = Path(input_filepath)
+        
+        if not input_path.exists():
+            log_statement('error', f"{LOG_INS}:ERROR>>File not found: {input_path}", Path(__file__).stem)
+            return None
+            
+        # Infer compression type from extension if not specified
+        if compression is None:
+            if input_path.suffix == '.zst':
+                compression = 'zstd'
+            elif input_path.suffix == '.gz':
+                compression = 'gzip'
+            else:
+                compression = 'none'
+                
+        if compression == 'zstd':
+            # Decompress zstandard
+            with open(input_path, 'rb') as f:
+                dctx = zstd.ZstdDecompressor()
+                decompressed_data = dctx.decompress(f.read())
+                
+            # Convert bytes to DataFrame
+            csv_buffer = io.StringIO(decompressed_data.decode('utf-8'))
+            df = pd.read_csv(csv_buffer)
+            
+        elif compression == 'gzip':
+            # Decompress gzip and read directly
+            with gzip.open(input_path, 'rt', encoding='utf-8') as f:
+                df = pd.read_csv(f)
+        else:
+            # No compression, read as regular CSV
+            df = pd.read_csv(input_path)
+
+        log_statement('info', f"{LOG_INS}:INFO>>Successfully decompressed DataFrame from {input_path}", Path(__file__).stem)
+        return df
+        
+    except Exception as e:
+        log_statement('error', f"{LOG_INS}:ERROR>>Failed to decompress DataFrame from {input_filepath}: {e}", Path(__file__).stem)
+        return None
+
+def _save_compressed_csv(df: pd.DataFrame, filepath: Path):
+    """Save DataFrame as zstd compressed CSV"""
+    # Prepare DataFrame for CSV serialization
+    global LOG_INS
+    df_to_save = df.copy()
+    
+    # Convert timestamps to strings
+    for col in TIMESTAMP_COLUMNS:
+        if col in df_to_save.columns:
+            df_to_save[col] = df_to_save[col].apply(
+                lambda x: x.isoformat() if pd.notna(x) else ''
+            )
+    
+    # Convert to CSV string
+    csv_buffer = io.StringIO()
+    df_to_save.to_csv(csv_buffer, index=False)
+    csv_data = csv_buffer.getvalue().encode('utf-8')
+    
+    # Compress and write
+    cctx = zstd.ZstdCompressor(level=COMPRESSION_LEVEL)
+    with open(filepath, 'wb') as f:
+        f.write(cctx.compress(csv_data))
+
+def decompress_file(input_filepath: Union[str, Path],
+                   output_filepath: Optional[Union[str, Path]] = None,
+                   remove_original: bool = False,
+                   dec_to_df: bool = False) -> Optional[Union[pd.DataFrame, Dict, str, bool]]:
+    """
+    Generic decompression function.
+    
+    Args:
+        input_filepath: Path to compressed file
+        output_filepath: Where to save decompressed file (if not dec_to_df)
+        remove_original: Whether to remove the compressed file after decompression
+        dec_to_df: If True, returns DataFrame directly instead of saving to file
+    
+    Returns:
+        DataFrame if dec_to_df=True, dict if JSON, True/False for file operations
+    """
+    try:
+        input_path = Path(input_filepath)
+        
+        # Check if it's a DataFrame file (CSV compressed)
+        if input_path.name.endswith('.csv.zst') or input_path.name.endswith('.csv.gz'):
+            if dec_to_df:
+                return decompress_dataframe(input_filepath)
+            else:
+                # Decompress to file
+                df = decompress_dataframe(input_filepath)
+                if df is not None and output_filepath:
+                    df.to_csv(output_filepath, index=False)
+                    if remove_original:
+                        input_path.unlink()
+                    return True
+                return False
+                
+        # Add handlers for other file types as needed
+        log_statement("warning", f"{LOG_INS}:WARNING>>Unsupported file type for decompression: {input_path}", Path(__file__).stem)
+        return None
+        
+    except Exception as e:
+        log_statement("error", f"{LOG_INS}:ERROR>>Failed to decompress file {input_filepath}: {e}", Path(__file__).stem)
+        return None
+
+def compress_json(json_str: str,
+                 output_filepath: Union[str, Path],
+                 compression: str = 'zstd') -> bool:
+    """Compress JSON string to file."""
+    try:
+        output_path = Path(output_filepath)
+        json_bytes = json_str.encode('utf-8')
+        
+        if compression == 'zstd':
+            cctx = zstd.ZstdCompressor()
+            compressed = cctx.compress(json_bytes)
+            with open(output_path, 'wb') as f:
+                f.write(compressed)
+        elif compression == 'gzip':
+            with gzip.open(output_path, 'wb') as f:
+                f.write(json_bytes)
+        else:
+            with open(output_path, 'w') as f:
+                f.write(json_str)
+        return True
+    except Exception as e:
+        log_statement("error", f"{LOG_INS}:ERROR>>Failed to compress JSON: {e}", Path(__file__).stem)
+        return False
+
+def compress_file_path(source_path: Union[str, Path],
+                      output_filepath: Union[str, Path],
+                      compression: str = 'zstd',
+                      remove_original: bool = False) -> bool:
+    """Compress a file from disk."""
+    try:
+        source = Path(source_path)
+        if not source.exists():
+            log_statement("error", f"{LOG_INS}:ERROR>>Source file not found: {source}", Path(__file__).stem)
+            return False
+            
+        with open(source, 'rb') as f:
+            data = f.read()
+            
+        if compression == 'zstd':
+            cctx = zstd.ZstdCompressor()
+            compressed = cctx.compress(data)
+            with open(output_filepath, 'wb') as f:
+                f.write(compressed)
+        elif compression == 'gzip':
+            with gzip.open(output_filepath, 'wb') as f:
+                f.write(data)
+                
+        if remove_original:
+            source.unlink()
+            
+        return True
+    except Exception as e:
+        log_statement("error", f"{LOG_INS}:ERROR>>Failed to compress file {source_path}: {e}", Path(__file__).stem)
+        return False
+
 def compress_file_gzip(source_path: Path, destination_path: Path, remove_original: bool = False, compresslevel: int = 9) -> bool:
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     try:
         with open(source_path, 'rb') as f_in:
             with gzip.open(destination_path, 'wb', compresslevel=compresslevel) as f_out:
                 shutil.copyfileobj(f_in, f_out)
         if remove_original:
             source_path.unlink()
-            log_statement("info", f"{LOG_INS}:INFO>>Successfully gzipped {source_path} to {destination_path}")
+            log_statement("info", f"{LOG_INS}:INFO>>Successfully gzipped {source_path} to {destination_path}", Path(__file__).stem)
         return True
     except Exception as e:
-        log_statement("error", f"{LOG_INS}:ERROR>>Failed to gzip {source_path}: {e}", exc_info=True)
+        log_statement("error", f"{LOG_INS}:ERROR>>Failed to gzip {source_path}: {e}", Path(__file__).stem, exc_info=True)
         if destination_path.exists(): # Cleanup partial file
             destination_path.unlink(missing_ok=True)
         return False
 
 def decompress_gzip_content(gzipped_content: bytes) -> bytes:
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     try:
         decompressed_bytes = gzip.decompress(gzipped_content)
         log_statement("info", f"{LOG_INS}:INFO>>Successfully decompressed gzip content in memory.")
         return decompressed_bytes
     except Exception as e:
-        log_statement("error", f"{LOG_INS}:ERROR>>Failed to decompress gzip content: {e}", exc_info=True)
+        log_statement("error", f"{LOG_INS}:ERROR>>Failed to decompress gzip content: {e}", Path(__file__).stem, exc_info=True)
         raise # Re-raise or return None/empty bytes
 
 
 def decompress_file(input_filepath: str, output_filepath: str, remove_original: Optional[bool] = False, compression: Optional[str] = None, decompresslevel: Optional[int] = 22, dec_to_df: Optional[bool] = False, dec_to_json: Optional[bool] = False):
     """Decompresses a zstandard file."""
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     try:
         if input_filepath.endswith('.zst') or input_filepath.endswith('.zstd'):
             dctx = zstd.ZstdDecompressor()
@@ -561,7 +785,6 @@ def stream_decompress_lines(input_filepath: str, encoding='utf-8'):
     Handles potential decompression errors during iteration.
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     try:
         with open(input_filepath, 'rb') as fh:
             dctx = zstd.ZstdDecompressor()
@@ -590,7 +813,6 @@ def stream_compress_lines(output_filepath: str, lines_generator, encoding='utf-8
     Compresses lines from a generator into a zstandard file using streaming.
     """
     global LOG_INS
-    LOG_INS += f"{inspect.currentframe().f_code.co_name}:{inspect.currentframe().f_lineno}:"
     try:
         with open(output_filepath, 'wb') as fh:
             cctx = zstd.ZstdCompressor(level=ZSTD_COMPRESSION_LEVEL, threads=ZSTD_THREADS)
